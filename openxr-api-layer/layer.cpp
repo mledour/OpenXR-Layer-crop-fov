@@ -163,7 +163,17 @@ namespace openxr_api_layer {
                 return XR_ERROR_VALIDATION_FAILURE;
             }
 
-            OpenXrApi::xrCreateInstance(createInfo);
+            const XrResult result = OpenXrApi::xrCreateInstance(createInfo);
+            if (XR_FAILED(result)) {
+                TraceLoggingWrite(g_traceProvider,
+                                  "xrCreateInstance_Failed",
+                                  TLArg(xr::ToCString(result), "Result"),
+                                  TLArg(createInfo->applicationInfo.applicationName, "ApplicationName"));
+                Log(fmt::format("xrCreateInstance failed for {}: {}\n",
+                                 createInfo->applicationInfo.applicationName,
+                                 xr::ToCString(result)));
+                return result;
+            }
 
             TraceLoggingWrite(g_traceProvider,
                               "xrCreateInstance",
@@ -177,7 +187,7 @@ namespace openxr_api_layer {
 
             if (m_bypassApiLayer) {
                 Log(fmt::format("{} layer will be bypassed\n", LayerName));
-                return XR_SUCCESS;
+                return result;
             }
 
             for (uint32_t i = 0; i < createInfo->enabledApiLayerCount; i++) {
@@ -202,7 +212,7 @@ namespace openxr_api_layer {
             // Load crop configuration.
             m_config = openxr_api_layer::loadConfig(localAppData);
 
-            return XR_SUCCESS;
+            return result;
         }
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrGetSystem
