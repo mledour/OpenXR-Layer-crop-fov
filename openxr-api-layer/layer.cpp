@@ -388,13 +388,44 @@ namespace openxr_api_layer {
                 snapshot.next = nullptr;
 
                 std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
-                m_swapchainInfoMap[*swapchain] = snapshot;
+                m_swapchainInfoMap[*swapchain] = SwapchainEntry{session, snapshot};
 
                 Log(fmt::format("Swapchain created: {}x{} format={}\n",
                                  createInfo->width, createInfo->height, createInfo->format));
                 TraceLoggingWrite(g_traceProvider,
                                   "xrCreateSwapchain",
                                   TLXArg(*swapchain, "Swapchain"));
+            }
+
+            return result;
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrDestroySession
+        XrResult xrDestroySession(XrSession session) override {
+            TraceLoggingWrite(g_traceProvider, "xrDestroySession", TLXArg(session, "Session"));
+
+            const XrResult result = OpenXrApi::xrDestroySession(session);
+            if (XR_SUCCEEDED(result)) {
+                // Per the spec, the app is supposed to destroy every swapchain
+                // before destroying the session, but buggy apps skip this and
+                // some runtimes also invalidate swapchains implicitly without
+                // routing xrDestroySwapchain through the layer chain. Purge any
+                // entries we still hold for this session so a handle reused by
+                // the runtime for a later session cannot collide.
+                std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
+                size_t erased = 0;
+                for (auto it = m_swapchainInfoMap.begin(); it != m_swapchainInfoMap.end(); ) {
+                    if (it->second.session == session) {
+                        it = m_swapchainInfoMap.erase(it);
+                        ++erased;
+                    } else {
+                        ++it;
+                    }
+                }
+                if (erased > 0) {
+                    Log(fmt::format("xrDestroySession: purged {} orphan swapchain entr{}\n",
+                                     erased, erased == 1 ? "y" : "ies"));
+                }
             }
 
             return result;
@@ -444,7 +475,7 @@ namespace openxr_api_layer {
                             std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
                             auto it = m_swapchainInfoMap.find(view.subImage.swapchain);
                             if (it != m_swapchainInfoMap.end()) {
-                                swapInfo = it->second;
+                                swapInfo = it->second.createInfo;
                             }
                         }
 
@@ -505,7 +536,15 @@ namespace openxr_api_layer {
         // Crop layer state.
         CropConfig m_config;
         bool m_fovLogged{false};
-        std::unordered_map<XrSwapchain, XrSwapchainCreateInfo> m_swapchainInfoMap;
+
+        // We keep the owning session alongside the createInfo so that when a
+        // session is destroyed we can purge its swapchains without walking
+        // every app handle.
+        struct SwapchainEntry {
+            XrSession session;
+            XrSwapchainCreateInfo createInfo;
+        };
+        std::unordered_map<XrSwapchain, SwapchainEntry> m_swapchainInfoMap;
         std::mutex m_swapchainMapMutex;
     };
 
