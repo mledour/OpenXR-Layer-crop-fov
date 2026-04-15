@@ -55,6 +55,23 @@ jobs:
       - name: Restore NuGet packages
         run: nuget restore "${{ env.SOLUTION }}"
 
+      # Expose the release version to MSBuild's pre-build script
+      # (scripts\Generate-VersionRc.ps1) so the VERSIONINFO resource baked
+      # into the DLL matches the git tag that triggered this build. For
+      # non-tag pushes we fall back to a synthetic dev version that still
+      # carries the commit SHA for crash-dump triage.
+      - name: Compute layer version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -match '^refs/tags/v(\d+\.\d+\.\d+.*)$') {
+            $version = $matches[1]
+          } else {
+            $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+            $version = "0.0.0-dev-$shortSha"
+          }
+          Write-Host "LAYER_VERSION=$version"
+          "LAYER_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Build ${{ matrix.configuration }} | x64
         run: >-
           msbuild "${{ env.SOLUTION }}"

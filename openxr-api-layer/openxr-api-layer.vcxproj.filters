@@ -94,5 +94,13 @@
     <None Include="openxr-api-layer-32.json" />
     <None Include="packages.config" />
     <None Include="module.def" />
+    <None Include="openxr-api-layer.rc.in">
+      <Filter>Source Files</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="openxr-api-layer.rc">
+      <Filter>Source Files</Filter>
+    </ResourceCompile>
   </ItemGroup>
 </Project>

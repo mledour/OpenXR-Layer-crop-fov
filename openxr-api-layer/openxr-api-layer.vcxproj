@@ -135,10 +135,11 @@ copy $(SolutionDir)\scripts\Uninstall-Layer.ps1 $(OutDir)
       </Message>
     </PreLinkEvent>
     <PreBuildEvent>
-      <Command>python $(ProjectDir)\framework\dispatch_generator.py</Command>
+      <Command>python $(ProjectDir)\framework\dispatch_generator.py
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)</Command>
     </PreBuildEvent>
     <PreBuildEvent>
-      <Message>Generating layer dispatcher...</Message>
+      <Message>Generating layer dispatcher and version RC...</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -179,10 +180,11 @@ copy $(SolutionDir)\scripts\Uninstall-Layer32.ps1 $(OutDir)
       </Message>
     </PreLinkEvent>
     <PreBuildEvent>
-      <Command>python $(ProjectDir)\framework\dispatch_generator.py</Command>
+      <Command>python $(ProjectDir)\framework\dispatch_generator.py
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)</Command>
     </PreBuildEvent>
     <PreBuildEvent>
-      <Message>Generating layer dispatcher...</Message>
+      <Message>Generating layer dispatcher and version RC...</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -227,10 +229,11 @@ copy $(SolutionDir)\scripts\Uninstall-Layer.ps1 $(OutDir)
       </Message>
     </PreLinkEvent>
     <PreBuildEvent>
-      <Command>python $(ProjectDir)\framework\dispatch_generator.py</Command>
+      <Command>python $(ProjectDir)\framework\dispatch_generator.py
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)</Command>
     </PreBuildEvent>
     <PreBuildEvent>
-      <Message>Generating layer dispatcher...</Message>
+      <Message>Generating layer dispatcher and version RC...</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -275,10 +278,11 @@ copy $(SolutionDir)\scripts\Uninstall-Layer32.ps1 $(OutDir)
       </Message>
     </PreLinkEvent>
     <PreBuildEvent>
-      <Command>python $(ProjectDir)\framework\dispatch_generator.py</Command>
+      <Command>python $(ProjectDir)\framework\dispatch_generator.py
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)</Command>
     </PreBuildEvent>
     <PreBuildEvent>
-      <Message>Generating layer dispatcher...</Message>
+      <Message>Generating layer dispatcher and version RC...</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -312,11 +316,18 @@ copy $(SolutionDir)\scripts\Uninstall-Layer32.ps1 $(OutDir)
     <ClCompile Include="utils\input.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Generated at pre-build by scripts\Generate-VersionRc.ps1 from the
+         adjacent openxr-api-layer.rc.in template. The generated file is in
+         .gitignore; do not edit it by hand. -->
+    <ResourceCompile Include="openxr-api-layer.rc" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include="framework\dispatch_generator.py" />
     <None Include="framework\layer_apis.py" />
     <None Include="module.def" />
     <None Include="packages.config" />
     <None Include="openxr-api-layer-32.json" />
+    <None Include="openxr-api-layer.rc.in" />
     <None Include="openxr-api-layer.json">
       <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DeploymentContent>
       <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</DeploymentContent>

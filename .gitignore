@@ -8,3 +8,7 @@ bin/
 *.pyc
 *.vcxproj.user
 *.csproj.user
+
+# Generated at pre-build by scripts\Generate-VersionRc.ps1 from the
+# openxr-api-layer.rc.in template. Do not commit.
+openxr-api-layer/openxr-api-layer.rc
