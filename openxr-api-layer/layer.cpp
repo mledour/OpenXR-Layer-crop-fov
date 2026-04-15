@@ -179,6 +179,18 @@ namespace openxr_api_layer {
                               TLArg(createInfo->createFlags, "CreateFlags"));
             Log(fmt::format("Application: {}\n", createInfo->applicationInfo.applicationName));
 
+            // The singleton OpenXrLayer outlives a single XrInstance in some
+            // scenarios (notably the CTS, which creates and destroys instances
+            // back to back). If the previous instance left entries behind
+            // (e.g. app skipped xrDestroySession, or the runtime tore things
+            // down out of band) a handle value could be reused by the runtime
+            // for this new instance and collide. Start every instance with a
+            // clean map.
+            {
+                std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
+                m_swapchainInfoMap.clear();
+            }
+
             // Load crop configuration. If the user has disabled the layer via
             // settings.json, flip to bypass so xrGetInstanceProcAddr returns the
             // downstream proc addresses verbatim and our overrides are skipped.
