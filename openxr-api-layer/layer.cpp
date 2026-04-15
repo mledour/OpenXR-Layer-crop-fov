@@ -463,6 +463,12 @@ namespace openxr_api_layer {
                         projLayer->views, projLayer->views + projLayer->viewCount);
 
                     for (auto& view : views) {
+                        // Capture the app's rendered FOV BEFORE we narrow it.
+                        // computeCroppedImageRect needs the rendered FOV (not
+                        // the soon-to-be-submitted one) to know how pixels
+                        // map to tan-space on the existing swapchain.
+                        const XrFovf renderedFov = view.fov;
+
                         // Look up swapchain dimensions.
                         XrSwapchainCreateInfo swapInfo{};
                         {
@@ -474,15 +480,15 @@ namespace openxr_api_layer {
                         }
 
                         if (swapInfo.width > 0 && swapInfo.height > 0) {
-                            const XrRect2Di cropped =
-                                computeCroppedImageRect(swapInfo.width, swapInfo.height, m_config);
+                            const XrRect2Di cropped = computeCroppedImageRect(
+                                swapInfo.width, swapInfo.height, renderedFov, m_config);
                             if (cropped.extent.width > 0 && cropped.extent.height > 0) {
                                 view.subImage.imageRect = cropped;
                             }
                         }
 
                         // Adjust the FOV in the projection view to match the crop.
-                        view.fov = narrowFov(view.fov, m_config);
+                        view.fov = narrowFov(renderedFov, m_config);
                     }
 
                     modifiedViewsArrays.push_back(std::move(views));

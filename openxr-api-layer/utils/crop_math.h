@@ -27,6 +27,7 @@
 // be pulled into a standalone test binary that doesn't link the layer DLL.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 #include <openxr/openxr.h>
@@ -95,31 +96,78 @@ namespace openxr_api_layer {
     }
 
     // Computes the sub-image rect inside a rendered swapchain that matches
-    // the FOV crop: half the crop is taken from each side, so a 10% left
-    // factor (= 0.90) yields a 5% offset on the left edge. Returns a zero
-    // rect if the resulting area would be non-positive on either axis; the
-    // caller should skip the assignment in that case.
+    // the FOV crop. Returns a zero rect if the area would be non-positive on
+    // either axis (caller should skip the assignment in that case).
+    //
+    // `renderedFov` is the FOV the app used when rendering its swapchain,
+    // i.e. the value in XrCompositionLayerProjectionView::fov at xrEndFrame
+    // time BEFORE this layer narrows it further. We need it because pixels
+    // on the swapchain are uniformly distributed in the projection plane
+    // (tan-space), NOT in angle-space. For VR-sized half-FOVs (45-55°) the
+    // non-linearity of tan is large enough that a linear-in-angle mapping
+    // drifts the rect by tens of pixels per edge.
+    //
+    // Pipeline recap: the app rendered to the whole swapchain with
+    // renderedFov. We're about to submit with renderedFov * cropFactor (per
+    // side), which is a narrower sub-FOV. We need to tell the runtime WHICH
+    // pixels on the swapchain correspond to that narrower FOV. That
+    // sub-region is the image of `renderedFov * cropFactor` under the
+    // perspective projection that the app used — hence the tan().
     //
     // The "+ 0.5f then static_cast" pattern is round-half-up. Float factors
     // like 0.8f are not exact in IEEE 754 (they're ~0.80000001), so a plain
-    // truncating cast yields off-by-one pixel errors under specific factor
-    // values (e.g. cropTop=20% on a 1000px swapchain would truncate 99.99999
-    // to 99 instead of 100). All quantities here are non-negative so a naive
-    // +0.5 is sufficient — no need for std::lround.
+    // truncating cast yields off-by-one pixel errors. All quantities here
+    // are non-negative so a naive +0.5 is sufficient — no need for
+    // std::lround.
     inline XrRect2Di computeCroppedImageRect(uint32_t swapWidth,
                                              uint32_t swapHeight,
+                                             const XrFovf& renderedFov,
                                              const CropConfig& cfg) {
-        const float leftCropPixels = swapWidth * (1.0f - cfg.cropLeftFactor);
-        const float rightCropPixels = swapWidth * (1.0f - cfg.cropRightFactor);
-        const float topCropPixels = swapHeight * (1.0f - cfg.cropTopFactor);
-        const float bottomCropPixels = swapHeight * (1.0f - cfg.cropBottomFactor);
+        // OpenXR convention: angleLeft and angleDown are negative, angleRight
+        // and angleUp are positive. Take magnitudes for tan() — safer than
+        // relying on tan() being odd when the caller passes weird values.
+        const float absL = std::abs(renderedFov.angleLeft);
+        const float absR = std::abs(renderedFov.angleRight);
+        const float absU = std::abs(renderedFov.angleUp);
+        const float absD = std::abs(renderedFov.angleDown);
 
-        const int32_t newOffsetX = static_cast<int32_t>(leftCropPixels * 0.5f + 0.5f);
-        const int32_t newOffsetY = static_cast<int32_t>(topCropPixels * 0.5f + 0.5f);
-        const int32_t newWidth = static_cast<int32_t>(
-            swapWidth - leftCropPixels * 0.5f - rightCropPixels * 0.5f + 0.5f);
-        const int32_t newHeight = static_cast<int32_t>(
-            swapHeight - topCropPixels * 0.5f - bottomCropPixels * 0.5f + 0.5f);
+        const float tanL = std::tan(absL);
+        const float tanR = std::tan(absR);
+        const float tanU = std::tan(absU);
+        const float tanD = std::tan(absD);
+
+        // Submitted (narrower) half-angles. Multiply the magnitude by the
+        // factor, not the signed angle, so cfg.cropLeftFactor < 1 always
+        // shrinks the FOV regardless of sign conventions.
+        const float tanSubL = std::tan(absL * cfg.cropLeftFactor);
+        const float tanSubR = std::tan(absR * cfg.cropRightFactor);
+        const float tanSubU = std::tan(absU * cfg.cropTopFactor);
+        const float tanSubD = std::tan(absD * cfg.cropBottomFactor);
+
+        const float totalTanX = tanL + tanR;
+        const float totalTanY = tanU + tanD;
+
+        // Defensive guard against degenerate FOV inputs.
+        if (totalTanX <= 0.0f || totalTanY <= 0.0f) {
+            return XrRect2Di{};
+        }
+
+        // X axis: pixel 0 = -tanL (angleLeft side), pixel W = +tanR (right).
+        // Submitted range [-tanSubL, +tanSubR] maps to [xLeft, xRight].
+        const float xLeftF = static_cast<float>(swapWidth) * (tanL - tanSubL) / totalTanX;
+        const float xRightF = static_cast<float>(swapWidth) * (tanL + tanSubR) / totalTanX;
+
+        // Y axis: in the texture coordinate system used by XrSwapchain (D3D,
+        // Vulkan, OpenGL with XR_KHR_*_flip), pixel 0 is at the TOP of the
+        // image. OpenXR angleUp > 0 is at the top. So +tanSubU maps to LOW
+        // y, -tanSubD to HIGH y.
+        const float yTopF = static_cast<float>(swapHeight) * (tanU - tanSubU) / totalTanY;
+        const float yBottomF = static_cast<float>(swapHeight) * (tanU + tanSubD) / totalTanY;
+
+        const int32_t newOffsetX = static_cast<int32_t>(xLeftF + 0.5f);
+        const int32_t newOffsetY = static_cast<int32_t>(yTopF + 0.5f);
+        const int32_t newWidth = static_cast<int32_t>(xRightF - xLeftF + 0.5f);
+        const int32_t newHeight = static_cast<int32_t>(yBottomF - yTopF + 0.5f);
 
         if (newWidth <= 0 || newHeight <= 0) {
             return XrRect2Di{};

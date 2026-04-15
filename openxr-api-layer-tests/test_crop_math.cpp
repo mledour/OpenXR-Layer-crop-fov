@@ -150,47 +150,86 @@ TEST_CASE("scaleSwapchainExtents: result is always aligned to 8 for any reasonab
 // computeCroppedImageRect
 // ---------------------------------------------------------------------------
 
+// Default "typical VR" FOV: 45° half-angle on each side (90° per-eye total).
+// tan(π/4) = 1.0 exactly, so tanL = tanR = tanU = tanD = 1 and totalTan = 2
+// on both axes — makes hand-checked expected values easy to derive.
+static constexpr float kPiOver4 = 0.7853981633974483f; // π / 4 radians = 45°
+static constexpr XrFovf kDefaultFov = {-kPiOver4, kPiOver4, kPiOver4, -kPiOver4};
+
 TEST_CASE("computeCroppedImageRect: factors = 1.0 yield a full-swapchain rect") {
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 1.0f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 1.0f;
 
-    const XrRect2Di rect = computeCroppedImageRect(1920, 1080, cfg);
+    const XrRect2Di rect = computeCroppedImageRect(1920, 1080, kDefaultFov, cfg);
     CHECK(rect.offset.x == 0);
     CHECK(rect.offset.y == 0);
     CHECK(rect.extent.width == 1920);
     CHECK(rect.extent.height == 1080);
 }
 
-TEST_CASE("computeCroppedImageRect: symmetric 10% crop is centered (5% offset, 90% extent)") {
+TEST_CASE("computeCroppedImageRect: symmetric 10% crop at 45° half-FOV (tan-correct math)") {
+    // tanL = tanR = tan(π/4) = 1.0
+    // tanSub = tan(0.9 * π/4) = tan(40.5°) ≈ 0.854081
+    // xLeft  = 1000 * (1.0 - 0.854081) / 2.0 ≈ 72.96  -> 73 (round-half-up)
+    // xRight = 1000 * (1.0 + 0.854081) / 2.0 ≈ 927.04 -> 927
+    // width  = 927.04 - 72.96 ≈ 854.08 -> 854
+    // Note: the old linear-in-angle approximation gave 50/900 here. The
+    // tan-based math correctly accounts for the non-linear pixel<->angle
+    // mapping under perspective projection.
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
 
-    const XrRect2Di rect = computeCroppedImageRect(1000, 1000, cfg);
-    CHECK(rect.offset.x == 50);
-    CHECK(rect.offset.y == 50);
-    CHECK(rect.extent.width == 900);
-    CHECK(rect.extent.height == 900);
+    const XrRect2Di rect = computeCroppedImageRect(1000, 1000, kDefaultFov, cfg);
+    CHECK(rect.offset.x == 73);
+    CHECK(rect.offset.y == 73);
+    CHECK(rect.extent.width == 854);
+    CHECK(rect.extent.height == 854);
 }
 
-TEST_CASE("computeCroppedImageRect: asymmetric factors produce an off-center rect") {
-    // leftCrop=10%, rightCrop=20%, topCrop=20%, bottomCrop=40%.
-    // offsetX = 1000 * 0.10 * 0.5 = 50
-    // offsetY = 1000 * 0.20 * 0.5 = 100
-    // width   = 1000 - 50 - 100 = 850
-    // height  = 1000 - 100 - 200 = 700
+TEST_CASE("computeCroppedImageRect: asymmetric factors at 45° half-FOV") {
+    // cropLeft=10%, cropRight=20%, cropTop=20%, cropBottom=40%.
+    // tan(0.9 * 45°) = tan(40.5°) ≈ 0.854081
+    // tan(0.8 * 45°) = tan(36°)   ≈ 0.726543
+    // tan(0.6 * 45°) = tan(27°)   ≈ 0.509525
+    // xLeft   = 1000 * (1 - 0.854081) / 2 ≈ 72.96  -> 73
+    // xRight  = 1000 * (1 + 0.726543) / 2 ≈ 863.27 -> 863
+    // width   = 863.27 - 72.96 ≈ 790.31 -> 790
+    // yTop    = 1000 * (1 - 0.726543) / 2 ≈ 136.73 -> 137
+    // yBottom = 1000 * (1 + 0.509525) / 2 ≈ 754.76 -> 755
+    // height  = 754.76 - 136.73 ≈ 618.03 -> 618
     CropConfig cfg;
     cfg.cropLeftFactor = 0.9f;
     cfg.cropRightFactor = 0.8f;
     cfg.cropTopFactor = 0.8f;
     cfg.cropBottomFactor = 0.6f;
 
-    const XrRect2Di rect = computeCroppedImageRect(1000, 1000, cfg);
-    CHECK(rect.offset.x == 50);
-    CHECK(rect.offset.y == 100);
-    CHECK(rect.extent.width == 850);
-    CHECK(rect.extent.height == 700);
+    const XrRect2Di rect = computeCroppedImageRect(1000, 1000, kDefaultFov, cfg);
+    CHECK(rect.offset.x == 73);
+    CHECK(rect.offset.y == 137);
+    CHECK(rect.extent.width == 790);
+    CHECK(rect.extent.height == 618);
+}
+
+TEST_CASE("computeCroppedImageRect: narrow FOV converges to linear-in-angle approximation") {
+    // At small half-angles, tan(x) ≈ x, so the tan-based math should
+    // collapse toward the old linear-in-angle result of (offset = W*(1-k)/2,
+    // extent = W*k). Use a 5° half-FOV and a symmetric 10% crop: expected
+    // offset should be close to 50 and width close to 900 on a 1000 px edge.
+    constexpr float kFiveDegrees = 0.08726646f; // 5° in radians
+    const XrFovf narrowFovIn = {-kFiveDegrees, kFiveDegrees, kFiveDegrees, -kFiveDegrees};
+    CropConfig cfg;
+    cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
+    cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
+
+    const XrRect2Di rect = computeCroppedImageRect(1000, 1000, narrowFovIn, cfg);
+    // Accept ±1 pixel: linear approximation differs from tan by a tiny
+    // amount even at 5°. Tight enough to catch a regression but not brittle.
+    CHECK(rect.offset.x >= 49);
+    CHECK(rect.offset.x <= 51);
+    CHECK(rect.extent.width >= 898);
+    CHECK(rect.extent.width <= 902);
 }
 
 TEST_CASE("computeCroppedImageRect: zero swapchain returns zero rect") {
@@ -198,7 +237,23 @@ TEST_CASE("computeCroppedImageRect: zero swapchain returns zero rect") {
     cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
 
-    const XrRect2Di rect = computeCroppedImageRect(0, 0, cfg);
+    const XrRect2Di rect = computeCroppedImageRect(0, 0, kDefaultFov, cfg);
+    CHECK(rect.offset.x == 0);
+    CHECK(rect.offset.y == 0);
+    CHECK(rect.extent.width == 0);
+    CHECK(rect.extent.height == 0);
+}
+
+TEST_CASE("computeCroppedImageRect: degenerate (zero-span) FOV returns zero rect") {
+    // If the app ever hands us a zero-angle FOV, totalTanX/Y is 0 and the
+    // tan-space division would produce NaN. The defensive guard inside the
+    // helper should catch it before the division.
+    const XrFovf zeroFov = {0.0f, 0.0f, 0.0f, 0.0f};
+    CropConfig cfg;
+    cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
+    cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
+
+    const XrRect2Di rect = computeCroppedImageRect(1920, 1080, zeroFov, cfg);
     CHECK(rect.offset.x == 0);
     CHECK(rect.offset.y == 0);
     CHECK(rect.extent.width == 0);
@@ -206,28 +261,40 @@ TEST_CASE("computeCroppedImageRect: zero swapchain returns zero rect") {
 }
 
 TEST_CASE("computeCroppedImageRect: offset + extent always fits inside the swapchain") {
-    // Property: for any valid config, offset + extent <= swapchain dimensions.
-    for (float leftPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
-        for (float rightPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
-            for (float topPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
-                for (float bottomPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
-                    CropConfig cfg;
-                    cfg.cropLeftFactor = clampFactor(leftPct);
-                    cfg.cropRightFactor = clampFactor(rightPct);
-                    cfg.cropTopFactor = clampFactor(topPct);
-                    cfg.cropBottomFactor = clampFactor(bottomPct);
+    // Property: for any valid config, offset + extent <= swapchain
+    // dimensions. Sweep crop factors AND a handful of FOVs (narrow,
+    // typical VR, extra-wide).
+    const XrFovf fovs[] = {
+        {-0.0873f, 0.0873f, 0.0873f, -0.0873f},  // 5° half
+        {-0.5236f, 0.5236f, 0.5236f, -0.5236f},  // 30° half
+        kDefaultFov,                              // 45° half
+        {-0.9599f, 0.9599f, 0.9599f, -0.9599f},  // 55° half (Index-ish)
+    };
 
-                    const uint32_t swapW = 1920;
-                    const uint32_t swapH = 1080;
-                    const XrRect2Di r = computeCroppedImageRect(swapW, swapH, cfg);
+    for (const XrFovf& fov : fovs) {
+        for (float leftPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
+            for (float rightPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
+                for (float topPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
+                    for (float bottomPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
+                        CropConfig cfg;
+                        cfg.cropLeftFactor = clampFactor(leftPct);
+                        cfg.cropRightFactor = clampFactor(rightPct);
+                        cfg.cropTopFactor = clampFactor(topPct);
+                        cfg.cropBottomFactor = clampFactor(bottomPct);
 
-                    // zero rect is a valid "skip" signal
-                    if (r.extent.width == 0 && r.extent.height == 0) continue;
+                        const uint32_t swapW = 1920;
+                        const uint32_t swapH = 1080;
+                        const XrRect2Di r =
+                            computeCroppedImageRect(swapW, swapH, fov, cfg);
 
-                    CHECK(r.offset.x >= 0);
-                    CHECK(r.offset.y >= 0);
-                    CHECK(r.offset.x + r.extent.width <= static_cast<int32_t>(swapW));
-                    CHECK(r.offset.y + r.extent.height <= static_cast<int32_t>(swapH));
+                        // zero rect is a valid "skip" signal
+                        if (r.extent.width == 0 && r.extent.height == 0) continue;
+
+                        CHECK(r.offset.x >= 0);
+                        CHECK(r.offset.y >= 0);
+                        CHECK(r.offset.x + r.extent.width <= static_cast<int32_t>(swapW));
+                        CHECK(r.offset.y + r.extent.height <= static_cast<int32_t>(swapH));
+                    }
                 }
             }
         }
