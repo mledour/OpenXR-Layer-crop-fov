@@ -64,6 +64,22 @@ jobs:
           /verbosity:minimal
           /nologo
 
+      # Run the unit tests for the pure crop-math helpers. The test binary is
+      # built by the same msbuild invocation as the layer DLL (it's a second
+      # project in the .sln) and drops alongside the DLL in bin\x64\<config>\.
+      # A non-zero exit fails the job.
+      - name: Run unit tests (${{ matrix.configuration }} | x64)
+        shell: pwsh
+        run: |
+          $exe = "bin\x64\${{ matrix.configuration }}\openxr-api-layer-tests.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Test binary not found at $exe"
+          }
+          & $exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "openxr-api-layer-tests.exe returned $LASTEXITCODE"
+          }
+
       # Stage the files a user actually needs to install the layer:
       # the DLL, its PDB, the processed JSON manifest, and the install scripts.
       # We do NOT zip here — actions/upload-artifact@v4 zips on its own, and
