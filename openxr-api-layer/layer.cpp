@@ -29,6 +29,9 @@
 #include <log.h>
 #include <util.h>
 
+#include <rapidjson/document.h>
+#include <rapidjson/error/en.h>
+
 namespace openxr_api_layer {
 
     using namespace log;
@@ -55,31 +58,29 @@ namespace openxr_api_layer {
         return 1.0f - (percent / 100.0f);
     }
 
-    static float parseFloat(const std::string& line, const std::string& key, float defaultVal) {
-        auto pos = line.find(key);
-        if (pos == std::string::npos) return defaultVal;
-        auto colon = line.find(':', pos + key.size());
-        if (colon == std::string::npos) return defaultVal;
-        std::string rest = line.substr(colon + 1);
-        float val = defaultVal;
-        if (sscanf(rest.c_str(), " %f", &val) == 1) {
-            return val;
+    // Reads an optional float field from a rapidjson object. Returns defaultVal if
+    // the field is absent or not a number. Accepts both integer and floating JSON numbers.
+    static float readJsonFloat(const rapidjson::Value& obj, const char* key, float defaultVal) {
+        if (!obj.HasMember(key)) return defaultVal;
+        const auto& v = obj[key];
+        if (v.IsFloat() || v.IsDouble() || v.IsInt() || v.IsUint()) {
+            return static_cast<float>(v.GetDouble());
         }
+        Log(fmt::format("settings.json: \"{}\" is not a number, using default {}\n", key, defaultVal));
         return defaultVal;
     }
 
-    static bool parseBool(const std::string& line, const std::string& key, bool defaultVal) {
-        auto pos = line.find(key);
-        if (pos == std::string::npos) return defaultVal;
-        auto colon = line.find(':', pos + key.size());
-        if (colon == std::string::npos) return defaultVal;
-        std::string rest = line.substr(colon + 1);
-        return rest.find("true") != std::string::npos;
+    static bool readJsonBool(const rapidjson::Value& obj, const char* key, bool defaultVal) {
+        if (!obj.HasMember(key)) return defaultVal;
+        const auto& v = obj[key];
+        if (v.IsBool()) return v.GetBool();
+        Log(fmt::format("settings.json: \"{}\" is not a bool, using default {}\n", key, defaultVal));
+        return defaultVal;
     }
 
     static CropConfig loadConfig(const std::filesystem::path& configDir) {
         CropConfig config;
-        std::string configPathStr = (configDir / "settings.json").string();
+        const std::string configPathStr = (configDir / "settings.json").string();
 
         Log(fmt::format("Looking for config at: {}\n", configPathStr));
 
@@ -93,44 +94,37 @@ namespace openxr_api_layer {
             std::ostringstream ss;
             ss << file.rdbuf();
             fileContent = ss.str();
-            file.close();
         }
 
         Log(fmt::format("Config file read OK ({} bytes)\n", fileContent.size()));
 
-        try {
-            float leftPct = 10.0f, rightPct = 10.0f, topPct = 15.0f, bottomPct = 20.0f;
-            bool enabled = true;
-
-            std::istringstream stream(fileContent);
-            std::string line;
-            while (std::getline(stream, line)) {
-                if (line.find("\"enabled\"") != std::string::npos) {
-                    enabled = parseBool(line, "\"enabled\"", true);
-                } else if (line.find("\"crop_left_percent\"") != std::string::npos) {
-                    leftPct = parseFloat(line, "\"crop_left_percent\"", 10.0f);
-                } else if (line.find("\"crop_right_percent\"") != std::string::npos) {
-                    rightPct = parseFloat(line, "\"crop_right_percent\"", 10.0f);
-                } else if (line.find("\"crop_top_percent\"") != std::string::npos) {
-                    topPct = parseFloat(line, "\"crop_top_percent\"", 15.0f);
-                } else if (line.find("\"crop_bottom_percent\"") != std::string::npos) {
-                    bottomPct = parseFloat(line, "\"crop_bottom_percent\"", 20.0f);
-                }
-            }
-
-            config.enabled = enabled;
-            config.cropLeftFactor = clampFactor(leftPct);
-            config.cropRightFactor = clampFactor(rightPct);
-            config.cropTopFactor = clampFactor(topPct);
-            config.cropBottomFactor = clampFactor(bottomPct);
-
-            Log(fmt::format("Crop config: enabled={}, left={:.1f}, right={:.1f}, top={:.1f}, bottom={:.1f}\n",
-                             config.enabled, leftPct, rightPct, topPct, bottomPct));
-        } catch (const std::exception& e) {
-            Log(fmt::format("Error parsing config: {}, using defaults\n", e.what()));
-        } catch (...) {
-            Log("Unknown error parsing config, using defaults\n");
+        rapidjson::Document doc;
+        doc.Parse(fileContent.c_str(), fileContent.size());
+        if (doc.HasParseError()) {
+            Log(fmt::format("settings.json parse error at offset {}: {} — using defaults\n",
+                             doc.GetErrorOffset(),
+                             rapidjson::GetParseError_En(doc.GetParseError())));
+            return config;
         }
+        if (!doc.IsObject()) {
+            Log("settings.json root is not an object — using defaults\n");
+            return config;
+        }
+
+        const bool enabled = readJsonBool(doc, "enabled", true);
+        const float leftPct = readJsonFloat(doc, "crop_left_percent", 10.0f);
+        const float rightPct = readJsonFloat(doc, "crop_right_percent", 10.0f);
+        const float topPct = readJsonFloat(doc, "crop_top_percent", 15.0f);
+        const float bottomPct = readJsonFloat(doc, "crop_bottom_percent", 20.0f);
+
+        config.enabled = enabled;
+        config.cropLeftFactor = clampFactor(leftPct);
+        config.cropRightFactor = clampFactor(rightPct);
+        config.cropTopFactor = clampFactor(topPct);
+        config.cropBottomFactor = clampFactor(bottomPct);
+
+        Log(fmt::format("Crop config: enabled={}, left={:.1f}, right={:.1f}, top={:.1f}, bottom={:.1f}\n",
+                         config.enabled, leftPct, rightPct, topPct, bottomPct));
 
         return config;
     }
