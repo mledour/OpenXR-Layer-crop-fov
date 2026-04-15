@@ -44,6 +44,9 @@
     <ClInclude Include="utils\inputs.h">
       <Filter>Utilities</Filter>
     </ClInclude>
+    <ClInclude Include="utils\crop_math.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">

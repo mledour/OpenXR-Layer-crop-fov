@@ -28,6 +28,7 @@
 #include "layer.h"
 #include <log.h>
 #include <util.h>
+#include <utils/crop_math.h>
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -43,20 +44,9 @@ namespace openxr_api_layer {
     const std::vector<std::string> blockedExtensions = {};
     const std::vector<std::string> implicitExtensions = {};
 
-    // Crop configuration loaded from settings.json.
-    struct CropConfig {
-        bool enabled = true;
-        float cropLeftFactor = 0.90f;   // 1.0 - (10 / 100)
-        float cropRightFactor = 0.90f;  // 1.0 - (10 / 100)
-        float cropTopFactor = 0.85f;    // 1.0 - (15 / 100)
-        float cropBottomFactor = 0.80f; // 1.0 - (20 / 100)
-    };
-
-    static float clampFactor(float percent) {
-        if (percent < 0.0f) percent = 0.0f;
-        if (percent > 50.0f) percent = 50.0f;
-        return 1.0f - (percent / 100.0f);
-    }
+    // CropConfig, clampFactor, scaleSwapchainExtents, computeCroppedImageRect,
+    // and narrowFov live in <utils/crop_math.h> so they can be unit-tested
+    // from a standalone binary without linking the layer DLL.
 
     // Reads an optional float field from a rapidjson object. Returns defaultVal if
     // the field is absent or not a number. Accepts both integer and floating JSON numbers.
@@ -300,29 +290,24 @@ namespace openxr_api_layer {
                 instance, systemId, viewConfigurationType, viewCapacityInput, viewCountOutput, views);
 
             if (XR_SUCCEEDED(result) && m_config.enabled && views && viewCapacityInput > 0) {
-                const float widthFactor = std::min(m_config.cropLeftFactor, m_config.cropRightFactor);
-                const float heightFactor = std::min(m_config.cropTopFactor, m_config.cropBottomFactor);
-
                 for (uint32_t i = 0; i < *viewCountOutput && i < viewCapacityInput; i++) {
                     const uint32_t origWidth = views[i].recommendedImageRectWidth;
                     const uint32_t origHeight = views[i].recommendedImageRectHeight;
 
-                    uint32_t newWidth = static_cast<uint32_t>(origWidth * widthFactor);
-                    uint32_t newHeight = static_cast<uint32_t>(origHeight * heightFactor);
-                    newWidth = std::max(newWidth & ~1u, 2u);
-                    newHeight = std::max(newHeight & ~1u, 2u);
+                    const Extent2D scaled = scaleSwapchainExtents(origWidth, origHeight, m_config);
 
-                    views[i].recommendedImageRectWidth = newWidth;
-                    views[i].recommendedImageRectHeight = newHeight;
+                    views[i].recommendedImageRectWidth = scaled.width;
+                    views[i].recommendedImageRectHeight = scaled.height;
 
-                    Log(fmt::format("View[{}] resolution: {}x{} -> {}x{}\n", i, origWidth, origHeight, newWidth, newHeight));
+                    Log(fmt::format("View[{}] resolution: {}x{} -> {}x{}\n",
+                                     i, origWidth, origHeight, scaled.width, scaled.height));
                     TraceLoggingWrite(g_traceProvider,
                                       "xrEnumerateViewConfigurationViews",
                                       TLArg(i, "ViewIndex"),
                                       TLArg(origWidth, "OrigWidth"),
                                       TLArg(origHeight, "OrigHeight"),
-                                      TLArg(newWidth, "NewWidth"),
-                                      TLArg(newHeight, "NewHeight"));
+                                      TLArg(scaled.width, "NewWidth"),
+                                      TLArg(scaled.height, "NewHeight"));
                 }
             }
 
@@ -348,10 +333,7 @@ namespace openxr_api_layer {
                 for (uint32_t i = 0; i < *viewCountOutput && i < viewCapacityInput; i++) {
                     const XrFovf origFov = views[i].fov;
 
-                    views[i].fov.angleLeft *= m_config.cropLeftFactor;
-                    views[i].fov.angleRight *= m_config.cropRightFactor;
-                    views[i].fov.angleUp *= m_config.cropTopFactor;
-                    views[i].fov.angleDown *= m_config.cropBottomFactor;
+                    views[i].fov = narrowFov(origFov, m_config);
 
                     if (!m_fovLogged) {
                         Log(fmt::format("View[{}] FOV: L={:.3f} R={:.3f} U={:.3f} D={:.3f} -> L={:.3f} R={:.3f} U={:.3f} D={:.3f}\n",
@@ -492,29 +474,15 @@ namespace openxr_api_layer {
                         }
 
                         if (swapInfo.width > 0 && swapInfo.height > 0) {
-                            const float leftCropPixels = swapInfo.width * (1.0f - m_config.cropLeftFactor);
-                            const float rightCropPixels = swapInfo.width * (1.0f - m_config.cropRightFactor);
-                            const float topCropPixels = swapInfo.height * (1.0f - m_config.cropTopFactor);
-                            const float bottomCropPixels = swapInfo.height * (1.0f - m_config.cropBottomFactor);
-
-                            const int32_t newOffsetX = static_cast<int32_t>(leftCropPixels * 0.5f);
-                            const int32_t newOffsetY = static_cast<int32_t>(topCropPixels * 0.5f);
-                            const int32_t newWidth = static_cast<int32_t>(swapInfo.width - leftCropPixels * 0.5f - rightCropPixels * 0.5f);
-                            const int32_t newHeight = static_cast<int32_t>(swapInfo.height - topCropPixels * 0.5f - bottomCropPixels * 0.5f);
-
-                            if (newWidth > 0 && newHeight > 0) {
-                                view.subImage.imageRect.offset.x = newOffsetX;
-                                view.subImage.imageRect.offset.y = newOffsetY;
-                                view.subImage.imageRect.extent.width = newWidth;
-                                view.subImage.imageRect.extent.height = newHeight;
+                            const XrRect2Di cropped =
+                                computeCroppedImageRect(swapInfo.width, swapInfo.height, m_config);
+                            if (cropped.extent.width > 0 && cropped.extent.height > 0) {
+                                view.subImage.imageRect = cropped;
                             }
                         }
 
                         // Adjust the FOV in the projection view to match the crop.
-                        view.fov.angleLeft *= m_config.cropLeftFactor;
-                        view.fov.angleRight *= m_config.cropRightFactor;
-                        view.fov.angleUp *= m_config.cropTopFactor;
-                        view.fov.angleDown *= m_config.cropBottomFactor;
+                        view.fov = narrowFov(view.fov, m_config);
                     }
 
                     modifiedViewsArrays.push_back(std::move(views));
