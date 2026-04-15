@@ -53,9 +53,30 @@ The post-build step runs `scripts\sed.exe` to substitute the `$(SolutionName)`
 placeholder into `openxr-api-layer.json`, so the layer name always tracks the
 `.sln` filename.
 
+## Releases
+
+A GitHub Actions workflow ([`build-and-release.yml`](./.github/workflows/build-and-release.yml))
+builds x64 `Release` and `Debug` on every push to `main` (as a sanity check)
+and on every `v*.*.*` tag (which additionally creates a GitHub Release and
+attaches the two ZIPs).
+
+To publish a new release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Each release ZIP contains the DLL, its PDB, the processed
+`openxr-api-layer.json`, and the install / uninstall PowerShell scripts.
+
 ## Installing
 
-Run `scripts\Install-Layer.ps1` from the build output directory (`bin\x64\Release\`).
+Either download the `Release-x64` ZIP from the latest
+[GitHub Release](../../releases/latest) and unzip it to a permanent location,
+or build locally and use `bin\x64\Release\`. Then run `Install-Layer.ps1`
+from that directory.
+
 The script writes the layer manifest path under
 `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit` as required by the
 [OpenXR Loader spec](https://registry.khronos.org/OpenXR/specs/1.0/loader.html).

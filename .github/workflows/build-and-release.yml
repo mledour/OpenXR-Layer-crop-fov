@@ -1,0 +1,169 @@
+name: Build and Release
+
+# Build on every push to main (verification) + every tag v*.*.* (release).
+# workflow_dispatch lets you trigger a build manually from the Actions tab.
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# The release job needs `contents: write` to create GitHub releases
+# and attach assets to them.
+permissions:
+  contents: write
+
+env:
+  SOLUTION: XR_APILAYER_MLEDOUR_fov_crop.sln
+  LAYER_NAME: XR_APILAYER_MLEDOUR_fov_crop
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build: Debug + Release in parallel via matrix. Always runs.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.configuration }} x64
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release, Debug]
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # fetch-depth: 0 lets softprops/action-gh-release auto-generate
+          # release notes from the full commit history.
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore "${{ env.SOLUTION }}"
+
+      - name: Build ${{ matrix.configuration }} | x64
+        run: >-
+          msbuild "${{ env.SOLUTION }}"
+          /p:Configuration=${{ matrix.configuration }}
+          /p:Platform=x64
+          /m
+          /verbosity:minimal
+          /nologo
+
+      # Stage the files a user actually needs to install the layer:
+      # the DLL, its PDB, the processed JSON manifest, and the install scripts.
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          $configuration = "${{ matrix.configuration }}"
+          $layer         = "${{ env.LAYER_NAME }}"
+          $outDir        = "bin\x64\$configuration"
+          $stageDir      = "artifacts\$layer-$configuration-x64"
+
+          if (-not (Test-Path $outDir)) {
+            throw "Build output not found at $outDir"
+          }
+
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+
+          Copy-Item "$outDir\$layer.dll"           $stageDir -ErrorAction Stop
+          Copy-Item "$outDir\$layer.pdb"           $stageDir -ErrorAction SilentlyContinue
+          Copy-Item "$outDir\openxr-api-layer.json" $stageDir -ErrorAction Stop
+          Copy-Item "$outDir\Install-Layer.ps1"    $stageDir -ErrorAction Stop
+          Copy-Item "$outDir\Uninstall-Layer.ps1"  $stageDir -ErrorAction Stop
+
+          # Short install note so the ZIP is self-explanatory once unzipped.
+          @"
+          $layer — $configuration x64
+          ================================================================
+
+          Install (HKLM, requires elevated PowerShell):
+            powershell -ExecutionPolicy Bypass -File .\Install-Layer.ps1
+
+          Uninstall:
+            powershell -ExecutionPolicy Bypass -File .\Uninstall-Layer.ps1
+
+          To disable the layer without uninstalling, set the environment
+          variable declared under `disable_environment` in openxr-api-layer.json
+          to "1" for the target process.
+          "@ | Set-Content -Path "$stageDir\README.txt" -Encoding UTF8
+
+          $zipPath = "artifacts\$layer-$configuration-x64.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path "$stageDir\*" -DestinationPath $zipPath -CompressionLevel Optimal
+
+          "Packaged:" | Out-Host
+          Get-ChildItem $stageDir | Format-Table Name, Length -AutoSize | Out-Host
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.LAYER_NAME }}-${{ matrix.configuration }}-x64
+          path: artifacts/${{ env.LAYER_NAME }}-${{ matrix.configuration }}-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Release: only runs on a v*.*.* tag push. Pulls both matrix artifacts
+  # down from the `build` job and attaches them to a GitHub Release.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -la artifacts/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          name: ${{ github.ref_name }}
+          body: |
+            ## ${{ env.LAYER_NAME }} ${{ github.ref_name }}
+
+            OpenXR API layer built from commit `${{ github.sha }}`.
+
+            ### Assets
+            - `${{ env.LAYER_NAME }}-Release-x64.zip` — optimized build, for end users
+            - `${{ env.LAYER_NAME }}-Debug-x64.zip` — debug build with full symbols, for troubleshooting
+
+            ### Install
+            1. Download one of the ZIPs above (normally `Release-x64`).
+            2. Unzip to a **permanent** location (not your Downloads folder).
+               The registry entry points at the DLL on disk, so the folder must not move.
+               Recommended: `C:\Program Files\OpenXR-Layers\${{ env.LAYER_NAME }}\`.
+            3. Open an **elevated** PowerShell and run:
+               ```powershell
+               powershell -ExecutionPolicy Bypass -File .\Install-Layer.ps1
+               ```
+
+            > ⚠️ This build is **not code-signed**. Anti-cheat systems may reject it
+            > and refuse to let OpenXR games load. A signed release is planned — see
+            > the project CLAUDE.md for the signing checklist.
