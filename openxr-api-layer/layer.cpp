@@ -167,6 +167,106 @@ namespace openxr_api_layer {
             return result;
         }
 
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEnumerateViewConfigurationViews
+        XrResult xrEnumerateViewConfigurationViews(XrInstance instance,
+                                                   XrSystemId systemId,
+                                                   XrViewConfigurationType viewConfigurationType,
+                                                   uint32_t viewCapacityInput,
+                                                   uint32_t* viewCountOutput,
+                                                   XrViewConfigurationView* views) override {
+            TraceLoggingWrite(g_traceProvider,
+                              "xrEnumerateViewConfigurationViews",
+                              TLXArg(instance, "Instance"),
+                              TLArg((int)systemId, "SystemId"),
+                              TLArg((uint32_t)viewConfigurationType, "ViewConfigurationType"),
+                              TLArg(viewCapacityInput, "ViewCapacityInput"));
+
+            const XrResult result = OpenXrApi::xrEnumerateViewConfigurationViews(
+                instance, systemId, viewConfigurationType, viewCapacityInput, viewCountOutput, views);
+
+            // Scale only on the data-returning call (viewCapacityInput > 0), for the handled
+            // system, and only while the layer is active. This shrinks the swapchains the
+            // application will allocate — fewer pixels shaded per frame.
+            if (XR_SUCCEEDED(result) && !m_bypassApiLayer && viewCapacityInput > 0 && views != nullptr &&
+                viewCountOutput != nullptr && isSystemHandled(systemId)) {
+                for (uint32_t i = 0; i < *viewCountOutput; i++) {
+                    const uint32_t origW = views[i].recommendedImageRectWidth;
+                    const uint32_t origH = views[i].recommendedImageRectHeight;
+
+                    // Apply H and V scales independently, floor to even for stereo/chroma-friendly alignment.
+                    uint32_t newW = static_cast<uint32_t>(origW * m_fovScaleH) & ~1u;
+                    uint32_t newH = static_cast<uint32_t>(origH * m_fovScaleV) & ~1u;
+                    if (newW < 2) newW = 2;
+                    if (newH < 2) newH = 2;
+
+                    views[i].recommendedImageRectWidth = newW;
+                    views[i].recommendedImageRectHeight = newH;
+
+                    TraceLoggingWrite(g_traceProvider,
+                                      "xrEnumerateViewConfigurationViews_Scaled",
+                                      TLArg(i, "ViewIndex"),
+                                      TLArg(origW, "OriginalWidth"),
+                                      TLArg(origH, "OriginalHeight"),
+                                      TLArg(newW, "ScaledWidth"),
+                                      TLArg(newH, "ScaledHeight"));
+                    Log(fmt::format("View {}: {}x{} -> {}x{} (H={:.2f} V={:.2f})\n",
+                                    i,
+                                    origW,
+                                    origH,
+                                    newW,
+                                    newH,
+                                    m_fovScaleH,
+                                    m_fovScaleV));
+                }
+            }
+
+            return result;
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrLocateViews
+        XrResult xrLocateViews(XrSession session,
+                               const XrViewLocateInfo* viewLocateInfo,
+                               XrViewState* viewState,
+                               uint32_t viewCapacityInput,
+                               uint32_t* viewCountOutput,
+                               XrView* views) override {
+            TraceLoggingWrite(g_traceProvider,
+                              "xrLocateViews",
+                              TLXArg(session, "Session"),
+                              TLArg(viewCapacityInput, "ViewCapacityInput"));
+
+            const XrResult result = OpenXrApi::xrLocateViews(
+                session, viewLocateInfo, viewState, viewCapacityInput, viewCountOutput, views);
+
+            // Oculus-style FovTangentMultiplier: narrow the frustum by scaling the
+            // tangents of the FOV half-angles. The app's projection becomes tighter
+            // around the center, and the runtime composites black outside the
+            // narrowed cone — visible as black bars around the rendered image in
+            // the HMD. Called once per eye per frame; keep this path cheap (no Log()).
+            if (XR_SUCCEEDED(result) && !m_bypassApiLayer && viewCapacityInput > 0 && views != nullptr &&
+                viewCountOutput != nullptr) {
+                const float kH = m_fovScaleH;
+                const float kV = m_fovScaleV;
+                for (uint32_t i = 0; i < *viewCountOutput; i++) {
+                    XrFovf& fov = views[i].fov;
+                    fov.angleLeft = std::atan(std::tan(fov.angleLeft) * kH);
+                    fov.angleRight = std::atan(std::tan(fov.angleRight) * kH);
+                    fov.angleUp = std::atan(std::tan(fov.angleUp) * kV);
+                    fov.angleDown = std::atan(std::tan(fov.angleDown) * kV);
+
+                    TraceLoggingWrite(g_traceProvider,
+                                      "xrLocateViews_FovScaled",
+                                      TLArg(i, "ViewIndex"),
+                                      TLArg(fov.angleLeft, "AngleLeft"),
+                                      TLArg(fov.angleRight, "AngleRight"),
+                                      TLArg(fov.angleUp, "AngleUp"),
+                                      TLArg(fov.angleDown, "AngleDown"));
+                }
+            }
+
+            return result;
+        }
+
       private:
         bool isSystemHandled(XrSystemId systemId) const {
             return systemId == m_systemId;
@@ -174,6 +274,15 @@ namespace openxr_api_layer {
 
         bool m_bypassApiLayer{false};
         XrSystemId m_systemId{XR_NULL_SYSTEM_ID};
+
+        // FOV tangent multipliers, split per axis (Oculus-style FovTangentMultiplier).
+        // 1.0f = no change on that axis; < 1.0f narrows the FOV returned from xrLocateViews
+        // on that axis AND proportionally shrinks the recommendedImageRect on the same axis.
+        // Current defaults: letterbox — full horizontal FOV, 30% vertical tangent crop
+        // (top+bottom black bars, ~30% GPU saving from smaller swapchain height).
+        // TODO(phase-2.5): load from %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\config.json
+        float m_fovScaleH{1.0f};
+        float m_fovScaleV{0.70f};
     };
 
     // This method is required by the framework to instantiate your OpenXrApi implementation.
