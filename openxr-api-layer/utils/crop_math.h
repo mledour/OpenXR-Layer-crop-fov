@@ -60,12 +60,24 @@ namespace openxr_api_layer {
         uint32_t height;
     };
 
+    // Swapchain dimensions are aligned down to this many pixels on each axis.
+    // 8 covers the common cases that runtimes and downstream passes care about:
+    //   - block-compressed formats (BC1-BC7 use 4x4 blocks)
+    //   - GPU tiled memory layouts (typically 8x8 or 16x16)
+    //   - foveated rendering / DLSS / FSR2 tile sizes (8 or 16)
+    //   - compositor internal passes on stricter runtimes
+    // Picking 8 costs at most 7 pixels per axis (~0.4% of a 2000px swapchain)
+    // while sidestepping edge cases that single-pair (~1u) alignment exposes.
+    // Must be a power of two for the bitmask trick below.
+    constexpr uint32_t kDimensionAlignment = 8u;
+
     // Applies the crop to the recommended swapchain dimensions returned by
     // xrEnumerateViewConfigurationViews. Uses the min of left/right for
     // width (and top/bottom for height) so the allocated swapchain is still
     // large enough for the widest individual crop. Result is force-aligned
-    // to an even value with a 2-pixel floor so we never request a zero-size
-    // swapchain from the runtime.
+    // down to a multiple of kDimensionAlignment with that same value as a
+    // floor, so the runtime never receives a zero-size or awkwardly-aligned
+    // swapchain.
     inline Extent2D scaleSwapchainExtents(uint32_t origWidth,
                                           uint32_t origHeight,
                                           const CropConfig& cfg) {
@@ -74,8 +86,10 @@ namespace openxr_api_layer {
 
         uint32_t newWidth = static_cast<uint32_t>(origWidth * widthFactor);
         uint32_t newHeight = static_cast<uint32_t>(origHeight * heightFactor);
-        newWidth = std::max(newWidth & ~1u, 2u);
-        newHeight = std::max(newHeight & ~1u, 2u);
+
+        constexpr uint32_t mask = ~(kDimensionAlignment - 1u);
+        newWidth = std::max(newWidth & mask, kDimensionAlignment);
+        newHeight = std::max(newHeight & mask, kDimensionAlignment);
 
         return {newWidth, newHeight};
     }

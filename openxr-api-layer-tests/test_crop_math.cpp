@@ -102,29 +102,48 @@ TEST_CASE("scaleSwapchainExtents: asymmetric factors take the smaller one per ax
     CHECK(out.height == 1400u);
 }
 
-TEST_CASE("scaleSwapchainExtents: rounds odd results down to the nearest even") {
+TEST_CASE("scaleSwapchainExtents: rounds down to the nearest multiple of 8") {
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
 
-    // 1001 * 0.9 = 900.9 -> trunc 900 (already even). Use 1111 * 0.9 = 999.9 ->
-    // trunc 999 -> even floor 998.
+    // 1111 * 0.9 = 999.9 -> trunc 999 -> aligned down to 992 (= 124 * 8).
     const Extent2D out = scaleSwapchainExtents(1111, 1111, cfg);
-    CHECK(out.width == 998u);
-    CHECK(out.height == 998u);
-    CHECK(out.width % 2u == 0u);
-    CHECK(out.height % 2u == 0u);
+    CHECK(out.width == 992u);
+    CHECK(out.height == 992u);
+    CHECK(out.width % 8u == 0u);
+    CHECK(out.height % 8u == 0u);
 }
 
-TEST_CASE("scaleSwapchainExtents: enforces a 2-pixel floor so we never pass 0 to the runtime") {
+TEST_CASE("scaleSwapchainExtents: enforces the alignment value as floor") {
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 0.5f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 0.5f;
 
-    // 1 * 0.5 = 0.5 -> trunc 0 -> floored to 2.
+    // 1 * 0.5 = 0.5 -> trunc 0 -> floored to 8 (the alignment value).
     const Extent2D out = scaleSwapchainExtents(1, 1, cfg);
-    CHECK(out.width == 2u);
-    CHECK(out.height == 2u);
+    CHECK(out.width == 8u);
+    CHECK(out.height == 8u);
+}
+
+TEST_CASE("scaleSwapchainExtents: result is always aligned to 8 for any reasonable input") {
+    // Property: for any swapchain dimension and any reasonable config,
+    // the output is divisible by 8 and >= 8.
+    CropConfig cfg;
+    cfg.cropLeftFactor = 0.91f;   // non-trivial values likely to produce odd
+    cfg.cropRightFactor = 0.87f;  // intermediate widths before alignment
+    cfg.cropTopFactor = 0.83f;
+    cfg.cropBottomFactor = 0.77f;
+
+    for (uint32_t w = 8; w <= 8192; w += 37) {
+        for (uint32_t h = 8; h <= 8192; h += 41) {
+            const Extent2D out = scaleSwapchainExtents(w, h, cfg);
+            CHECK(out.width % 8u == 0u);
+            CHECK(out.height % 8u == 0u);
+            CHECK(out.width >= 8u);
+            CHECK(out.height >= 8u);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
