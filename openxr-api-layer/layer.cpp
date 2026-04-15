@@ -185,7 +185,17 @@ namespace openxr_api_layer {
                               TLArg(createInfo->createFlags, "CreateFlags"));
             Log(fmt::format("Application: {}\n", createInfo->applicationInfo.applicationName));
 
+            // Load crop configuration. If the user has disabled the layer via
+            // settings.json, flip to bypass so xrGetInstanceProcAddr returns the
+            // downstream proc addresses verbatim and our overrides are skipped.
+            m_config = openxr_api_layer::loadConfig(localAppData);
+            if (!m_config.enabled) {
+                Log(fmt::format("{} is disabled in settings.json\n", LayerName));
+                m_bypassApiLayer = true;
+            }
+
             if (m_bypassApiLayer) {
+                TraceLoggingWrite(g_traceProvider, "xrCreateInstance_Bypass");
                 Log(fmt::format("{} layer will be bypassed\n", LayerName));
                 return result;
             }
@@ -208,9 +218,6 @@ namespace openxr_api_layer {
                                                  XR_VERSION_PATCH(instanceProperties.runtimeVersion));
             TraceLoggingWrite(g_traceProvider, "xrCreateInstance", TLArg(runtimeName.c_str(), "RuntimeName"));
             Log(fmt::format("Using OpenXR runtime: {}\n", runtimeName));
-
-            // Load crop configuration.
-            m_config = openxr_api_layer::loadConfig(localAppData);
 
             return result;
         }
