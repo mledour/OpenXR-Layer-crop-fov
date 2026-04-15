@@ -379,8 +379,16 @@ namespace openxr_api_layer {
 
             const XrResult result = OpenXrApi::xrCreateSwapchain(session, createInfo, swapchain);
             if (XR_SUCCEEDED(result)) {
+                // The caller's `next` chain points to extension structs that are
+                // typically on the caller's stack: after xrCreateSwapchain returns
+                // the runtime has consumed them and those pointers may be
+                // reused/freed. We only need width/height/format later, so null
+                // `next` defensively before we persist the struct.
+                XrSwapchainCreateInfo snapshot = *createInfo;
+                snapshot.next = nullptr;
+
                 std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
-                m_swapchainInfoMap[*swapchain] = *createInfo;
+                m_swapchainInfoMap[*swapchain] = snapshot;
 
                 Log(fmt::format("Swapchain created: {}x{} format={}\n",
                                  createInfo->width, createInfo->height, createInfo->format));
