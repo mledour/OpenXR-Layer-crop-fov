@@ -267,6 +267,90 @@ namespace openxr_api_layer {
             return result;
         }
 
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrCreateSwapchain
+        XrResult xrCreateSwapchain(XrSession session,
+                                   const XrSwapchainCreateInfo* createInfo,
+                                   XrSwapchain* swapchain) override {
+            TraceLoggingWrite(g_traceProvider,
+                              "xrCreateSwapchain",
+                              TLXArg(session, "Session"),
+                              TLArg(createInfo->width, "Width"),
+                              TLArg(createInfo->height, "Height"));
+
+            const XrResult result = OpenXrApi::xrCreateSwapchain(session, createInfo, swapchain);
+            if (XR_SUCCEEDED(result)) {
+                std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
+                m_swapchainInfoMap[*swapchain] = *createInfo;
+                Log(fmt::format("Swapchain created: {}x{}\n", createInfo->width, createInfo->height));
+            }
+            return result;
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrDestroySwapchain
+        XrResult xrDestroySwapchain(XrSwapchain swapchain) override {
+            TraceLoggingWrite(g_traceProvider, "xrDestroySwapchain", TLXArg(swapchain, "Swapchain"));
+            const XrResult result = OpenXrApi::xrDestroySwapchain(swapchain);
+            if (XR_SUCCEEDED(result)) {
+                std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
+                m_swapchainInfoMap.erase(swapchain);
+            }
+            return result;
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEndFrame
+        XrResult xrEndFrame(XrSession session, const XrFrameEndInfo* frameEndInfo) override {
+            if (m_bypassApiLayer || !frameEndInfo || frameEndInfo->layerCount == 0) {
+                return OpenXrApi::xrEndFrame(session, frameEndInfo);
+            }
+
+            // We need mutable copies because OpenXR structs are const.
+            XrFrameEndInfo modifiedFrameEndInfo = *frameEndInfo;
+
+            std::vector<const XrCompositionLayerBaseHeader*> modifiedLayerPointers;
+            std::vector<XrCompositionLayerProjection> modifiedProjectionLayers;
+            std::vector<std::vector<XrCompositionLayerProjectionView>> modifiedViewsArrays;
+
+            // Pre-reserve to avoid reallocation (which would invalidate pointers).
+            modifiedProjectionLayers.reserve(frameEndInfo->layerCount);
+            modifiedViewsArrays.reserve(frameEndInfo->layerCount);
+
+            for (uint32_t i = 0; i < frameEndInfo->layerCount; i++) {
+                const auto* layer = frameEndInfo->layers[i];
+
+                if (layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                    const auto* projLayer = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+
+                    std::vector<XrCompositionLayerProjectionView> views(
+                        projLayer->views, projLayer->views + projLayer->viewCount);
+
+                    for (auto& view : views) {
+                        // Adjust the FOV in the projection view to match the crop.
+                        view.fov.angleLeft = std::atan(std::tan(view.fov.angleLeft) * m_fovScaleH);
+                        view.fov.angleRight = std::atan(std::tan(view.fov.angleRight) * m_fovScaleH);
+                        view.fov.angleUp = std::atan(std::tan(view.fov.angleUp) * m_fovScaleV);
+                        view.fov.angleDown = std::atan(std::tan(view.fov.angleDown) * m_fovScaleV);
+                    }
+
+                    modifiedViewsArrays.push_back(std::move(views));
+
+                    XrCompositionLayerProjection modifiedProjLayer = *projLayer;
+                    modifiedProjLayer.views = modifiedViewsArrays.back().data();
+                    modifiedProjLayer.viewCount = static_cast<uint32_t>(modifiedViewsArrays.back().size());
+                    modifiedProjectionLayers.push_back(modifiedProjLayer);
+
+                    modifiedLayerPointers.push_back(
+                        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&modifiedProjectionLayers.back()));
+                } else {
+                    modifiedLayerPointers.push_back(layer);
+                }
+            }
+
+            modifiedFrameEndInfo.layers = modifiedLayerPointers.data();
+            modifiedFrameEndInfo.layerCount = static_cast<uint32_t>(modifiedLayerPointers.size());
+
+            return OpenXrApi::xrEndFrame(session, &modifiedFrameEndInfo);
+        }
+
       private:
         bool isSystemHandled(XrSystemId systemId) const {
             return systemId == m_systemId;
@@ -275,14 +359,15 @@ namespace openxr_api_layer {
         bool m_bypassApiLayer{false};
         XrSystemId m_systemId{XR_NULL_SYSTEM_ID};
 
-        // FOV tangent multipliers, split per axis (Oculus-style FovTangentMultiplier).
-        // 1.0f = no change on that axis; < 1.0f narrows the FOV returned from xrLocateViews
-        // on that axis AND proportionally shrinks the recommendedImageRect on the same axis.
-        // Current defaults: letterbox — full horizontal FOV, 30% vertical tangent crop
-        // (top+bottom black bars, ~30% GPU saving from smaller swapchain height).
+        // FOV tangent multipliers.
+        // 1.0f = no change; < 1.0f narrows the FOV.
         // TODO(phase-2.5): load from %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\config.json
         float m_fovScaleH{1.0f};
         float m_fovScaleV{0.70f};
+
+        // Swapchain tracking for xrEndFrame.
+        std::unordered_map<XrSwapchain, XrSwapchainCreateInfo> m_swapchainInfoMap;
+        std::mutex m_swapchainMapMutex;
     };
 
     // This method is required by the framework to instantiate your OpenXrApi implementation.
