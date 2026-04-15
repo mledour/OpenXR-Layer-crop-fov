@@ -40,6 +40,101 @@ namespace openxr_api_layer {
     const std::vector<std::string> blockedExtensions = {};
     const std::vector<std::string> implicitExtensions = {};
 
+    // Crop configuration loaded from settings.json.
+    struct CropConfig {
+        bool enabled = true;
+        float cropLeftFactor = 0.90f;   // 1.0 - (10 / 100)
+        float cropRightFactor = 0.90f;  // 1.0 - (10 / 100)
+        float cropTopFactor = 0.85f;    // 1.0 - (15 / 100)
+        float cropBottomFactor = 0.80f; // 1.0 - (20 / 100)
+    };
+
+    static float clampFactor(float percent) {
+        if (percent < 0.0f) percent = 0.0f;
+        if (percent > 50.0f) percent = 50.0f;
+        return 1.0f - (percent / 100.0f);
+    }
+
+    static float parseFloat(const std::string& line, const std::string& key, float defaultVal) {
+        auto pos = line.find(key);
+        if (pos == std::string::npos) return defaultVal;
+        auto colon = line.find(':', pos + key.size());
+        if (colon == std::string::npos) return defaultVal;
+        std::string rest = line.substr(colon + 1);
+        float val = defaultVal;
+        if (sscanf(rest.c_str(), " %f", &val) == 1) {
+            return val;
+        }
+        return defaultVal;
+    }
+
+    static bool parseBool(const std::string& line, const std::string& key, bool defaultVal) {
+        auto pos = line.find(key);
+        if (pos == std::string::npos) return defaultVal;
+        auto colon = line.find(':', pos + key.size());
+        if (colon == std::string::npos) return defaultVal;
+        std::string rest = line.substr(colon + 1);
+        return rest.find("true") != std::string::npos;
+    }
+
+    static CropConfig loadConfig(const std::filesystem::path& configDir) {
+        CropConfig config;
+        std::string configPathStr = (configDir / "settings.json").string();
+
+        Log(fmt::format("Looking for config at: {}\n", configPathStr));
+
+        std::string fileContent;
+        {
+            std::ifstream file(configPathStr);
+            if (!file.is_open()) {
+                Log("No settings.json found, using defaults\n");
+                return config;
+            }
+            std::ostringstream ss;
+            ss << file.rdbuf();
+            fileContent = ss.str();
+            file.close();
+        }
+
+        Log(fmt::format("Config file read OK ({} bytes)\n", fileContent.size()));
+
+        try {
+            float leftPct = 10.0f, rightPct = 10.0f, topPct = 15.0f, bottomPct = 20.0f;
+            bool enabled = true;
+
+            std::istringstream stream(fileContent);
+            std::string line;
+            while (std::getline(stream, line)) {
+                if (line.find("\"enabled\"") != std::string::npos) {
+                    enabled = parseBool(line, "\"enabled\"", true);
+                } else if (line.find("\"crop_left_percent\"") != std::string::npos) {
+                    leftPct = parseFloat(line, "\"crop_left_percent\"", 10.0f);
+                } else if (line.find("\"crop_right_percent\"") != std::string::npos) {
+                    rightPct = parseFloat(line, "\"crop_right_percent\"", 10.0f);
+                } else if (line.find("\"crop_top_percent\"") != std::string::npos) {
+                    topPct = parseFloat(line, "\"crop_top_percent\"", 15.0f);
+                } else if (line.find("\"crop_bottom_percent\"") != std::string::npos) {
+                    bottomPct = parseFloat(line, "\"crop_bottom_percent\"", 20.0f);
+                }
+            }
+
+            config.enabled = enabled;
+            config.cropLeftFactor = clampFactor(leftPct);
+            config.cropRightFactor = clampFactor(rightPct);
+            config.cropTopFactor = clampFactor(topPct);
+            config.cropBottomFactor = clampFactor(bottomPct);
+
+            Log(fmt::format("Crop config: enabled={}, left={:.1f}, right={:.1f}, top={:.1f}, bottom={:.1f}\n",
+                             config.enabled, leftPct, rightPct, topPct, bottomPct));
+        } catch (const std::exception& e) {
+            Log(fmt::format("Error parsing config: {}, using defaults\n", e.what()));
+        } catch (...) {
+            Log("Unknown error parsing config, using defaults\n");
+        }
+
+        return config;
+    }
+
     // This class implements our API layer.
     class OpenXrLayer : public openxr_api_layer::OpenXrApi {
       public:
@@ -68,10 +163,8 @@ namespace openxr_api_layer {
                 return XR_ERROR_VALIDATION_FAILURE;
             }
 
-            // Needed to resolve the requested function pointers.
             OpenXrApi::xrCreateInstance(createInfo);
 
-            // Dump the application name, OpenXR runtime information and other useful things for debugging.
             TraceLoggingWrite(g_traceProvider,
                               "xrCreateInstance",
                               TLArg(xr::ToString(createInfo->applicationInfo.apiVersion).c_str(), "ApiVersion"),
@@ -81,9 +174,6 @@ namespace openxr_api_layer {
                               TLArg(createInfo->applicationInfo.engineVersion, "EngineVersion"),
                               TLArg(createInfo->createFlags, "CreateFlags"));
             Log(fmt::format("Application: {}\n", createInfo->applicationInfo.applicationName));
-
-            // Here there can be rules to disable the API layer entirely (based on applicationName for example).
-            // m_bypassApiLayer = ...
 
             if (m_bypassApiLayer) {
                 Log(fmt::format("{} layer will be bypassed\n", LayerName));
@@ -109,6 +199,9 @@ namespace openxr_api_layer {
             TraceLoggingWrite(g_traceProvider, "xrCreateInstance", TLArg(runtimeName.c_str(), "RuntimeName"));
             Log(fmt::format("Using OpenXR runtime: {}\n", runtimeName));
 
+            // Load crop configuration.
+            m_config = openxr_api_layer::loadConfig(localAppData);
+
             return XR_SUCCESS;
         }
 
@@ -132,7 +225,6 @@ namespace openxr_api_layer {
                     Log(fmt::format("Using OpenXR system: {}\n", systemProperties.systemName));
                 }
 
-                // Remember the XrSystemId to use.
                 m_systemId = *systemId;
             }
 
@@ -158,7 +250,7 @@ namespace openxr_api_layer {
             const XrResult result = OpenXrApi::xrCreateSession(instance, createInfo, session);
             if (XR_SUCCEEDED(result)) {
                 if (isSystemHandled(createInfo->systemId)) {
-                    // Do something useful here...
+                    Log("Session created for handled system\n");
                 }
 
                 TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
@@ -178,45 +270,36 @@ namespace openxr_api_layer {
                               "xrEnumerateViewConfigurationViews",
                               TLXArg(instance, "Instance"),
                               TLArg((int)systemId, "SystemId"),
-                              TLArg((uint32_t)viewConfigurationType, "ViewConfigurationType"),
+                              TLArg((int)viewConfigurationType, "ViewConfigurationType"),
                               TLArg(viewCapacityInput, "ViewCapacityInput"));
 
             const XrResult result = OpenXrApi::xrEnumerateViewConfigurationViews(
                 instance, systemId, viewConfigurationType, viewCapacityInput, viewCountOutput, views);
 
-            // Scale only on the data-returning call (viewCapacityInput > 0), for the handled
-            // system, and only while the layer is active. This shrinks the swapchains the
-            // application will allocate — fewer pixels shaded per frame.
-            if (XR_SUCCEEDED(result) && !m_bypassApiLayer && viewCapacityInput > 0 && views != nullptr &&
-                viewCountOutput != nullptr && isSystemHandled(systemId)) {
-                for (uint32_t i = 0; i < *viewCountOutput; i++) {
-                    const uint32_t origW = views[i].recommendedImageRectWidth;
-                    const uint32_t origH = views[i].recommendedImageRectHeight;
+            if (XR_SUCCEEDED(result) && m_config.enabled && views && viewCapacityInput > 0) {
+                const float widthFactor = std::min(m_config.cropLeftFactor, m_config.cropRightFactor);
+                const float heightFactor = std::min(m_config.cropTopFactor, m_config.cropBottomFactor);
 
-                    // Apply H and V scales independently, floor to even for stereo/chroma-friendly alignment.
-                    uint32_t newW = static_cast<uint32_t>(origW * m_fovScaleH) & ~1u;
-                    uint32_t newH = static_cast<uint32_t>(origH * m_fovScaleV) & ~1u;
-                    if (newW < 2) newW = 2;
-                    if (newH < 2) newH = 2;
+                for (uint32_t i = 0; i < *viewCountOutput && i < viewCapacityInput; i++) {
+                    const uint32_t origWidth = views[i].recommendedImageRectWidth;
+                    const uint32_t origHeight = views[i].recommendedImageRectHeight;
 
-                    views[i].recommendedImageRectWidth = newW;
-                    views[i].recommendedImageRectHeight = newH;
+                    uint32_t newWidth = static_cast<uint32_t>(origWidth * widthFactor);
+                    uint32_t newHeight = static_cast<uint32_t>(origHeight * heightFactor);
+                    newWidth = std::max(newWidth & ~1u, 2u);
+                    newHeight = std::max(newHeight & ~1u, 2u);
 
+                    views[i].recommendedImageRectWidth = newWidth;
+                    views[i].recommendedImageRectHeight = newHeight;
+
+                    Log(fmt::format("View[{}] resolution: {}x{} -> {}x{}\n", i, origWidth, origHeight, newWidth, newHeight));
                     TraceLoggingWrite(g_traceProvider,
-                                      "xrEnumerateViewConfigurationViews_Scaled",
+                                      "xrEnumerateViewConfigurationViews",
                                       TLArg(i, "ViewIndex"),
-                                      TLArg(origW, "OriginalWidth"),
-                                      TLArg(origH, "OriginalHeight"),
-                                      TLArg(newW, "ScaledWidth"),
-                                      TLArg(newH, "ScaledHeight"));
-                    Log(fmt::format("View {}: {}x{} -> {}x{} (H={:.2f} V={:.2f})\n",
-                                    i,
-                                    origW,
-                                    origH,
-                                    newW,
-                                    newH,
-                                    m_fovScaleH,
-                                    m_fovScaleV));
+                                      TLArg(origWidth, "OrigWidth"),
+                                      TLArg(origHeight, "OrigHeight"),
+                                      TLArg(newWidth, "NewWidth"),
+                                      TLArg(newHeight, "NewHeight"));
                 }
             }
 
@@ -238,30 +321,32 @@ namespace openxr_api_layer {
             const XrResult result = OpenXrApi::xrLocateViews(
                 session, viewLocateInfo, viewState, viewCapacityInput, viewCountOutput, views);
 
-            // Oculus-style FovTangentMultiplier: narrow the frustum by scaling the
-            // tangents of the FOV half-angles. The app's projection becomes tighter
-            // around the center, and the runtime composites black outside the
-            // narrowed cone — visible as black bars around the rendered image in
-            // the HMD. Called once per eye per frame; keep this path cheap (no Log()).
-            if (XR_SUCCEEDED(result) && !m_bypassApiLayer && viewCapacityInput > 0 && views != nullptr &&
-                viewCountOutput != nullptr) {
-                const float kH = m_fovScaleH;
-                const float kV = m_fovScaleV;
-                for (uint32_t i = 0; i < *viewCountOutput; i++) {
-                    XrFovf& fov = views[i].fov;
-                    fov.angleLeft = std::atan(std::tan(fov.angleLeft) * kH);
-                    fov.angleRight = std::atan(std::tan(fov.angleRight) * kH);
-                    fov.angleUp = std::atan(std::tan(fov.angleUp) * kV);
-                    fov.angleDown = std::atan(std::tan(fov.angleDown) * kV);
+            if (XR_SUCCEEDED(result) && m_config.enabled && views && viewCapacityInput > 0) {
+                for (uint32_t i = 0; i < *viewCountOutput && i < viewCapacityInput; i++) {
+                    const XrFovf origFov = views[i].fov;
+
+                    views[i].fov.angleLeft *= m_config.cropLeftFactor;
+                    views[i].fov.angleRight *= m_config.cropRightFactor;
+                    views[i].fov.angleUp *= m_config.cropTopFactor;
+                    views[i].fov.angleDown *= m_config.cropBottomFactor;
+
+                    if (!m_fovLogged) {
+                        Log(fmt::format("View[{}] FOV: L={:.3f} R={:.3f} U={:.3f} D={:.3f} -> L={:.3f} R={:.3f} U={:.3f} D={:.3f}\n",
+                                         i,
+                                         origFov.angleLeft, origFov.angleRight, origFov.angleUp, origFov.angleDown,
+                                         views[i].fov.angleLeft, views[i].fov.angleRight,
+                                         views[i].fov.angleUp, views[i].fov.angleDown));
+                    }
 
                     TraceLoggingWrite(g_traceProvider,
-                                      "xrLocateViews_FovScaled",
+                                      "xrLocateViews",
                                       TLArg(i, "ViewIndex"),
-                                      TLArg(fov.angleLeft, "AngleLeft"),
-                                      TLArg(fov.angleRight, "AngleRight"),
-                                      TLArg(fov.angleUp, "AngleUp"),
-                                      TLArg(fov.angleDown, "AngleDown"));
+                                      TLArg(views[i].fov.angleLeft, "FovLeft"),
+                                      TLArg(views[i].fov.angleRight, "FovRight"),
+                                      TLArg(views[i].fov.angleUp, "FovUp"),
+                                      TLArg(views[i].fov.angleDown, "FovDown"));
                 }
+                m_fovLogged = true;
             }
 
             return result;
@@ -275,42 +360,52 @@ namespace openxr_api_layer {
                               "xrCreateSwapchain",
                               TLXArg(session, "Session"),
                               TLArg(createInfo->width, "Width"),
-                              TLArg(createInfo->height, "Height"));
+                              TLArg(createInfo->height, "Height"),
+                              TLArg(createInfo->format, "Format"),
+                              TLArg(createInfo->usageFlags, "UsageFlags"),
+                              TLArg(createInfo->sampleCount, "SampleCount"),
+                              TLArg(createInfo->arraySize, "ArraySize"));
 
             const XrResult result = OpenXrApi::xrCreateSwapchain(session, createInfo, swapchain);
             if (XR_SUCCEEDED(result)) {
                 std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
                 m_swapchainInfoMap[*swapchain] = *createInfo;
-                Log(fmt::format("Swapchain created: {}x{}\n", createInfo->width, createInfo->height));
+
+                Log(fmt::format("Swapchain created: {}x{} format={}\n",
+                                 createInfo->width, createInfo->height, createInfo->format));
+                TraceLoggingWrite(g_traceProvider,
+                                  "xrCreateSwapchain",
+                                  TLXArg(*swapchain, "Swapchain"));
             }
+
             return result;
         }
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrDestroySwapchain
         XrResult xrDestroySwapchain(XrSwapchain swapchain) override {
             TraceLoggingWrite(g_traceProvider, "xrDestroySwapchain", TLXArg(swapchain, "Swapchain"));
+
             const XrResult result = OpenXrApi::xrDestroySwapchain(swapchain);
             if (XR_SUCCEEDED(result)) {
                 std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
                 m_swapchainInfoMap.erase(swapchain);
             }
+
             return result;
         }
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEndFrame
         XrResult xrEndFrame(XrSession session, const XrFrameEndInfo* frameEndInfo) override {
-            if (m_bypassApiLayer || !frameEndInfo || frameEndInfo->layerCount == 0) {
+            if (!m_config.enabled || !frameEndInfo || frameEndInfo->layerCount == 0) {
                 return OpenXrApi::xrEndFrame(session, frameEndInfo);
             }
 
-            // We need mutable copies because OpenXR structs are const.
             XrFrameEndInfo modifiedFrameEndInfo = *frameEndInfo;
 
             std::vector<const XrCompositionLayerBaseHeader*> modifiedLayerPointers;
             std::vector<XrCompositionLayerProjection> modifiedProjectionLayers;
             std::vector<std::vector<XrCompositionLayerProjectionView>> modifiedViewsArrays;
 
-            // Pre-reserve to avoid reallocation (which would invalidate pointers).
             modifiedProjectionLayers.reserve(frameEndInfo->layerCount);
             modifiedViewsArrays.reserve(frameEndInfo->layerCount);
 
@@ -324,11 +419,40 @@ namespace openxr_api_layer {
                         projLayer->views, projLayer->views + projLayer->viewCount);
 
                     for (auto& view : views) {
+                        // Look up swapchain dimensions.
+                        XrSwapchainCreateInfo swapInfo{};
+                        {
+                            std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
+                            auto it = m_swapchainInfoMap.find(view.subImage.swapchain);
+                            if (it != m_swapchainInfoMap.end()) {
+                                swapInfo = it->second;
+                            }
+                        }
+
+                        if (swapInfo.width > 0 && swapInfo.height > 0) {
+                            const float leftCropPixels = swapInfo.width * (1.0f - m_config.cropLeftFactor);
+                            const float rightCropPixels = swapInfo.width * (1.0f - m_config.cropRightFactor);
+                            const float topCropPixels = swapInfo.height * (1.0f - m_config.cropTopFactor);
+                            const float bottomCropPixels = swapInfo.height * (1.0f - m_config.cropBottomFactor);
+
+                            const int32_t newOffsetX = static_cast<int32_t>(leftCropPixels * 0.5f);
+                            const int32_t newOffsetY = static_cast<int32_t>(topCropPixels * 0.5f);
+                            const int32_t newWidth = static_cast<int32_t>(swapInfo.width - leftCropPixels * 0.5f - rightCropPixels * 0.5f);
+                            const int32_t newHeight = static_cast<int32_t>(swapInfo.height - topCropPixels * 0.5f - bottomCropPixels * 0.5f);
+
+                            if (newWidth > 0 && newHeight > 0) {
+                                view.subImage.imageRect.offset.x = newOffsetX;
+                                view.subImage.imageRect.offset.y = newOffsetY;
+                                view.subImage.imageRect.extent.width = newWidth;
+                                view.subImage.imageRect.extent.height = newHeight;
+                            }
+                        }
+
                         // Adjust the FOV in the projection view to match the crop.
-                        view.fov.angleLeft = std::atan(std::tan(view.fov.angleLeft) * m_fovScaleH);
-                        view.fov.angleRight = std::atan(std::tan(view.fov.angleRight) * m_fovScaleH);
-                        view.fov.angleUp = std::atan(std::tan(view.fov.angleUp) * m_fovScaleV);
-                        view.fov.angleDown = std::atan(std::tan(view.fov.angleDown) * m_fovScaleV);
+                        view.fov.angleLeft *= m_config.cropLeftFactor;
+                        view.fov.angleRight *= m_config.cropRightFactor;
+                        view.fov.angleUp *= m_config.cropTopFactor;
+                        view.fov.angleDown *= m_config.cropBottomFactor;
                     }
 
                     modifiedViewsArrays.push_back(std::move(views));
@@ -359,13 +483,9 @@ namespace openxr_api_layer {
         bool m_bypassApiLayer{false};
         XrSystemId m_systemId{XR_NULL_SYSTEM_ID};
 
-        // FOV tangent multipliers.
-        // 1.0f = no change; < 1.0f narrows the FOV.
-        // TODO(phase-2.5): load from %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\config.json
-        float m_fovScaleH{1.0f};
-        float m_fovScaleV{0.70f};
-
-        // Swapchain tracking for xrEndFrame.
+        // Crop layer state.
+        CropConfig m_config;
+        bool m_fovLogged{false};
         std::unordered_map<XrSwapchain, XrSwapchainCreateInfo> m_swapchainInfoMap;
         std::mutex m_swapchainMapMutex;
     };
