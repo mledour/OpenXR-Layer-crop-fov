@@ -66,13 +66,15 @@ jobs:
 
       # Stage the files a user actually needs to install the layer:
       # the DLL, its PDB, the processed JSON manifest, and the install scripts.
+      # We do NOT zip here — actions/upload-artifact@v4 zips on its own, and
+      # pre-zipping would double-wrap the payload.
       - name: Stage artifacts
         shell: pwsh
         run: |
           $configuration = "${{ matrix.configuration }}"
           $layer         = "${{ env.LAYER_NAME }}"
           $outDir        = "bin\x64\$configuration"
-          $stageDir      = "artifacts\$layer-$configuration-x64"
+          $stageDir      = "stage\$layer-$configuration-x64"
 
           if (-not (Test-Path $outDir)) {
             throw "Build output not found at $outDir"
@@ -80,40 +82,42 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
-          Copy-Item "$outDir\$layer.dll"           $stageDir -ErrorAction Stop
-          Copy-Item "$outDir\$layer.pdb"           $stageDir -ErrorAction SilentlyContinue
+          Copy-Item "$outDir\$layer.dll"            $stageDir -ErrorAction Stop
+          Copy-Item "$outDir\$layer.pdb"            $stageDir -ErrorAction SilentlyContinue
           Copy-Item "$outDir\openxr-api-layer.json" $stageDir -ErrorAction Stop
-          Copy-Item "$outDir\Install-Layer.ps1"    $stageDir -ErrorAction Stop
-          Copy-Item "$outDir\Uninstall-Layer.ps1"  $stageDir -ErrorAction Stop
+          Copy-Item "$outDir\Install-Layer.ps1"     $stageDir -ErrorAction Stop
+          Copy-Item "$outDir\Uninstall-Layer.ps1"   $stageDir -ErrorAction Stop
 
-          # Short install note so the ZIP is self-explanatory once unzipped.
-          @"
-          $layer — $configuration x64
-          ================================================================
+          # Short install note so the archive is self-explanatory once unzipped.
+          # Built as an array to avoid YAML/here-string indentation leaking into
+          # the file.
+          $readme = @(
+            "$layer - $configuration x64"
+            "================================================================"
+            ""
+            "Install (HKLM, requires elevated PowerShell):"
+            "  powershell -ExecutionPolicy Bypass -File .\Install-Layer.ps1"
+            ""
+            "Uninstall:"
+            "  powershell -ExecutionPolicy Bypass -File .\Uninstall-Layer.ps1"
+            ""
+            "To disable the layer without uninstalling, set the environment"
+            "variable declared under ``disable_environment`` in openxr-api-layer.json"
+            "to ""1"" for the target process."
+          ) -join "`r`n"
+          Set-Content -Path "$stageDir\README.txt" -Value $readme -Encoding UTF8
 
-          Install (HKLM, requires elevated PowerShell):
-            powershell -ExecutionPolicy Bypass -File .\Install-Layer.ps1
-
-          Uninstall:
-            powershell -ExecutionPolicy Bypass -File .\Uninstall-Layer.ps1
-
-          To disable the layer without uninstalling, set the environment
-          variable declared under `disable_environment` in openxr-api-layer.json
-          to "1" for the target process.
-          "@ | Set-Content -Path "$stageDir\README.txt" -Encoding UTF8
-
-          $zipPath = "artifacts\$layer-$configuration-x64.zip"
-          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-          Compress-Archive -Path "$stageDir\*" -DestinationPath $zipPath -CompressionLevel Optimal
-
-          "Packaged:" | Out-Host
+          "Staged:" | Out-Host
           Get-ChildItem $stageDir | Format-Table Name, Length -AutoSize | Out-Host
 
+      # upload-artifact@v4 wraps `path` in a ZIP named `<name>.zip`.
+      # Pointing at the stage directory (not a pre-made ZIP) gives us a
+      # clean single-level ZIP: `<name>.zip` → DLL + PDB + JSON + PS1 at root.
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.LAYER_NAME }}-${{ matrix.configuration }}-x64
-          path: artifacts/${{ env.LAYER_NAME }}-${{ matrix.configuration }}-x64.zip
+          path: stage/${{ env.LAYER_NAME }}-${{ matrix.configuration }}-x64/
           if-no-files-found: error
           retention-days: 30
 
@@ -128,19 +132,30 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
+      # download-artifact@v4 materializes each artifact as a folder under
+      # `path`: `artifacts/<artifact-name>/<files>`. We re-zip each folder
+      # into a clean release asset named `<artifact-name>.zip`.
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true
 
-      - name: List downloaded artifacts
-        run: ls -la artifacts/
+      - name: Package release ZIPs
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cd artifacts
+          for dir in */; do
+            name="${dir%/}"
+            # `cd && zip .` puts files at the ZIP root (no nested folder).
+            ( cd "$name" && zip -r "../../release/${name}.zip" . )
+          done
+          ls -la ../release/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.zip
+          files: release/*.zip
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
