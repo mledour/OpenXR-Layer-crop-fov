@@ -85,6 +85,13 @@ namespace openxr_api_layer {
     // factor (= 0.90) yields a 5% offset on the left edge. Returns a zero
     // rect if the resulting area would be non-positive on either axis; the
     // caller should skip the assignment in that case.
+    //
+    // The "+ 0.5f then static_cast" pattern is round-half-up. Float factors
+    // like 0.8f are not exact in IEEE 754 (they're ~0.80000001), so a plain
+    // truncating cast yields off-by-one pixel errors under specific factor
+    // values (e.g. cropTop=20% on a 1000px swapchain would truncate 99.99999
+    // to 99 instead of 100). All quantities here are non-negative so a naive
+    // +0.5 is sufficient — no need for std::lround.
     inline XrRect2Di computeCroppedImageRect(uint32_t swapWidth,
                                              uint32_t swapHeight,
                                              const CropConfig& cfg) {
@@ -93,12 +100,12 @@ namespace openxr_api_layer {
         const float topCropPixels = swapHeight * (1.0f - cfg.cropTopFactor);
         const float bottomCropPixels = swapHeight * (1.0f - cfg.cropBottomFactor);
 
-        const int32_t newOffsetX = static_cast<int32_t>(leftCropPixels * 0.5f);
-        const int32_t newOffsetY = static_cast<int32_t>(topCropPixels * 0.5f);
-        const int32_t newWidth =
-            static_cast<int32_t>(swapWidth - leftCropPixels * 0.5f - rightCropPixels * 0.5f);
-        const int32_t newHeight =
-            static_cast<int32_t>(swapHeight - topCropPixels * 0.5f - bottomCropPixels * 0.5f);
+        const int32_t newOffsetX = static_cast<int32_t>(leftCropPixels * 0.5f + 0.5f);
+        const int32_t newOffsetY = static_cast<int32_t>(topCropPixels * 0.5f + 0.5f);
+        const int32_t newWidth = static_cast<int32_t>(
+            swapWidth - leftCropPixels * 0.5f - rightCropPixels * 0.5f + 0.5f);
+        const int32_t newHeight = static_cast<int32_t>(
+            swapHeight - topCropPixels * 0.5f - bottomCropPixels * 0.5f + 0.5f);
 
         if (newWidth <= 0 || newHeight <= 0) {
             return XrRect2Di{};
