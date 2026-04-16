@@ -4,9 +4,6 @@ An OpenXR API layer for Windows that reduces GPU / CPU load by narrowing the
 rendered field of view and / or scaling the recommended swapchain dimensions.
 The application submits fewer pixels per frame, so every frame is cheaper.
 
-> Status: **work in progress** — see [`../CLAUDE.md`](../CLAUDE.md) for the
-> development plan and project-wide rules.
-
 ## What it does
 
 The layer intercepts two OpenXR calls:
