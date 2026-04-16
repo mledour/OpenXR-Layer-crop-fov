@@ -90,8 +90,8 @@
     <None Include="framework\layer_apis.py">
       <Filter>Framework</Filter>
     </None>
-    <None Include="openxr-api-layer.json" />
-    <None Include="openxr-api-layer-32.json" />
+    <None Include="XR_APILAYER_MLEDOUR_fov_crop.json" />
+    <None Include="XR_APILAYER_MLEDOUR_fov_crop-32.json" />
     <None Include="packages.config" />
     <None Include="module.def" />
     <None Include="openxr-api-layer.rc.in">

@@ -55,7 +55,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; The DLL and the processed JSON manifest from the Release x64 build.
 ; Paths are relative to this .iss file.
 Source: "..\bin\x64\Release\{#MyAppName}.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\bin\x64\Release\openxr-api-layer.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\bin\x64\Release\{#MyAppName}.json"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
 ; Register the layer as an implicit API layer for the OpenXR 1.x loader.
@@ -63,5 +63,5 @@ Source: "..\bin\x64\Release\openxr-api-layer.json"; DestDir: "{app}"; Flags: ign
 ; means "enabled" (the loader spec treats non-zero as "disabled").
 ; Flags: uninsdeletevalue removes this entry automatically on uninstall.
 Root: HKLM; Subkey: "Software\Khronos\OpenXR\1\ApiLayers\Implicit"; \
-  ValueName: "{app}\openxr-api-layer.json"; ValueType: dword; ValueData: 0; \
+  ValueName: "{app}\{#MyAppName}.json"; ValueType: dword; ValueData: 0; \
   Flags: uninsdeletevalue

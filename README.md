@@ -50,7 +50,7 @@ the upstream template sources manually into `external/OpenXR-SDK/`,
 ```
 
 The post-build step runs `scripts\sed.exe` to substitute the `$(SolutionName)`
-placeholder into `openxr-api-layer.json`, so the layer name always tracks the
+placeholder into `XR_APILAYER_MLEDOUR_fov_crop.json`, so the layer name always tracks the
 `.sln` filename.
 
 ## Releases

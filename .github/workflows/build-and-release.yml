@@ -155,11 +155,11 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
-          Copy-Item "$outDir\$layer.dll"            $stageDir -ErrorAction Stop
-          Copy-Item "$outDir\$layer.pdb"            $stageDir -ErrorAction SilentlyContinue
-          Copy-Item "$outDir\openxr-api-layer.json" $stageDir -ErrorAction Stop
-          Copy-Item "$outDir\Install-Layer.ps1"     $stageDir -ErrorAction Stop
-          Copy-Item "$outDir\Uninstall-Layer.ps1"   $stageDir -ErrorAction Stop
+          Copy-Item "$outDir\$layer.dll"          $stageDir -ErrorAction Stop
+          Copy-Item "$outDir\$layer.pdb"          $stageDir -ErrorAction SilentlyContinue
+          Copy-Item "$outDir\$layer.json"         $stageDir -ErrorAction Stop
+          Copy-Item "$outDir\Install-Layer.ps1"   $stageDir -ErrorAction Stop
+          Copy-Item "$outDir\Uninstall-Layer.ps1" $stageDir -ErrorAction Stop
 
           # Short install note so the archive is self-explanatory once unzipped.
           # Built as an array to avoid YAML/here-string indentation leaking into
@@ -175,7 +175,7 @@ jobs:
             "  powershell -ExecutionPolicy Bypass -File .\Uninstall-Layer.ps1"
             ""
             "To disable the layer without uninstalling, set the environment"
-            "variable declared under ``disable_environment`` in openxr-api-layer.json"
+            "variable declared under ``disable_environment`` in $layer.json"
             "to ""1"" for the target process."
           ) -join "`r`n"
           Set-Content -Path "$stageDir\README.txt" -Value $readme -Encoding UTF8
