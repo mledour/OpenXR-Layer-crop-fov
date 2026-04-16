@@ -302,6 +302,83 @@ TEST_CASE("computeCroppedImageRect: offset + extent always fits inside the swapc
 }
 
 // ---------------------------------------------------------------------------
+// computeCroppedImageRect — linear mode (useLinearImageRect = true)
+// ---------------------------------------------------------------------------
+
+static CropConfig makeLinearCfg() {
+    CropConfig cfg;
+    cfg.useLinearImageRect = true;
+    return cfg;
+}
+
+TEST_CASE("computeCroppedImageRect [linear]: factors = 1.0 yield a full-swapchain rect") {
+    CropConfig cfg = makeLinearCfg();
+    cfg.cropLeftFactor = cfg.cropRightFactor = 1.0f;
+    cfg.cropTopFactor = cfg.cropBottomFactor = 1.0f;
+
+    // FOV is ignored in linear mode — pass anything.
+    const XrRect2Di rect = computeCroppedImageRect(1920, 1080, kDefaultFov, cfg);
+    CHECK(rect.offset.x == 0);
+    CHECK(rect.offset.y == 0);
+    CHECK(rect.extent.width == 1920);
+    CHECK(rect.extent.height == 1080);
+}
+
+TEST_CASE("computeCroppedImageRect [linear]: symmetric 10% crop is centered (5% offset, 90% extent)") {
+    CropConfig cfg = makeLinearCfg();
+    cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
+    cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
+
+    const XrRect2Di rect = computeCroppedImageRect(1000, 1000, kDefaultFov, cfg);
+    CHECK(rect.offset.x == 50);
+    CHECK(rect.offset.y == 50);
+    CHECK(rect.extent.width == 900);
+    CHECK(rect.extent.height == 900);
+}
+
+TEST_CASE("computeCroppedImageRect [linear]: asymmetric factors produce an off-center rect") {
+    CropConfig cfg = makeLinearCfg();
+    cfg.cropLeftFactor = 0.9f;
+    cfg.cropRightFactor = 0.8f;
+    cfg.cropTopFactor = 0.8f;
+    cfg.cropBottomFactor = 0.6f;
+
+    const XrRect2Di rect = computeCroppedImageRect(1000, 1000, kDefaultFov, cfg);
+    CHECK(rect.offset.x == 50);
+    CHECK(rect.offset.y == 100);
+    CHECK(rect.extent.width == 850);
+    CHECK(rect.extent.height == 700);
+}
+
+TEST_CASE("computeCroppedImageRect [linear]: offset + extent always fits inside the swapchain") {
+    for (float leftPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
+        for (float rightPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
+            for (float topPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
+                for (float bottomPct : {0.0f, 5.0f, 25.0f, 50.0f}) {
+                    CropConfig cfg = makeLinearCfg();
+                    cfg.cropLeftFactor = clampFactor(leftPct);
+                    cfg.cropRightFactor = clampFactor(rightPct);
+                    cfg.cropTopFactor = clampFactor(topPct);
+                    cfg.cropBottomFactor = clampFactor(bottomPct);
+
+                    const uint32_t swapW = 1920;
+                    const uint32_t swapH = 1080;
+                    const XrRect2Di r =
+                        computeCroppedImageRect(swapW, swapH, kDefaultFov, cfg);
+
+                    if (r.extent.width == 0 && r.extent.height == 0) continue;
+
+                    CHECK(r.offset.x >= 0);
+                    CHECK(r.offset.y >= 0);
+                    CHECK(r.offset.x + r.extent.width <= static_cast<int32_t>(swapW));
+                    CHECK(r.offset.y + r.extent.height <= static_cast<int32_t>(swapH));
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // narrowFov
 // ---------------------------------------------------------------------------
 

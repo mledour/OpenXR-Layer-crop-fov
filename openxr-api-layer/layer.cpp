@@ -68,6 +68,14 @@ namespace openxr_api_layer {
         return defaultVal;
     }
 
+    static std::string readJsonString(const rapidjson::Value& obj, const char* key, const std::string& defaultVal) {
+        if (!obj.HasMember(key)) return defaultVal;
+        const auto& v = obj[key];
+        if (v.IsString()) return std::string(v.GetString(), v.GetStringLength());
+        Log(fmt::format("settings.json: \"{}\" is not a string, using default \"{}\"\n", key, defaultVal));
+        return defaultVal;
+    }
+
     static CropConfig loadConfig(const std::filesystem::path& configDir) {
         CropConfig config;
         const std::string configPathStr = (configDir / "settings.json").string();
@@ -106,15 +114,18 @@ namespace openxr_api_layer {
         const float rightPct = readJsonFloat(doc, "crop_right_percent", 10.0f);
         const float topPct = readJsonFloat(doc, "crop_top_percent", 15.0f);
         const float bottomPct = readJsonFloat(doc, "crop_bottom_percent", 20.0f);
+        const std::string mathMode = readJsonString(doc, "imagerect_math", "tan");
 
         config.enabled = enabled;
         config.cropLeftFactor = clampFactor(leftPct);
         config.cropRightFactor = clampFactor(rightPct);
         config.cropTopFactor = clampFactor(topPct);
         config.cropBottomFactor = clampFactor(bottomPct);
+        config.useLinearImageRect = (mathMode == "linear");
 
-        Log(fmt::format("Crop config: enabled={}, left={:.1f}, right={:.1f}, top={:.1f}, bottom={:.1f}\n",
-                         config.enabled, leftPct, rightPct, topPct, bottomPct));
+        Log(fmt::format("Crop config: enabled={}, left={:.1f}, right={:.1f}, top={:.1f}, bottom={:.1f}, imagerect_math={}\n",
+                         config.enabled, leftPct, rightPct, topPct, bottomPct,
+                         config.useLinearImageRect ? "linear" : "tan"));
 
         return config;
     }
