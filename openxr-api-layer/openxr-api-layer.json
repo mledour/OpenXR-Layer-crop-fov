@@ -4,7 +4,7 @@
     "name": "XR_APILAYER_name",
     "library_path": ".\\XR_APILAYER_name.dll",
     "api_version": "1.0",
-    "implementation_version": "1",
+    "implementation_version": "2",
     "description": "Narrows the effective field of view and swapchain resolution to reduce GPU load.",
     "functions": {
       "xrNegotiateLoaderApiLayerInterface": "xrNegotiateLoaderApiLayerInterface"
