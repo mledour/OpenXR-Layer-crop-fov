@@ -31,7 +31,7 @@ AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher=mledour
 AppPublisherURL=https://github.com/mledour/OpenXR-Layer-crop-fov
 AppSupportURL=https://github.com/mledour/OpenXR-Layer-crop-fov/issues
-DefaultDirName={autopf}\OpenXR-Layers\{#MyAppName}
+DefaultDirName={autopf}\OpenXR-Layer-fov-crop
 ; No Start Menu group — this layer has no user-facing executable.
 DisableProgramGroupPage=yes
 LicenseFile=..\LICENSE

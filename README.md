@@ -80,7 +80,7 @@ is handled automatically.
 
 The installer:
 - Copies the DLL and JSON manifest to
-  `C:\Program Files\OpenXR-Layers\XR_APILAYER_MLEDOUR_fov_crop\`.
+  `C:\Program Files\OpenXR-Layer-fov-crop\`.
 - Registers the layer in `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit`.
 - Creates an entry in Add/Remove Programs for clean uninstall.
 - Program Files directory inherits the correct ACLs for sandboxed
