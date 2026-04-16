@@ -41,10 +41,13 @@
 
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <thread>
 
 using openxr_api_layer::GetInstance;
 using openxr_api_layer::OpenXrApi;
@@ -392,4 +395,395 @@ TEST_CASE("integration: xrEndFrame passes through non-projection layers untouche
     // recorder only snapshots projection layers.
     CHECK(mock::state().endFrameCallCount == 1);
     CHECK(mock::state().lastEndFrameProjLayers.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Asymmetric FOV (WMR-style): each edge narrowed by its own factor
+// ---------------------------------------------------------------------------
+
+// WMR and Varjo report non-symmetric half-FOVs. Regressions in the signed-
+// multiply logic only show up on asymmetric inputs, so we pin them.
+TEST_CASE("integration: asymmetric WMR-style FOV narrows per-edge in xrLocateViews") {
+    LayerFixture fx;
+    fx.writeSettings(R"({
+        "enabled": true,
+        "crop_left_percent": 5,
+        "crop_right_percent": 20,
+        "crop_top_percent": 30,
+        "crop_bottom_percent": 10
+    })");
+    const XrFovf wmrFov{-0.95f, 0.85f, 0.70f, -0.60f};
+    mock::state().viewCount = 2;
+    mock::state().locateFovs = {wmrFov, wmrFov};
+
+    auto* layer = fx.boot();
+
+    uint32_t count = 0;
+    std::vector<XrView> views(2, {XR_TYPE_VIEW});
+    XrViewState viewState{XR_TYPE_VIEW_STATE};
+    XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
+
+    REQUIRE(layer->xrLocateViews(reinterpret_cast<XrSession>(static_cast<uintptr_t>(0xCAFE)),
+                                 &li, &viewState, 2, &count, views.data()) == XR_SUCCESS);
+    REQUIRE(count == 2);
+
+    // Factors: 0.95, 0.80, 0.70, 0.90 (from %: 5, 20, 30, 10).
+    // Each edge is multiplied by its own factor on the signed angle.
+    CHECK(views[0].fov.angleLeft == doctest::Approx(-0.95f * 0.95f));
+    CHECK(views[0].fov.angleRight == doctest::Approx(0.85f * 0.80f));
+    CHECK(views[0].fov.angleUp == doctest::Approx(0.70f * 0.70f));
+    CHECK(views[0].fov.angleDown == doctest::Approx(-0.60f * 0.90f));
+
+    // Spec invariants that must hold after narrowing: left edge still negative,
+    // right still positive, up still positive, down still negative. A bug in
+    // the sign handling (e.g. taking abs() by mistake) would flip one of these.
+    CHECK(views[0].fov.angleLeft < 0.0f);
+    CHECK(views[0].fov.angleRight > 0.0f);
+    CHECK(views[0].fov.angleUp > 0.0f);
+    CHECK(views[0].fov.angleDown < 0.0f);
+    // Ordering: left < right, down < up (narrower-than-original implied).
+    CHECK(views[0].fov.angleLeft < views[0].fov.angleRight);
+    CHECK(views[0].fov.angleDown < views[0].fov.angleUp);
+}
+
+TEST_CASE("integration: asymmetric FOV produces asymmetric imageRect offset in xrEndFrame") {
+    LayerFixture fx;
+    fx.writeSettings(R"({
+        "enabled": true,
+        "crop_left_percent": 5,
+        "crop_right_percent": 20,
+        "crop_top_percent": 30,
+        "crop_bottom_percent": 10
+    })");
+    const XrFovf wmrFov{-0.95f, 0.85f, 0.70f, -0.60f};
+    mock::state().viewCount = 1;
+
+    auto* layer = fx.boot();
+
+    constexpr uint32_t kSwapWidth = 2048;
+    constexpr uint32_t kSwapHeight = 2048;
+    XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    sci.width = kSwapWidth;
+    sci.height = kSwapHeight;
+    sci.faceCount = 1;
+    sci.arraySize = 1;
+    sci.mipCount = 1;
+    sci.sampleCount = 1;
+    sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    XrSwapchain sc = XR_NULL_HANDLE;
+    REQUIRE(layer->xrCreateSwapchain(
+                reinterpret_cast<XrSession>(static_cast<uintptr_t>(0xCAFE)),
+                &sci, &sc) == XR_SUCCESS);
+
+    XrCompositionLayerProjectionView pv{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+    pv.fov = wmrFov;
+    pv.subImage.swapchain = sc;
+    pv.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(kSwapWidth), static_cast<int32_t>(kSwapHeight)}};
+    XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    proj.viewCount = 1;
+    proj.views = &pv;
+    const XrCompositionLayerBaseHeader* layers[1] = {
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj),
+    };
+    XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
+    fei.layerCount = 1;
+    fei.layers = layers;
+    fei.displayTime = 1;
+    fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+
+    REQUIRE(layer->xrEndFrame(reinterpret_cast<XrSession>(static_cast<uintptr_t>(0xCAFE)),
+                              &fei) == XR_SUCCESS);
+
+    REQUIRE(mock::state().lastEndFrameProjLayers.size() == 1);
+    REQUIRE(mock::state().lastEndFrameProjLayers[0].views.size() == 1);
+    const auto& submitted = mock::state().lastEndFrameProjLayers[0].views[0];
+
+    // Expected imageRect computed from the same math as the layer. We're not
+    // duplicating the crop algorithm — we call the public helper and expect
+    // the layer's output to match byte-for-byte. If the layer uses a
+    // different code path (e.g. a unit-vector approximation), this would
+    // catch it.
+    openxr_api_layer::CropConfig cfg;
+    cfg.enabled = true;
+    cfg.cropLeftFactor = 0.95f;
+    cfg.cropRightFactor = 0.80f;
+    cfg.cropTopFactor = 0.70f;
+    cfg.cropBottomFactor = 0.90f;
+    const XrRect2Di expected =
+        openxr_api_layer::computeCroppedImageRect(kSwapWidth, kSwapHeight, wmrFov, cfg);
+
+    CHECK(submitted.subImage.imageRect.offset.x == expected.offset.x);
+    CHECK(submitted.subImage.imageRect.offset.y == expected.offset.y);
+    CHECK(submitted.subImage.imageRect.extent.width == expected.extent.width);
+    CHECK(submitted.subImage.imageRect.extent.height == expected.extent.height);
+
+    // Asymmetry assertion: the top is cropped more (30%) than the bottom
+    // (10%), so the offset from the top edge should be larger than the
+    // offset from the bottom edge. This is the kind of bug a refactor could
+    // introduce by accidentally averaging top+bottom crop.
+    const int32_t topOffset = expected.offset.y;
+    const int32_t bottomOffset = static_cast<int32_t>(kSwapHeight) -
+                                 (expected.offset.y + expected.extent.height);
+    CHECK(topOffset > bottomOffset);
+}
+
+// ---------------------------------------------------------------------------
+// Live-edit: layer picks up settings.json changes after kLiveEditCheckInterval
+// frames (hard-coded to 90 in layer.cpp). We run that many frames, touch the
+// file, and verify the next frame observes the new config.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
+    LayerFixture fx;
+
+    // Initial: 10% left crop -> factor 0.9.
+    fx.writeSettings(R"({
+        "enabled": true,
+        "live_edit": true,
+        "crop_left_percent": 10,
+        "crop_right_percent": 10,
+        "crop_top_percent": 10,
+        "crop_bottom_percent": 10
+    })");
+    const XrFovf fov = defaultFov();
+    mock::state().viewCount = 1;
+
+    auto* layer = fx.boot();
+
+    // Register a swapchain so xrEndFrame has dims to work with. Not strictly
+    // required for the FOV observation, but matches a realistic frame.
+    XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    sci.width = 2048;
+    sci.height = 2048;
+    sci.faceCount = 1;
+    sci.arraySize = 1;
+    sci.mipCount = 1;
+    sci.sampleCount = 1;
+    sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    XrSwapchain sc = XR_NULL_HANDLE;
+    REQUIRE(layer->xrCreateSwapchain(
+                reinterpret_cast<XrSession>(static_cast<uintptr_t>(0xCAFE)),
+                &sci, &sc) == XR_SUCCESS);
+
+    auto submitFrame = [&]() {
+        XrCompositionLayerProjectionView pv{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        pv.fov = fov;
+        pv.subImage.swapchain = sc;
+        pv.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(sci.width), static_cast<int32_t>(sci.height)}};
+        XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        proj.viewCount = 1;
+        proj.views = &pv;
+        const XrCompositionLayerBaseHeader* layers[1] = {
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj),
+        };
+        XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
+        fei.layerCount = 1;
+        fei.layers = layers;
+        fei.displayTime = 1;
+        fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        REQUIRE(layer->xrEndFrame(reinterpret_cast<XrSession>(static_cast<uintptr_t>(0xCAFE)),
+                                  &fei) == XR_SUCCESS);
+    };
+
+    // First 89 frames: counter goes 1..89, no poll fires (90%90==0 is the
+    // trigger). Config stays at factor 0.9.
+    for (int i = 0; i < 89; ++i) submitFrame();
+    REQUIRE(!mock::state().lastEndFrameProjLayers.empty());
+    CHECK(mock::state().lastEndFrameProjLayers[0].views[0].fov.angleLeft ==
+          doctest::Approx(fov.angleLeft * 0.9f));
+
+    // Rewrite settings.json to 30% left crop -> factor 0.7. Sleep a hair so
+    // the mtime tick is observable; Windows NTFS mtime has ~100ns resolution
+    // but file-write APIs can coalesce same-second writes under load.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    fx.writeSettings(R"({
+        "enabled": true,
+        "live_edit": true,
+        "crop_left_percent": 30,
+        "crop_right_percent": 10,
+        "crop_top_percent": 10,
+        "crop_bottom_percent": 10
+    })");
+
+    // Frame 90: counter hits 90, 90%90==0, poll fires, mtime changed -> reload.
+    // The reload runs BEFORE the rest of xrEndFrame uses m_config, so this
+    // frame already sees the new factor.
+    submitFrame();
+    CHECK(mock::state().lastEndFrameProjLayers[0].views[0].fov.angleLeft ==
+          doctest::Approx(fov.angleLeft * 0.7f));
+}
+
+// ---------------------------------------------------------------------------
+// Swapchain map hygiene: xrDestroySession purges entries so the layer does
+// not treat a leftover swapchain handle as still-live for cropping purposes.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("integration: xrDestroySession purges the session's swapchain entries") {
+    LayerFixture fx;
+    fx.writeSettings(R"({
+        "enabled": true,
+        "crop_left_percent": 10,
+        "crop_right_percent": 10,
+        "crop_top_percent": 10,
+        "crop_bottom_percent": 10
+    })");
+    const XrFovf fov = defaultFov();
+    mock::state().viewCount = 1;
+
+    auto* layer = fx.boot();
+
+    // Create a session through the layer so the layer sees the handle.
+    XrSessionCreateInfo sessCI{XR_TYPE_SESSION_CREATE_INFO};
+    sessCI.systemId = 1;
+    XrSession session = XR_NULL_HANDLE;
+    REQUIRE(layer->xrCreateSession(
+                reinterpret_cast<XrInstance>(static_cast<uintptr_t>(0xBEEF)),
+                &sessCI, &session) == XR_SUCCESS);
+
+    XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    sci.width = 1024;
+    sci.height = 1024;
+    sci.faceCount = 1;
+    sci.arraySize = 1;
+    sci.mipCount = 1;
+    sci.sampleCount = 1;
+    sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    XrSwapchain sc = XR_NULL_HANDLE;
+    REQUIRE(layer->xrCreateSwapchain(session, &sci, &sc) == XR_SUCCESS);
+
+    auto submitFrameWith = [&](XrSwapchain target) {
+        XrCompositionLayerProjectionView pv{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        pv.fov = fov;
+        pv.subImage.swapchain = target;
+        pv.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(sci.width), static_cast<int32_t>(sci.height)}};
+        XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        proj.viewCount = 1;
+        proj.views = &pv;
+        const XrCompositionLayerBaseHeader* layers[1] = {
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj),
+        };
+        XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
+        fei.layerCount = 1;
+        fei.layers = layers;
+        fei.displayTime = 1;
+        fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        REQUIRE(layer->xrEndFrame(session, &fei) == XR_SUCCESS);
+    };
+
+    // First frame: swapchain is in the layer's map, so imageRect is cropped
+    // to a strict sub-rect of the 1024x1024 swapchain.
+    submitFrameWith(sc);
+    REQUIRE(mock::state().lastEndFrameProjLayers.size() == 1);
+    const auto r1 = mock::state().lastEndFrameProjLayers[0].views[0].subImage.imageRect;
+    CHECK(r1.extent.width < static_cast<int32_t>(sci.width));
+    CHECK(r1.extent.height < static_cast<int32_t>(sci.height));
+
+    // Destroy the session WITHOUT destroying the swapchain. This is the
+    // misbehaving-app / implicit-teardown case the purge defends against.
+    REQUIRE(layer->xrDestroySession(session) == XR_SUCCESS);
+
+    // Replay the same xrEndFrame. If the purge worked the layer's map no
+    // longer has sc, so swapInfo.width stays 0 -> imageRect pass-through.
+    // If the purge failed, we'd see the same crop as the first frame.
+    submitFrameWith(sc);
+    REQUIRE(mock::state().lastEndFrameProjLayers.size() == 1);
+    const auto r2 = mock::state().lastEndFrameProjLayers[0].views[0].subImage.imageRect;
+    CHECK(r2.offset.x == 0);
+    CHECK(r2.offset.y == 0);
+    CHECK(r2.extent.width == static_cast<int32_t>(sci.width));
+    CHECK(r2.extent.height == static_cast<int32_t>(sci.height));
+}
+
+// ---------------------------------------------------------------------------
+// Const-input hygiene: the layer must never mutate any struct the caller
+// passed as a const input. A const_cast / aliasing bug could regress this.
+// We compare byte-for-byte before vs after. POD-only structs make memcmp
+// sound here (no padding-holes concerns since the compiler lays them out
+// deterministically within a single TU).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("integration: layer never mutates caller's const inputs") {
+    LayerFixture fx;
+    fx.writeSettings(R"({
+        "enabled": true,
+        "crop_left_percent": 10,
+        "crop_right_percent": 15,
+        "crop_top_percent": 20,
+        "crop_bottom_percent": 25
+    })");
+    mock::state().viewCount = 2;
+
+    auto* layer = fx.boot();
+
+    // --- xrLocateViews: locateInfo must be untouched. ---
+    XrViewLocateInfo locateInfo{XR_TYPE_VIEW_LOCATE_INFO};
+    locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locateInfo.displayTime = 42;
+    locateInfo.space = reinterpret_cast<XrSpace>(static_cast<uintptr_t>(0xBADF00D));
+    const XrViewLocateInfo locateInfoCopy = locateInfo;
+
+    uint32_t count = 0;
+    std::vector<XrView> outViews(2, {XR_TYPE_VIEW});
+    XrViewState viewState{XR_TYPE_VIEW_STATE};
+    REQUIRE(layer->xrLocateViews(reinterpret_cast<XrSession>(static_cast<uintptr_t>(0xCAFE)),
+                                 &locateInfo, &viewState, 2, &count, outViews.data()) ==
+            XR_SUCCESS);
+    CHECK(std::memcmp(&locateInfo, &locateInfoCopy, sizeof(locateInfo)) == 0);
+
+    // --- xrCreateSwapchain: createInfo must be untouched. Layer snapshots
+    // into its map and zeros the `next` on its private copy, not on ours.
+    XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    sci.width = 1920;
+    sci.height = 2160;
+    sci.faceCount = 1;
+    sci.arraySize = 1;
+    sci.mipCount = 1;
+    sci.sampleCount = 1;
+    sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    // Fake non-null `next` — the layer strips it from its snapshot, but
+    // the caller's original must stay byte-identical.
+    int dummyNext = 0;
+    sci.next = &dummyNext;
+    const XrSwapchainCreateInfo sciCopy = sci;
+    XrSwapchain sc = XR_NULL_HANDLE;
+    REQUIRE(layer->xrCreateSwapchain(
+                reinterpret_cast<XrSession>(static_cast<uintptr_t>(0xCAFE)),
+                &sci, &sc) == XR_SUCCESS);
+    CHECK(std::memcmp(&sci, &sciCopy, sizeof(sci)) == 0);
+
+    // --- xrEndFrame: frameEndInfo + every projection view it points to
+    // must be untouched. The layer writes into its modifiedViewsArrays and
+    // submits those; the caller's array is an input only.
+    XrCompositionLayerProjectionView pv[2]{};
+    for (int i = 0; i < 2; ++i) {
+        pv[i].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+        pv[i].fov = defaultFov();
+        pv[i].subImage.swapchain = sc;
+        pv[i].subImage.imageRect = {{0, 0}, {1920, 2160}};
+        pv[i].subImage.imageArrayIndex = static_cast<uint32_t>(i);
+        pv[i].pose = XrPosef{{0.0f, 0.0f, 0.0f, 1.0f}, {0.1f * i, 0.0f, 0.0f}};
+    }
+    XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    proj.viewCount = 2;
+    proj.views = pv;
+    const XrCompositionLayerBaseHeader* layersIn[1] = {
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj),
+    };
+    XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
+    fei.layerCount = 1;
+    fei.layers = layersIn;
+    fei.displayTime = 100;
+    fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+
+    const XrCompositionLayerProjectionView pvCopy[2] = {pv[0], pv[1]};
+    const XrCompositionLayerProjection projCopy = proj;
+    const XrFrameEndInfo feiCopy = fei;
+
+    REQUIRE(layer->xrEndFrame(reinterpret_cast<XrSession>(static_cast<uintptr_t>(0xCAFE)),
+                              &fei) == XR_SUCCESS);
+
+    CHECK(std::memcmp(&fei, &feiCopy, sizeof(fei)) == 0);
+    CHECK(std::memcmp(&proj, &projCopy, sizeof(proj)) == 0);
+    CHECK(std::memcmp(&pv[0], &pvCopy[0], sizeof(pv[0])) == 0);
+    CHECK(std::memcmp(&pv[1], &pvCopy[1], sizeof(pv[1])) == 0);
 }
