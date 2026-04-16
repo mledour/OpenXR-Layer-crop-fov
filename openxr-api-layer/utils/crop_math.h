@@ -45,15 +45,6 @@ namespace openxr_api_layer {
         float cropTopFactor = 0.85f;    // percent 15 -> factor 0.85
         float cropBottomFactor = 0.80f; // percent 20 -> factor 0.80
 
-        // Controls how computeCroppedImageRect maps crop factors to pixels.
-        // false (default): tan-based — geometrically correct perspective
-        //   projection, but the compositor's lens distortion correction can
-        //   make the crop edges appear slightly curved on some HMDs.
-        // true: linear-in-angle approximation — ignores the rendered FOV and
-        //   treats pixels as uniformly distributed in angle-space. Less
-        //   accurate but can produce straighter-looking black-band edges.
-        bool useLinearImageRect = false;
-
         // When true, the layer re-reads settings.json every ~1 second (90
         // frames) to pick up changes without restarting the game. Intended
         // for tuning sessions — leave false in normal use.
@@ -137,30 +128,6 @@ namespace openxr_api_layer {
                                              uint32_t swapHeight,
                                              const XrFovf& renderedFov,
                                              const CropConfig& cfg) {
-        // ---- Linear-in-angle fallback (ignores renderedFov) ----------------
-        // Treats pixels as uniformly distributed in angle-space rather than
-        // tan-space. Geometrically inaccurate for wide VR FOVs but can
-        // produce straighter-looking black-band edges on HMDs where the
-        // compositor's lens-distortion correction amplifies the curvature
-        // of tan-based crop edges.
-        if (cfg.useLinearImageRect) {
-            const float leftCropPixels = swapWidth * (1.0f - cfg.cropLeftFactor);
-            const float rightCropPixels = swapWidth * (1.0f - cfg.cropRightFactor);
-            const float topCropPixels = swapHeight * (1.0f - cfg.cropTopFactor);
-            const float bottomCropPixels = swapHeight * (1.0f - cfg.cropBottomFactor);
-
-            const int32_t newOffsetX = static_cast<int32_t>(leftCropPixels * 0.5f + 0.5f);
-            const int32_t newOffsetY = static_cast<int32_t>(topCropPixels * 0.5f + 0.5f);
-            const int32_t newWidth = static_cast<int32_t>(
-                swapWidth - leftCropPixels * 0.5f - rightCropPixels * 0.5f + 0.5f);
-            const int32_t newHeight = static_cast<int32_t>(
-                swapHeight - topCropPixels * 0.5f - bottomCropPixels * 0.5f + 0.5f);
-
-            if (newWidth <= 0 || newHeight <= 0) return XrRect2Di{};
-            return XrRect2Di{{newOffsetX, newOffsetY}, {newWidth, newHeight}};
-        }
-
-        // ---- Tan-based (default) -------------------------------------------
         // OpenXR convention: angleLeft and angleDown are negative, angleRight
         // and angleUp are positive. Take magnitudes for tan() — safer than
         // relying on tan() being odd when the caller passes weird values.
