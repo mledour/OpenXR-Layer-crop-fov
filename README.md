@@ -67,25 +67,46 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Each release ZIP contains the DLL, its PDB, the processed
-`openxr-api-layer.json`, and the install / uninstall PowerShell scripts.
+Each release includes an Inno Setup **installer** (recommended) and raw
+**ZIPs** (for manual install or development).
 
 ## Installing
 
-Either download the `Release-x64` ZIP from the latest
-[GitHub Release](../../releases/latest) and unzip it to a permanent location,
-or build locally and use `bin\x64\Release\`. Then run `Install-Layer.ps1`
-from that directory.
+### Installer (recommended)
 
-The script writes the layer manifest path under
-`HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit` as required by the
-[OpenXR Loader spec](https://registry.khronos.org/OpenXR/specs/1.0/loader.html).
+Download `XR_APILAYER_MLEDOUR_fov_crop-<version>-x64-Setup.exe` from the
+latest [GitHub Release](../../releases/latest) and run it. Admin elevation
+is handled automatically.
 
-> ⚠️ The current `Install-Layer.ps1` does **not** yet set ACLs for sandboxed
-> identities (All Packages / All Restricted Packages) and does **not** sign
-> the DLL. Both are acceptance criteria before this layer is ready for
-> real users — see rules 3 and 5 in
-> [`../docs/openxr_api_layers_best_practices.md`](../docs/openxr_api_layers_best_practices.md).
+The installer:
+- Copies the DLL and JSON manifest to
+  `C:\Program Files\OpenXR-Layers\XR_APILAYER_MLEDOUR_fov_crop\`.
+- Registers the layer in `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit`.
+- Creates an entry in Add/Remove Programs for clean uninstall.
+- Program Files directory inherits the correct ACLs for sandboxed
+  identities (WebXR in Chrome, OpenXR Tools for WMR).
+
+### Manual (ZIP)
+
+Download the `Release-x64` ZIP from the latest
+[GitHub Release](../../releases/latest), unzip it to a **permanent**
+location (the registry entry points at the DLL on disk, so the folder
+must not move), and run `Install-Layer.ps1` from an elevated PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Install-Layer.ps1
+```
+
+> ⚠️ Manual installs outside of `C:\Program Files\` may not be readable
+> by sandboxed identities. The installer method avoids this issue.
+
+### Uninstalling
+
+- **Installer**: Settings → Apps → XR_APILAYER_MLEDOUR_fov_crop → Uninstall
+- **Manual**: run `Uninstall-Layer.ps1` from an elevated PowerShell
+
+> ⚠️ The DLL is **not code-signed**. Anti-cheat systems may reject unsigned
+> DLLs loaded into OpenXR games. A signed release is planned.
 
 ## Disabling without uninstalling
 
@@ -101,10 +122,29 @@ by the loader for that process.
 
 ## Configuration
 
-> _Planned:_ a JSON config file under
-> `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\config.json` with fields like
-> `resolution_scale` (0.5 – 1.0) and `fov_scale`. Not implemented yet; the
-> layer currently ships no user-facing knobs.
+The layer reads `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\settings.json`
+at startup (or live if `live_edit` is enabled). If the file is missing,
+defaults are used.
+
+```json
+{
+  "enabled": true,
+  "crop_left_percent": 10,
+  "crop_right_percent": 10,
+  "crop_top_percent": 15,
+  "crop_bottom_percent": 20,
+  "live_edit": false
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Master switch. `false` bypasses the layer entirely. |
+| `crop_left_percent` | float | `10` | Percentage to crop from the left edge (0-50). |
+| `crop_right_percent` | float | `10` | Percentage to crop from the right edge (0-50). |
+| `crop_top_percent` | float | `15` | Percentage to crop from the top edge (0-50). |
+| `crop_bottom_percent` | float | `20` | Percentage to crop from the bottom edge (0-50). |
+| `live_edit` | bool | `false` | When true, the layer re-reads the config file every ~1 second. Set to true before launching the game to tune values in real time; set to false for normal use. |
 
 ## License and attribution
 
