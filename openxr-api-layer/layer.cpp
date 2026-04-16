@@ -106,15 +106,17 @@ namespace openxr_api_layer {
         const float rightPct = readJsonFloat(doc, "crop_right_percent", 10.0f);
         const float topPct = readJsonFloat(doc, "crop_top_percent", 15.0f);
         const float bottomPct = readJsonFloat(doc, "crop_bottom_percent", 20.0f);
+        const bool liveEdit = readJsonBool(doc, "live_edit", false);
 
         config.enabled = enabled;
         config.cropLeftFactor = clampFactor(leftPct);
         config.cropRightFactor = clampFactor(rightPct);
         config.cropTopFactor = clampFactor(topPct);
         config.cropBottomFactor = clampFactor(bottomPct);
+        config.liveEdit = liveEdit;
 
-        Log(fmt::format("Crop config: enabled={}, left={:.1f}, right={:.1f}, top={:.1f}, bottom={:.1f}\n",
-                         config.enabled, leftPct, rightPct, topPct, bottomPct));
+        Log(fmt::format("Crop config: enabled={}, left={:.1f}, right={:.1f}, top={:.1f}, bottom={:.1f}, live_edit={}\n",
+                         config.enabled, leftPct, rightPct, topPct, bottomPct, config.liveEdit));
 
         return config;
     }
@@ -188,6 +190,17 @@ namespace openxr_api_layer {
             if (!m_config.enabled) {
                 Log(fmt::format("{} is disabled in settings.json\n", LayerName));
                 m_bypassApiLayer = true;
+            }
+
+            // If live_edit is on, record the config file path and its current
+            // mtime so xrEndFrame can detect changes without recomputing the
+            // path each frame.
+            if (m_config.liveEdit) {
+                m_configFilePath = localAppData / "settings.json";
+                try {
+                    m_configLastWriteTime = std::filesystem::last_write_time(m_configFilePath);
+                } catch (...) {}
+                Log(fmt::format("Live-edit enabled, watching {}\n", m_configFilePath.string()));
             }
 
             if (m_bypassApiLayer) {
@@ -440,6 +453,23 @@ namespace openxr_api_layer {
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEndFrame
         XrResult xrEndFrame(XrSession session, const XrFrameEndInfo* frameEndInfo) override {
+            // ---- Live-edit: periodic config reload --------------------------
+            // Runs before the enabled check so the user can re-enable the
+            // layer mid-session (though swapchain dims stay fixed — see README).
+            if (m_config.liveEdit && ++m_liveEditFrameCounter % kLiveEditCheckInterval == 0) {
+                try {
+                    const auto mtime = std::filesystem::last_write_time(m_configFilePath);
+                    if (mtime != m_configLastWriteTime) {
+                        m_configLastWriteTime = mtime;
+                        m_config = openxr_api_layer::loadConfig(localAppData);
+                        // If the reloaded config turned live_edit off, this is
+                        // the last reload — the next frame skips the check.
+                    }
+                } catch (...) {
+                    // File mid-write, locked, or deleted. Skip, try next interval.
+                }
+            }
+
             if (!m_config.enabled || !frameEndInfo || frameEndInfo->layerCount == 0) {
                 return OpenXrApi::xrEndFrame(session, frameEndInfo);
             }
@@ -522,6 +552,13 @@ namespace openxr_api_layer {
         // Crop layer state.
         CropConfig m_config;
         bool m_fovLogged{false};
+
+        // Live-edit: poll the config file for changes every kLiveEditCheckInterval
+        // frames (~1 s at 90 Hz). Only active when m_config.liveEdit is true.
+        static constexpr uint32_t kLiveEditCheckInterval = 90u;
+        uint32_t m_liveEditFrameCounter{0};
+        std::filesystem::path m_configFilePath;
+        std::filesystem::file_time_type m_configLastWriteTime{};
 
         // We keep the owning session alongside the createInfo so that when a
         // session is destroyed we can purge its swapchains without walking

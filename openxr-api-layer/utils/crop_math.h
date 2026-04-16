@@ -44,6 +44,11 @@ namespace openxr_api_layer {
         float cropRightFactor = 0.90f;  // percent 10 -> factor 0.90
         float cropTopFactor = 0.85f;    // percent 15 -> factor 0.85
         float cropBottomFactor = 0.80f; // percent 20 -> factor 0.80
+
+        // When true, the layer re-reads settings.json every ~1 second (90
+        // frames) to pick up changes without restarting the game. Intended
+        // for tuning sessions — leave false in normal use.
+        bool liveEdit = false;
     };
 
     // Maps a user-facing "crop X percent" value in [0, 50] to a factor in
