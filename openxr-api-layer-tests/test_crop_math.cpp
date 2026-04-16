@@ -22,7 +22,9 @@
 
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <limits>
+#include <random>
 
 #include <utils/crop_math.h>
 
@@ -352,4 +354,225 @@ TEST_CASE("narrowFov: negative half-angles become less negative (narrower) under
     CHECK(out.angleRight < orig.angleRight);
     CHECK(out.angleUp < orig.angleUp);
     CHECK(out.angleDown > orig.angleDown);
+}
+
+// ---------------------------------------------------------------------------
+// Property-based: randomized invariants
+//
+// Goal: catch regressions that sit in the gap between the hand-written cases
+// above. We generate N random (CropConfig, XrFovf, swapchain) triples from a
+// deterministically-seeded PRNG and check invariants that must hold for ALL
+// valid inputs. Determinism matters — when CI fails we want the exact same
+// triple on the next run so we can debug it. The seed below is arbitrary; if
+// it ever masks a class of bugs, bump it and check the new run still passes.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr uint32_t kPropertySeed = 0xB00B5u;
+constexpr int kPropertyIterations = 200;
+
+struct Sample {
+    CropConfig cfg;
+    XrFovf fov;
+    uint32_t swapWidth;
+    uint32_t swapHeight;
+};
+
+// Generator: factors in [0.5, 0.95], FOVs in realistic HMD territory
+// (half-angles 0.2..1.2 rad ≈ 11°..69°), swapchain dims in [256, 4096] —
+// wide enough to exercise alignment edges, narrow enough to keep the loop
+// cheap.
+//
+// The 0.95 upper bound is a concession to rounding: with factor >~0.99 the
+// per-edge pixel-space delta is below the round-half-up step in
+// computeCroppedImageRect, so the "strict shrink" invariant becomes a
+// probabilistic flake. 0.95 keeps every axis a guaranteed-observable crop
+// without losing meaningful coverage — real configs rarely sit above 0.9.
+Sample makeSample(std::mt19937& rng) {
+    std::uniform_real_distribution<float> factor(0.5f, 0.95f);
+    std::uniform_real_distribution<float> halfAngle(0.20f, 1.20f);
+    std::uniform_int_distribution<uint32_t> dim(256u, 4096u);
+
+    Sample s{};
+    s.cfg.enabled = true;
+    s.cfg.cropLeftFactor = factor(rng);
+    s.cfg.cropRightFactor = factor(rng);
+    s.cfg.cropTopFactor = factor(rng);
+    s.cfg.cropBottomFactor = factor(rng);
+    // OpenXR convention: angleLeft, angleDown are negative; angleRight,
+    // angleUp are positive. Each side's magnitude is independent — this is
+    // what gives WMR/Varjo asymmetric FOVs.
+    s.fov.angleLeft = -halfAngle(rng);
+    s.fov.angleRight = halfAngle(rng);
+    s.fov.angleUp = halfAngle(rng);
+    s.fov.angleDown = -halfAngle(rng);
+    s.swapWidth = dim(rng);
+    s.swapHeight = dim(rng);
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("property: narrowFov preserves per-edge magnitude × factor and sign") {
+    std::mt19937 rng(kPropertySeed);
+    for (int i = 0; i < kPropertyIterations; ++i) {
+        const Sample s = makeSample(rng);
+        const XrFovf out = narrowFov(s.fov, s.cfg);
+
+        // Magnitude scales by the per-edge factor. We compare on absolute
+        // values so the sign convention (L/D negative) does not muddle the
+        // assertion. A single failure here fingers the edge that regressed.
+        INFO("iteration ", i);
+        CHECK(std::abs(out.angleLeft) ==
+              doctest::Approx(std::abs(s.fov.angleLeft) * s.cfg.cropLeftFactor));
+        CHECK(std::abs(out.angleRight) ==
+              doctest::Approx(std::abs(s.fov.angleRight) * s.cfg.cropRightFactor));
+        CHECK(std::abs(out.angleUp) ==
+              doctest::Approx(std::abs(s.fov.angleUp) * s.cfg.cropTopFactor));
+        CHECK(std::abs(out.angleDown) ==
+              doctest::Approx(std::abs(s.fov.angleDown) * s.cfg.cropBottomFactor));
+
+        // Sign preservation. An abs()-then-multiply regression (which would
+        // still pass the magnitude check above on positive inputs) gets
+        // caught here.
+        CHECK(out.angleLeft <= 0.0f);
+        CHECK(out.angleRight >= 0.0f);
+        CHECK(out.angleUp >= 0.0f);
+        CHECK(out.angleDown <= 0.0f);
+    }
+}
+
+TEST_CASE("property: narrowFov preserves left<right and down<up ordering") {
+    std::mt19937 rng(kPropertySeed + 1);
+    for (int i = 0; i < kPropertyIterations; ++i) {
+        const Sample s = makeSample(rng);
+        const XrFovf out = narrowFov(s.fov, s.cfg);
+        INFO("iteration ", i);
+        // Input always satisfies this by construction; a narrowed FOV that
+        // flips the ordering would mean one edge crossed zero, which is
+        // only possible with a negative factor — clampFactor would catch
+        // that upstream but we defend-in-depth here.
+        CHECK(out.angleLeft < out.angleRight);
+        CHECK(out.angleDown < out.angleUp);
+    }
+}
+
+TEST_CASE("property: scaleSwapchainExtents produces smaller, aligned, >= 8 dims") {
+    std::mt19937 rng(kPropertySeed + 2);
+    for (int i = 0; i < kPropertyIterations; ++i) {
+        const Sample s = makeSample(rng);
+        const Extent2D out = scaleSwapchainExtents(s.swapWidth, s.swapHeight, s.cfg);
+
+        INFO("iteration ", i, " input=", s.swapWidth, "x", s.swapHeight,
+             " -> ", out.width, "x", out.height);
+
+        // Never exceed the input on either axis — we only ever shrink.
+        CHECK(out.width <= s.swapWidth);
+        CHECK(out.height <= s.swapHeight);
+        // Alignment: must be a multiple of 8 (kDimensionAlignment) so BC
+        // formats and tiled memory layouts are happy. Masking with 7 is the
+        // inverse of the `& ~(8-1)` in the implementation.
+        CHECK((out.width & 7u) == 0u);
+        CHECK((out.height & 7u) == 0u);
+        // Floor at 8 so no runtime ever sees a zero-dim swapchain.
+        CHECK(out.width >= 8u);
+        CHECK(out.height >= 8u);
+    }
+}
+
+TEST_CASE("property: computeCroppedImageRect stays inside the swapchain and shrinks it") {
+    std::mt19937 rng(kPropertySeed + 3);
+    for (int i = 0; i < kPropertyIterations; ++i) {
+        const Sample s = makeSample(rng);
+        const XrRect2Di rect = computeCroppedImageRect(
+            s.swapWidth, s.swapHeight, s.fov, s.cfg);
+
+        INFO("iteration ", i,
+             " swap=", s.swapWidth, "x", s.swapHeight,
+             " rect=(", rect.offset.x, ",", rect.offset.y,
+             ";", rect.extent.width, "x", rect.extent.height, ")");
+
+        // Non-degenerate: positive extents and a non-negative offset.
+        CHECK(rect.extent.width > 0);
+        CHECK(rect.extent.height > 0);
+        CHECK(rect.offset.x >= 0);
+        CHECK(rect.offset.y >= 0);
+        // Fits entirely inside the swapchain. Off-by-one here is how
+        // submissions start hitting XR_ERROR_SWAPCHAIN_RECT_INVALID on
+        // strict runtimes (Varjo in particular).
+        CHECK(rect.offset.x + rect.extent.width <= static_cast<int32_t>(s.swapWidth));
+        CHECK(rect.offset.y + rect.extent.height <= static_cast<int32_t>(s.swapHeight));
+
+        // When ANY factor is strictly < 1 the cropped axis must strictly
+        // shrink (the other axis may still equal the swapchain, so we test
+        // per-axis). Skips the case where all factors are exactly 1.0 —
+        // possible but vanishingly unlikely from the uniform distribution
+        // above. We still guard it for deterministic correctness.
+        const bool xShrinks =
+            s.cfg.cropLeftFactor < 1.0f || s.cfg.cropRightFactor < 1.0f;
+        const bool yShrinks =
+            s.cfg.cropTopFactor < 1.0f || s.cfg.cropBottomFactor < 1.0f;
+        if (xShrinks) {
+            CHECK(static_cast<uint32_t>(rect.extent.width) < s.swapWidth);
+        }
+        if (yShrinks) {
+            CHECK(static_cast<uint32_t>(rect.extent.height) < s.swapHeight);
+        }
+    }
+}
+
+TEST_CASE("property: computeCroppedImageRect matches tan-space of the narrowed FOV") {
+    // This is the tightest invariant: the rect's edges, interpreted as pixel
+    // fractions of the swapchain in tan-space of the rendered FOV, must
+    // match the tan of the narrowed half-angles. If this holds, the
+    // runtime composites the submitted image with the correct frustum.
+    //
+    // Pixels in an XrSwapchain are uniform in tan-space: fraction
+    //   (rect.offset.x) / swapWidth  = (tan(|L|) - tan(|L|*fL)) / (tan(|L|) + tan(|R|))
+    // with a matching identity for the other edges. We rebuild the four
+    // fractions from the layer's rect and compare against the formula
+    // directly. A ~1 px tolerance covers the round-half-up quantization.
+    std::mt19937 rng(kPropertySeed + 4);
+    for (int i = 0; i < kPropertyIterations; ++i) {
+        const Sample s = makeSample(rng);
+        const XrRect2Di rect = computeCroppedImageRect(
+            s.swapWidth, s.swapHeight, s.fov, s.cfg);
+
+        const float absL = std::abs(s.fov.angleLeft);
+        const float absR = std::abs(s.fov.angleRight);
+        const float absU = std::abs(s.fov.angleUp);
+        const float absD = std::abs(s.fov.angleDown);
+
+        const float tanL = std::tan(absL);
+        const float tanR = std::tan(absR);
+        const float tanU = std::tan(absU);
+        const float tanD = std::tan(absD);
+        const float totalX = tanL + tanR;
+        const float totalY = tanU + tanD;
+
+        const float expectLeftFrac = (tanL - std::tan(absL * s.cfg.cropLeftFactor)) / totalX;
+        const float expectRightFrac = (tanL + std::tan(absR * s.cfg.cropRightFactor)) / totalX;
+        const float expectTopFrac = (tanU - std::tan(absU * s.cfg.cropTopFactor)) / totalY;
+        const float expectBotFrac = (tanU + std::tan(absD * s.cfg.cropBottomFactor)) / totalY;
+
+        const float gotLeftFrac = rect.offset.x / static_cast<float>(s.swapWidth);
+        const float gotRightFrac = (rect.offset.x + rect.extent.width) /
+                                   static_cast<float>(s.swapWidth);
+        const float gotTopFrac = rect.offset.y / static_cast<float>(s.swapHeight);
+        const float gotBotFrac = (rect.offset.y + rect.extent.height) /
+                                 static_cast<float>(s.swapHeight);
+
+        INFO("iteration ", i);
+        // 1px of tolerance on each side, expressed as a fraction of the
+        // respective axis. Round-half-up in the implementation can move
+        // each edge by up to 0.5 pixels; we allow a bit more to absorb
+        // the tan()+float arithmetic jitter.
+        const float tolX = 1.0f / static_cast<float>(s.swapWidth);
+        const float tolY = 1.0f / static_cast<float>(s.swapHeight);
+        CHECK(std::abs(gotLeftFrac - expectLeftFrac) < tolX);
+        CHECK(std::abs(gotRightFrac - expectRightFrac) < tolX);
+        CHECK(std::abs(gotTopFrac - expectTopFrac) < tolY);
+        CHECK(std::abs(gotBotFrac - expectBotFrac) < tolY);
+    }
 }

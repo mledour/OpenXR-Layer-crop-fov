@@ -81,18 +81,26 @@ jobs:
           /verbosity:minimal
           /nologo
 
-      # Run the unit tests for the pure crop-math helpers. The test binary is
-      # built by the same msbuild invocation as the layer DLL (it's a second
-      # project in the .sln) and drops alongside the DLL in bin\x64\<config>\.
-      # A non-zero exit fails the job.
-      - name: Run unit tests (${{ matrix.configuration }} | x64)
+      # Run the test binary. It covers two layers:
+      #   - Unit tests (test_crop_math.cpp)    : pure crop-math helpers.
+      #   - Integration tests (test_integration.cpp): drive the real
+      #     OpenXrLayer class against a mock OpenXR runtime, exercising
+      #     xrEnumerateViewConfigurationViews / xrLocateViews / xrEndFrame
+      #     and the swapchain bookkeeping without needing a loader, a GPU,
+      #     or a real HMD. This is the bar every PR must clear.
+      # The binary is built by the same msbuild invocation as the layer DLL
+      # (it's a second project in the .sln) and drops alongside the DLL in
+      # bin\x64\<config>\. A non-zero exit fails the job.
+      - name: Run unit + integration tests (${{ matrix.configuration }} | x64)
         shell: pwsh
         run: |
           $exe = "bin\x64\${{ matrix.configuration }}\openxr-api-layer-tests.exe"
           if (-not (Test-Path $exe)) {
             throw "Test binary not found at $exe"
           }
-          & $exe
+          # --reporters=console for a readable log in the GitHub Actions UI;
+          # --force-colors so the Actions terminal renders pass/fail nicely.
+          & $exe --reporters=console --force-colors
           if ($LASTEXITCODE -ne 0) {
             throw "openxr-api-layer-tests.exe returned $LASTEXITCODE"
           }
