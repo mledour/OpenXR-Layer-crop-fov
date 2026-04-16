@@ -53,6 +53,11 @@ namespace openxr_api_layer {
         //   treats pixels as uniformly distributed in angle-space. Less
         //   accurate but can produce straighter-looking black-band edges.
         bool useLinearImageRect = false;
+
+        // When true, the layer re-reads settings.json every ~1 second (90
+        // frames) to pick up changes without restarting the game. Intended
+        // for tuning sessions — leave false in normal use.
+        bool liveEdit = false;
     };
 
     // Maps a user-facing "crop X percent" value in [0, 50] to a factor in
