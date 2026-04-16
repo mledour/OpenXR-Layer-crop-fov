@@ -97,6 +97,38 @@ jobs:
             throw "openxr-api-layer-tests.exe returned $LASTEXITCODE"
           }
 
+      # ---- Inno Setup installer (Release only) --------------------------
+      # Produces a single Setup.exe that installs the DLL + JSON manifest
+      # to Program Files (correct ACLs for sandboxed identities), registers
+      # the layer in HKLM, and creates an Add/Remove Programs uninstaller.
+      - name: Install Inno Setup
+        if: matrix.configuration == 'Release'
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "ISCC.exe not found at $iscc"
+          }
+          & $iscc /DMyAppVersion=$env:LAYER_VERSION "installer\installer.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "ISCC.exe returned $LASTEXITCODE"
+          }
+          $exe = Get-ChildItem "bin\installer\*.exe" | Select-Object -First 1
+          Write-Host "Installer built: $($exe.Name) ($($exe.Length) bytes)"
+
+      - name: Upload installer artifact
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.LAYER_NAME }}-Setup-x64
+          path: bin/installer/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
       # Stage the files a user actually needs to install the layer:
       # the DLL, its PDB, the processed JSON manifest, and the install scripts.
       # We do NOT zip here — actions/upload-artifact@v4 zips on its own, and
@@ -173,22 +205,27 @@ jobs:
         with:
           path: artifacts
 
-      - name: Package release ZIPs
+      - name: Package release assets
         run: |
           set -euo pipefail
           mkdir -p release
           cd artifacts
           for dir in */; do
             name="${dir%/}"
-            # `cd && zip .` puts files at the ZIP root (no nested folder).
-            ( cd "$name" && zip -r "../../release/${name}.zip" . )
+            if [[ "$name" == *-Setup-* ]]; then
+              # Installer .exe — copy directly, do not zip.
+              cp "$name"/*.exe ../release/
+            else
+              # Standard artifact — zip into release.
+              ( cd "$name" && zip -r "../../release/${name}.zip" . )
+            fi
           done
           ls -la ../release/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*.zip
+          files: release/*
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
@@ -199,19 +236,32 @@ jobs:
             OpenXR API layer built from commit `${{ github.sha }}`.
 
             ### Assets
-            - `${{ env.LAYER_NAME }}-Release-x64.zip` — optimized build, for end users
-            - `${{ env.LAYER_NAME }}-Debug-x64.zip` — debug build with full symbols, for troubleshooting
+            | File | Description |
+            |------|-------------|
+            | `${{ env.LAYER_NAME }}-*-x64-Setup.exe` | **Installer (recommended)** — installs to Program Files, registers the layer, creates uninstaller in Add/Remove Programs |
+            | `${{ env.LAYER_NAME }}-Release-x64.zip` | ZIP for manual install (DLL + JSON + PowerShell scripts) |
+            | `${{ env.LAYER_NAME }}-Debug-x64.zip` | Debug build with full symbols, for troubleshooting |
 
-            ### Install
-            1. Download one of the ZIPs above (normally `Release-x64`).
-            2. Unzip to a **permanent** location (not your Downloads folder).
-               The registry entry points at the DLL on disk, so the folder must not move.
-               Recommended: `C:\Program Files\OpenXR-Layers\${{ env.LAYER_NAME }}\`.
-            3. Open an **elevated** PowerShell and run:
+            ### Install (installer)
+            1. Download the `...-Setup.exe` above.
+            2. Run it — admin elevation is handled automatically.
+            3. The layer is installed to `C:\Program Files\OpenXR-Layers\${{ env.LAYER_NAME }}\`
+               and registered with the OpenXR loader.
+
+            ### Install (manual / ZIP)
+            1. Download `...-Release-x64.zip` and unzip to a **permanent** location.
+            2. Open an **elevated** PowerShell and run:
                ```powershell
                powershell -ExecutionPolicy Bypass -File .\Install-Layer.ps1
                ```
 
+            ### Uninstall
+            - **Installer**: Settings → Apps → ${{ env.LAYER_NAME }} → Uninstall
+            - **Manual**: run `Uninstall-Layer.ps1` from an elevated PowerShell
+
+            ### Disable without uninstalling
+            Set the environment variable `DISABLE_${{ env.LAYER_NAME }}=1` for the
+            target process.
+
             > ⚠️ This build is **not code-signed**. Anti-cheat systems may reject it
-            > and refuse to let OpenXR games load. A signed release is planned — see
-            > the project CLAUDE.md for the signing checklist.
+            > and refuse to let OpenXR games load. A signed release is planned.
