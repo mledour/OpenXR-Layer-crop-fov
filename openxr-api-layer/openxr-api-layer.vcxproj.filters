@@ -47,6 +47,9 @@
     <ClInclude Include="utils\crop_math.h">
       <Filter>Utilities</Filter>
     </ClInclude>
+    <ClInclude Include="utils\name_utils.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">

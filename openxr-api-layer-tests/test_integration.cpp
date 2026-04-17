@@ -81,11 +81,25 @@ struct LayerFixture {
         std::filesystem::remove_all(configDir, ec);
     }
 
-    // Writes settings.json into the fixture's localAppData. Pass empty string
-    // to skip (layer will use defaults).
+    // Writes the global settings.json template into the fixture's
+    // localAppData. On the next boot(), the layer bootstraps the per-app
+    // config (test_settings.json) from this file. Pass empty string to skip
+    // (layer will use defaults or whatever a previous writePerAppSettings
+    // put in place).
     void writeSettings(const std::string& json) {
         if (json.empty()) return;
         std::ofstream f(configDir / "settings.json");
+        f << json;
+    }
+
+    // Writes directly to the per-app config file (test_settings.json) that
+    // the fixture's boot() will use (applicationName = "test" -> slug
+    // "test"). Use this for post-boot mutations that need the live-edit
+    // watcher to observe the change — writeSettings() targets the template,
+    // which the watcher does not monitor.
+    void writePerAppSettings(const std::string& json) {
+        if (json.empty()) return;
+        std::ofstream f(configDir / "test_settings.json");
         f << json;
     }
 
@@ -592,11 +606,13 @@ TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
     CHECK(mock::state().lastEndFrameProjLayers[0].views[0].fov.angleLeft ==
           doctest::Approx(fov.angleLeft * 0.9f));
 
-    // Rewrite settings.json to 30% left crop -> factor 0.7. Sleep a hair so
-    // the mtime tick is observable; Windows NTFS mtime has ~100ns resolution
-    // but file-write APIs can coalesce same-second writes under load.
+    // Rewrite the per-app file (not the settings.json template — the watcher
+    // only monitors the per-app file) to 30% left crop -> factor 0.7. Sleep
+    // a hair so the mtime tick is observable; Windows NTFS mtime has ~100ns
+    // resolution but file-write APIs can coalesce same-second writes under
+    // load.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    fx.writeSettings(R"({
+    fx.writePerAppSettings(R"({
         "enabled": true,
         "live_edit": true,
         "crop_left_percent": 30,
@@ -611,6 +627,101 @@ TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
     submitFrame();
     CHECK(mock::state().lastEndFrameProjLayers[0].views[0].fov.angleLeft ==
           doctest::Approx(fov.angleLeft * 0.7f));
+}
+
+// ---------------------------------------------------------------------------
+// Per-app config bootstrap: the first time an application runs, the layer
+// creates its per-app settings file. If a global settings.json template
+// exists, it is copied in; otherwise built-in defaults are written.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("integration: per-app config is created from settings.json template on first boot") {
+    LayerFixture fx;
+    // Template exists, per-app file does not.
+    fx.writeSettings(R"({ "enabled": true, "crop_left_percent": 42 })");
+    REQUIRE(!std::filesystem::exists(fx.configDir / "test_settings.json"));
+
+    fx.boot();
+
+    // After boot, the per-app file exists and carries the template's values.
+    REQUIRE(std::filesystem::exists(fx.configDir / "test_settings.json"));
+    std::ifstream in(fx.configDir / "test_settings.json");
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    CHECK(content.find("\"crop_left_percent\": 42") != std::string::npos);
+}
+
+TEST_CASE("integration: settings.json template is auto-created on first boot if absent") {
+    LayerFixture fx;
+    REQUIRE(!std::filesystem::exists(fx.configDir / "settings.json"));
+
+    fx.boot();
+
+    // The layer creates a template file with the built-in defaults so the
+    // user has a single place to tune the defaults applied to future games.
+    REQUIRE(std::filesystem::exists(fx.configDir / "settings.json"));
+    std::ifstream in(fx.configDir / "settings.json");
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    CHECK(content.find("\"crop_left_percent\"") != std::string::npos);
+    CHECK(content.find("\"enabled\"") != std::string::npos);
+    // Template comment distinguishes it from a per-app file.
+    CHECK(content.find("Default template") != std::string::npos);
+}
+
+TEST_CASE("integration: existing settings.json template is not overwritten by boot") {
+    LayerFixture fx;
+    const std::string original = R"({ "enabled": true, "crop_left_percent": 99 })";
+    fx.writeSettings(original);
+
+    fx.boot();
+
+    std::ifstream in(fx.configDir / "settings.json");
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    // Still the user's content, byte for byte.
+    CHECK(content == original);
+}
+
+TEST_CASE("integration: per-app config is bootstrapped from the auto-created template") {
+    LayerFixture fx;
+    // Clean slate: no template, no per-app file.
+    REQUIRE(!std::filesystem::exists(fx.configDir / "settings.json"));
+    REQUIRE(!std::filesystem::exists(fx.configDir / "test_settings.json"));
+
+    fx.boot();
+
+    // Both files now exist, and the per-app file is a copy of the template
+    // (so it carries the template's _comment — minor cosmetic detail the
+    // user can ignore or edit out).
+    REQUIRE(std::filesystem::exists(fx.configDir / "settings.json"));
+    REQUIRE(std::filesystem::exists(fx.configDir / "test_settings.json"));
+
+    std::ifstream tIn(fx.configDir / "settings.json");
+    std::string tContent((std::istreambuf_iterator<char>(tIn)),
+                         std::istreambuf_iterator<char>());
+    std::ifstream pIn(fx.configDir / "test_settings.json");
+    std::string pContent((std::istreambuf_iterator<char>(pIn)),
+                         std::istreambuf_iterator<char>());
+    CHECK(tContent == pContent);
+}
+
+TEST_CASE("integration: existing per-app config is not overwritten by subsequent boot") {
+    LayerFixture fx;
+    // Pre-populate a per-app file directly.
+    fx.writePerAppSettings(R"({ "enabled": true, "crop_left_percent": 7 })");
+    // Also drop a different template; it should be IGNORED because per-app
+    // already exists.
+    fx.writeSettings(R"({ "enabled": true, "crop_left_percent": 99 })");
+
+    fx.boot();
+
+    // Per-app file still carries the 7 value, not the 99 from the template.
+    std::ifstream in(fx.configDir / "test_settings.json");
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    CHECK(content.find("\"crop_left_percent\": 7") != std::string::npos);
+    CHECK(content.find("\"crop_left_percent\": 99") == std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
