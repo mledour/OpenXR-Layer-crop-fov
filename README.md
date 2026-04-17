@@ -119,9 +119,31 @@ by the loader for that process.
 
 ## Configuration
 
-The layer reads `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\settings.json`
-at startup (or live if `live_edit` is enabled). If the file is missing,
-defaults are used.
+The layer keeps **a separate settings file per OpenXR application** inside
+`%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\`. Each file is named after
+the application's OpenXR name, sanitized to lowercase + underscores:
+
+| Application name (reported via OpenXR) | Settings file |
+|-----------------------------------------|---------------|
+| `DiRT Rally 2.0` | `dirt_rally_2_0_settings.json` |
+| `Le Mans Ultimate` | `le_mans_ultimate_settings.json` |
+| `iRacing Simulator` | `iracing_simulator_settings.json` |
+| `hello_xr` | `hello_xr_settings.json` |
+
+**First-run behavior** — when an application is seen for the first time, the
+layer creates its per-app file automatically:
+
+1. If `settings.json` (the optional template) exists in the same folder,
+   its contents are copied into the new per-app file.
+2. Otherwise, built-in defaults are written.
+
+The layer never overwrites an existing per-app file, so once the file is
+created you can edit it freely. Each game keeps its own crop values.
+
+The global `settings.json` only acts as a **template** for future per-app
+files. Editing it does not affect games that already have their own file.
+
+### File format
 
 ```json
 {

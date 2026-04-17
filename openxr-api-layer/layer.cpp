@@ -29,6 +29,7 @@
 #include <log.h>
 #include <util.h>
 #include <utils/crop_math.h>
+#include <utils/name_utils.h>
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -68,9 +69,56 @@ namespace openxr_api_layer {
         return defaultVal;
     }
 
-    static CropConfig loadConfig(const std::filesystem::path& configDir) {
+    // sanitizeForFilename and resolvePerAppConfigPath live in
+    // <utils/name_utils.h> so the test binary can unit-test them without
+    // linking layer.cpp.
+
+    // Writes a minimal default settings.json-style file at outputPath so the
+    // user has a valid file to edit the first time a given application runs.
+    // Called only when no template is available to copy from.
+    static bool writeDefaultConfig(const std::filesystem::path& outputPath, const std::string& appName) {
+        std::ofstream out(outputPath);
+        if (!out) return false;
+        out << "{\n"
+            << "  \"_comment\": \"Auto-generated per-app config for '" << appName
+            <<                "'. Edit freely; this file won't be overwritten.\",\n"
+            << "  \"enabled\": true,\n"
+            << "  \"crop_left_percent\": 10,\n"
+            << "  \"crop_right_percent\": 10,\n"
+            << "  \"crop_top_percent\": 15,\n"
+            << "  \"crop_bottom_percent\": 20,\n"
+            << "  \"live_edit\": false\n"
+            << "}\n";
+        return out.good();
+    }
+
+    // Loads the crop config from the exact path `configPath` (not a directory).
+    // If the file does not exist and `appName` is non-empty, the file is
+    // bootstrapped: a sibling "settings.json" in the same directory is copied
+    // in if it exists, otherwise a defaults file is written.
+    static CropConfig loadConfig(const std::filesystem::path& configPath, const std::string& appName) {
         CropConfig config;
-        const std::string configPathStr = (configDir / "settings.json").string();
+        const std::string configPathStr = configPath.string();
+
+        // Bootstrap the per-app file the first time we see this application.
+        if (!appName.empty() && !std::filesystem::exists(configPath)) {
+            try {
+                std::filesystem::create_directories(configPath.parent_path());
+                const std::filesystem::path templatePath = configPath.parent_path() / "settings.json";
+                if (std::filesystem::exists(templatePath) && templatePath != configPath) {
+                    std::filesystem::copy_file(templatePath, configPath);
+                    Log(fmt::format("Bootstrapped {} from settings.json template\n", configPathStr));
+                } else if (writeDefaultConfig(configPath, appName)) {
+                    Log(fmt::format("Bootstrapped {} with built-in defaults\n", configPathStr));
+                } else {
+                    Log(fmt::format("Could not create {}, falling back to defaults\n", configPathStr));
+                    return config;
+                }
+            } catch (const std::exception& e) {
+                Log(fmt::format("Error bootstrapping per-app config: {}, using defaults\n", e.what()));
+                return config;
+            }
+        }
 
         Log(fmt::format("Looking for config at: {}\n", configPathStr));
 
@@ -78,7 +126,7 @@ namespace openxr_api_layer {
         {
             std::ifstream file(configPathStr);
             if (!file.is_open()) {
-                Log("No settings.json found, using defaults\n");
+                Log("Config file not found, using defaults\n");
                 return config;
             }
             std::ostringstream ss;
@@ -91,13 +139,13 @@ namespace openxr_api_layer {
         rapidjson::Document doc;
         doc.Parse(fileContent.c_str(), fileContent.size());
         if (doc.HasParseError()) {
-            Log(fmt::format("settings.json parse error at offset {}: {} — using defaults\n",
+            Log(fmt::format("Config parse error at offset {}: {} — using defaults\n",
                              doc.GetErrorOffset(),
                              rapidjson::GetParseError_En(doc.GetParseError())));
             return config;
         }
         if (!doc.IsObject()) {
-            Log("settings.json root is not an object — using defaults\n");
+            Log("Config root is not an object — using defaults\n");
             return config;
         }
 
@@ -183,20 +231,25 @@ namespace openxr_api_layer {
                 m_swapchainInfoMap.clear();
             }
 
-            // Load crop configuration. If the user has disabled the layer via
-            // settings.json, flip to bypass so xrGetInstanceProcAddr returns the
-            // downstream proc addresses verbatim and our overrides are skipped.
-            m_config = openxr_api_layer::loadConfig(localAppData);
+            // Per-app configuration: each OpenXR application gets its own
+            // settings file, keyed by a sanitized version of the application
+            // name. The first time a given application is seen, the file is
+            // bootstrapped from the global settings.json template (if any)
+            // or from built-in defaults. The user can then edit that file
+            // per-app without affecting other games.
+            m_appName = createInfo->applicationInfo.applicationName;
+            m_configFilePath = openxr_api_layer::resolvePerAppConfigPath(localAppData, m_appName);
+
+            m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
             if (!m_config.enabled) {
-                Log(fmt::format("{} is disabled in settings.json\n", LayerName));
+                Log(fmt::format("{} is disabled in {}\n", LayerName, m_configFilePath.string()));
                 m_bypassApiLayer = true;
             }
 
-            // If live_edit is on, record the config file path and its current
-            // mtime so xrEndFrame can detect changes without recomputing the
-            // path each frame.
+            // If live_edit is on, record the per-app config's mtime so
+            // xrEndFrame can detect changes without recomputing the path
+            // each frame.
             if (m_config.liveEdit) {
-                m_configFilePath = localAppData / "settings.json";
                 try {
                     m_configLastWriteTime = std::filesystem::last_write_time(m_configFilePath);
                 } catch (...) {}
@@ -461,7 +514,7 @@ namespace openxr_api_layer {
                     const auto mtime = std::filesystem::last_write_time(m_configFilePath);
                     if (mtime != m_configLastWriteTime) {
                         m_configLastWriteTime = mtime;
-                        m_config = openxr_api_layer::loadConfig(localAppData);
+                        m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
                         // If the reloaded config turned live_edit off, this is
                         // the last reload — the next frame skips the check.
                     }
@@ -559,6 +612,7 @@ namespace openxr_api_layer {
         uint32_t m_liveEditFrameCounter{0};
         std::filesystem::path m_configFilePath;
         std::filesystem::file_time_type m_configLastWriteTime{};
+        std::string m_appName;
 
         // We keep the owning session alongside the createInfo so that when a
         // session is destroyed we can purge its swapchains without walking

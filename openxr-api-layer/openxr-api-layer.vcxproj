@@ -293,6 +293,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Gene
     <ClInclude Include="layer.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="utils\crop_math.h" />
+    <ClInclude Include="utils\name_utils.h" />
     <ClInclude Include="utils\general.h" />
     <ClInclude Include="utils\graphics.h" />
     <ClInclude Include="utils\inputs.h" />

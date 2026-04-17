@@ -27,12 +27,15 @@
 #include <random>
 
 #include <utils/crop_math.h>
+#include <utils/name_utils.h>
 
 using openxr_api_layer::clampFactor;
 using openxr_api_layer::computeCroppedImageRect;
 using openxr_api_layer::CropConfig;
 using openxr_api_layer::Extent2D;
 using openxr_api_layer::narrowFov;
+using openxr_api_layer::resolvePerAppConfigPath;
+using openxr_api_layer::sanitizeForFilename;
 using openxr_api_layer::scaleSwapchainExtents;
 
 // ---------------------------------------------------------------------------
@@ -575,4 +578,58 @@ TEST_CASE("property: computeCroppedImageRect matches tan-space of the narrowed F
         CHECK(std::abs(gotTopFrac - expectTopFrac) < tolY);
         CHECK(std::abs(gotBotFrac - expectBotFrac) < tolY);
     }
+}
+
+// ---------------------------------------------------------------------------
+// sanitizeForFilename
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sanitizeForFilename: lowercases ASCII letters") {
+    CHECK(sanitizeForFilename("HELLO") == "hello");
+    CHECK(sanitizeForFilename("Hello") == "hello");
+    CHECK(sanitizeForFilename("hello") == "hello");
+}
+
+TEST_CASE("sanitizeForFilename: replaces non-alphanumeric with underscore") {
+    CHECK(sanitizeForFilename("DiRT Rally 2.0") == "dirt_rally_2_0");
+    CHECK(sanitizeForFilename("Le Mans Ultimate") == "le_mans_ultimate");
+    CHECK(sanitizeForFilename("iRacing Simulator") == "iracing_simulator");
+}
+
+TEST_CASE("sanitizeForFilename: keeps already-safe identifiers unchanged") {
+    CHECK(sanitizeForFilename("hello_xr") == "hello_xr");
+    CHECK(sanitizeForFilename("game42") == "game42");
+}
+
+TEST_CASE("sanitizeForFilename: collapses consecutive separators") {
+    CHECK(sanitizeForFilename("foo   bar") == "foo_bar");
+    CHECK(sanitizeForFilename("foo...bar") == "foo_bar");
+    CHECK(sanitizeForFilename("foo -- bar") == "foo_bar");
+}
+
+TEST_CASE("sanitizeForFilename: strips leading and trailing separators") {
+    CHECK(sanitizeForFilename("  hello  ") == "hello");
+    CHECK(sanitizeForFilename("___hello___") == "hello");
+    CHECK(sanitizeForFilename(".hello.") == "hello");
+}
+
+TEST_CASE("sanitizeForFilename: falls back to unknown_app for empty or garbage input") {
+    CHECK(sanitizeForFilename("") == "unknown_app");
+    CHECK(sanitizeForFilename("   ") == "unknown_app");
+    CHECK(sanitizeForFilename("!!!") == "unknown_app");
+    CHECK(sanitizeForFilename("___") == "unknown_app");
+}
+
+// ---------------------------------------------------------------------------
+// resolvePerAppConfigPath
+// ---------------------------------------------------------------------------
+
+TEST_CASE("resolvePerAppConfigPath: composes <dir>/<slug>_settings.json") {
+    const std::filesystem::path dir = "C:/tmp/layer";
+    CHECK(resolvePerAppConfigPath(dir, "DiRT Rally 2.0").filename().string() ==
+          "dirt_rally_2_0_settings.json");
+    CHECK(resolvePerAppConfigPath(dir, "hello_xr").filename().string() ==
+          "hello_xr_settings.json");
+    CHECK(resolvePerAppConfigPath(dir, "").filename().string() ==
+          "unknown_app_settings.json");
 }
