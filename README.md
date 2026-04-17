@@ -130,15 +130,17 @@ the application's OpenXR name, sanitized to lowercase + underscores:
 | `iRacing Simulator` | `iracing_simulator_settings.json` |
 | `hello_xr` | `hello_xr_settings.json` |
 
-**First-run behavior** — the layer auto-creates two files the first time
-it runs:
+**Setup**
 
-1. `settings.json` — a **template** with the built-in defaults. Created
-   only if it doesn't already exist. Edit this to change the defaults that
-   every new game will start with.
-2. `<app>_settings.json` — the per-app file for the active game. Created
-   by copying `settings.json`. Edit this to tune the crop values for that
-   specific game.
+- **`settings.json`** — the template with the built-in defaults. Created
+  by the **installer** during install so you can edit it before even
+  launching a game. The layer also auto-creates it on first run if it's
+  missing (e.g. after a manual ZIP install). The installer never
+  overwrites an existing file, so your edits survive upgrades.
+- **`<app>_settings.json`** — the per-app file for the active game.
+  Created by the layer at runtime by copying `settings.json` the first
+  time a given game runs. Edit this to tune the crop values for that
+  specific game.
 
 Subsequent behavior:
 - Each time a new game runs for the first time, its per-app file is

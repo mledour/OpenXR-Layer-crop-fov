@@ -1,0 +1,9 @@
+{
+  "_comment": "Default template. Each OpenXR application gets a copy of this file the first time it runs. Edit to change the defaults for future games.",
+  "enabled": true,
+  "crop_left_percent": 10,
+  "crop_right_percent": 10,
+  "crop_top_percent": 15,
+  "crop_bottom_percent": 20,
+  "live_edit": false
+}
