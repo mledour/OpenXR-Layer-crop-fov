@@ -1,6 +1,6 @@
 {
-  "_comment": "Default template. Each OpenXR application gets a copy of this file the first time it runs. Edit to change the defaults for future games.",
-  "enabled": true,
+  "_comment": "Default template. Each OpenXR application gets a copy of this file the first time it runs. Set \"enabled\" to true to activate the layer for that game (or change the default here to affect every future game). Edit crop percentages to taste.",
+  "enabled": false,
   "crop_left_percent": 10,
   "crop_right_percent": 10,
   "crop_top_percent": 15,

@@ -154,7 +154,7 @@ Subsequent behavior:
 
 ```json
 {
-  "enabled": true,
+  "enabled": false,
   "crop_left_percent": 10,
   "crop_right_percent": 10,
   "crop_top_percent": 15,
@@ -165,12 +165,18 @@ Subsequent behavior:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `true` | Master switch. `false` bypasses the layer entirely. |
+| `enabled` | bool | `false` | Master switch — the layer is **opt-in** and a no-op until you flip this to `true`. Applies either per-app (in the game's file) or globally by editing the template before a game creates its per-app file. |
 | `crop_left_percent` | float | `10` | Percentage to crop from the left edge (0-50). |
 | `crop_right_percent` | float | `10` | Percentage to crop from the right edge (0-50). |
 | `crop_top_percent` | float | `15` | Percentage to crop from the top edge (0-50). |
 | `crop_bottom_percent` | float | `20` | Percentage to crop from the bottom edge (0-50). |
 | `live_edit` | bool | `false` | When true, the layer re-reads the config file every ~1 second. Set to true before launching the game to tune values in real time; set to false for normal use. |
+
+> Because `enabled` defaults to `false`, installing the layer has no visible
+> effect until you edit `settings.json` (to turn it on globally for new
+> games) or a specific `<app>_settings.json` (to turn it on for that game).
+> This avoids any surprise rendering changes the first time you launch a
+> game after install.
 
 ## License and attribution
 

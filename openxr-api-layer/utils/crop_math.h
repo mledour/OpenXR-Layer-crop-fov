@@ -39,7 +39,9 @@ namespace openxr_api_layer {
     // that edge off". Kept as factors (not percents) because we multiply by
     // them in hot paths like xrLocateViews and xrEndFrame.
     struct CropConfig {
-        bool enabled = true;
+        // Opt-in by default: the layer is a no-op until the user explicitly
+        // sets "enabled": true in their per-app settings file.
+        bool enabled = false;
         float cropLeftFactor = 0.90f;   // percent 10 -> factor 0.90
         float cropRightFactor = 0.90f;  // percent 10 -> factor 0.90
         float cropTopFactor = 0.85f;    // percent 15 -> factor 0.85

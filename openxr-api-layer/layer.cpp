@@ -84,12 +84,13 @@ namespace openxr_api_layer {
         if (appName.empty()) {
             out << "  \"_comment\": \"Default template. Each OpenXR application "
                 <<                "gets a copy of this file the first time it runs. "
-                <<                "Edit to change the defaults for future games.\",\n";
+                <<                "Set \\\"enabled\\\" to true to activate the layer for that game "
+                <<                "(or flip the default here to affect every future game).\",\n";
         } else {
             out << "  \"_comment\": \"Auto-generated per-app config for '" << appName
-                <<                "'. Edit freely; this file won't be overwritten.\",\n";
+                <<                "'. Set \\\"enabled\\\" to true to activate the layer for this game.\",\n";
         }
-        out << "  \"enabled\": true,\n"
+        out << "  \"enabled\": false,\n"
             << "  \"crop_left_percent\": 10,\n"
             << "  \"crop_right_percent\": 10,\n"
             << "  \"crop_top_percent\": 15,\n"
@@ -174,7 +175,7 @@ namespace openxr_api_layer {
             return config;
         }
 
-        const bool enabled = readJsonBool(doc, "enabled", true);
+        const bool enabled = readJsonBool(doc, "enabled", false);
         const float leftPct = readJsonFloat(doc, "crop_left_percent", 10.0f);
         const float rightPct = readJsonFloat(doc, "crop_right_percent", 10.0f);
         const float topPct = readJsonFloat(doc, "crop_top_percent", 15.0f);
