@@ -651,25 +651,59 @@ TEST_CASE("integration: per-app config is created from settings.json template on
     CHECK(content.find("\"crop_left_percent\": 42") != std::string::npos);
 }
 
-TEST_CASE("integration: per-app config is created with defaults when no template exists") {
+TEST_CASE("integration: settings.json template is auto-created on first boot if absent") {
     LayerFixture fx;
-    // No settings.json template at all.
+    REQUIRE(!std::filesystem::exists(fx.configDir / "settings.json"));
+
+    fx.boot();
+
+    // The layer creates a template file with the built-in defaults so the
+    // user has a single place to tune the defaults applied to future games.
+    REQUIRE(std::filesystem::exists(fx.configDir / "settings.json"));
+    std::ifstream in(fx.configDir / "settings.json");
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    CHECK(content.find("\"crop_left_percent\"") != std::string::npos);
+    CHECK(content.find("\"enabled\"") != std::string::npos);
+    // Template comment distinguishes it from a per-app file.
+    CHECK(content.find("Default template") != std::string::npos);
+}
+
+TEST_CASE("integration: existing settings.json template is not overwritten by boot") {
+    LayerFixture fx;
+    const std::string original = R"({ "enabled": true, "crop_left_percent": 99 })";
+    fx.writeSettings(original);
+
+    fx.boot();
+
+    std::ifstream in(fx.configDir / "settings.json");
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    // Still the user's content, byte for byte.
+    CHECK(content == original);
+}
+
+TEST_CASE("integration: per-app config is bootstrapped from the auto-created template") {
+    LayerFixture fx;
+    // Clean slate: no template, no per-app file.
     REQUIRE(!std::filesystem::exists(fx.configDir / "settings.json"));
     REQUIRE(!std::filesystem::exists(fx.configDir / "test_settings.json"));
 
     fx.boot();
 
+    // Both files now exist, and the per-app file is a copy of the template
+    // (so it carries the template's _comment — minor cosmetic detail the
+    // user can ignore or edit out).
+    REQUIRE(std::filesystem::exists(fx.configDir / "settings.json"));
     REQUIRE(std::filesystem::exists(fx.configDir / "test_settings.json"));
-    std::ifstream in(fx.configDir / "test_settings.json");
-    std::string content((std::istreambuf_iterator<char>(in)),
-                        std::istreambuf_iterator<char>());
-    // Defaults carry all four crop fields and the _comment placeholder.
-    CHECK(content.find("\"_comment\"") != std::string::npos);
-    CHECK(content.find("\"crop_left_percent\"") != std::string::npos);
-    CHECK(content.find("\"crop_right_percent\"") != std::string::npos);
-    CHECK(content.find("\"crop_top_percent\"") != std::string::npos);
-    CHECK(content.find("\"crop_bottom_percent\"") != std::string::npos);
-    CHECK(content.find("'test'") != std::string::npos); // app name is embedded
+
+    std::ifstream tIn(fx.configDir / "settings.json");
+    std::string tContent((std::istreambuf_iterator<char>(tIn)),
+                         std::istreambuf_iterator<char>());
+    std::ifstream pIn(fx.configDir / "test_settings.json");
+    std::string pContent((std::istreambuf_iterator<char>(pIn)),
+                         std::istreambuf_iterator<char>());
+    CHECK(tContent == pContent);
 }
 
 TEST_CASE("integration: existing per-app config is not overwritten by subsequent boot") {

@@ -73,16 +73,23 @@ namespace openxr_api_layer {
     // <utils/name_utils.h> so the test binary can unit-test them without
     // linking layer.cpp.
 
-    // Writes a minimal default settings.json-style file at outputPath so the
-    // user has a valid file to edit the first time a given application runs.
-    // Called only when no template is available to copy from.
+    // Writes a minimal default settings.json-style file at outputPath. If
+    // appName is empty, the file is treated as the global template that
+    // seeds per-app files on first run. Otherwise the file is a per-app
+    // file and the comment embeds the application name.
     static bool writeDefaultConfig(const std::filesystem::path& outputPath, const std::string& appName) {
         std::ofstream out(outputPath);
         if (!out) return false;
-        out << "{\n"
-            << "  \"_comment\": \"Auto-generated per-app config for '" << appName
-            <<                "'. Edit freely; this file won't be overwritten.\",\n"
-            << "  \"enabled\": true,\n"
+        out << "{\n";
+        if (appName.empty()) {
+            out << "  \"_comment\": \"Default template. Each OpenXR application "
+                <<                "gets a copy of this file the first time it runs. "
+                <<                "Edit to change the defaults for future games.\",\n";
+        } else {
+            out << "  \"_comment\": \"Auto-generated per-app config for '" << appName
+                <<                "'. Edit freely; this file won't be overwritten.\",\n";
+        }
+        out << "  \"enabled\": true,\n"
             << "  \"crop_left_percent\": 10,\n"
             << "  \"crop_right_percent\": 10,\n"
             << "  \"crop_top_percent\": 15,\n"
@@ -90,6 +97,24 @@ namespace openxr_api_layer {
             << "  \"live_edit\": false\n"
             << "}\n";
         return out.good();
+    }
+
+    // Creates the global settings.json template (if absent) so the user has
+    // a single file to edit to change the defaults applied to future games.
+    // Silent no-op if the file already exists (never overwrites the user's
+    // preferences).
+    static void ensureTemplateConfig(const std::filesystem::path& configDir) {
+        const std::filesystem::path templatePath = configDir / "settings.json";
+        if (std::filesystem::exists(templatePath)) return;
+        try {
+            std::filesystem::create_directories(configDir);
+            if (writeDefaultConfig(templatePath, "")) {
+                Log(fmt::format("Created template {}\n", templatePath.string()));
+            }
+        } catch (const std::exception& e) {
+            Log(fmt::format("Could not create template {}: {}\n",
+                             templatePath.string(), e.what()));
+        }
     }
 
     // Loads the crop config from the exact path `configPath` (not a directory).
@@ -231,12 +256,17 @@ namespace openxr_api_layer {
                 m_swapchainInfoMap.clear();
             }
 
+            // Ensure the global settings.json template exists. It seeds the
+            // per-app file below, and gives the user a single place to edit
+            // the defaults applied to future games.
+            openxr_api_layer::ensureTemplateConfig(localAppData);
+
             // Per-app configuration: each OpenXR application gets its own
             // settings file, keyed by a sanitized version of the application
             // name. The first time a given application is seen, the file is
-            // bootstrapped from the global settings.json template (if any)
-            // or from built-in defaults. The user can then edit that file
-            // per-app without affecting other games.
+            // bootstrapped from the global settings.json template (always
+            // present after ensureTemplateConfig). The user can then edit
+            // that file per-app without affecting other games.
             m_appName = createInfo->applicationInfo.applicationName;
             m_configFilePath = openxr_api_layer::resolvePerAppConfigPath(localAppData, m_appName);
 
