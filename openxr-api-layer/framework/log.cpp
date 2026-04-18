@@ -54,6 +54,17 @@ namespace openxr_api_layer::log {
         }
     } // namespace
 
+    void reopenLogFile(const std::filesystem::path& path) {
+        if (logStream.is_open()) {
+            logStream.flush();
+            logStream.close();
+        }
+        // Append mode: multiple runs of the same app accumulate in the
+        // same file, so the user can compare consecutive launches when
+        // hunting a regression.
+        logStream.open(path.string(), std::ios_base::app);
+    }
+
     void Log(const char* fmt, ...) {
         va_list va;
         va_start(va, fmt);

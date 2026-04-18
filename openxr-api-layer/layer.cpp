@@ -271,6 +271,16 @@ namespace openxr_api_layer {
             m_appName = createInfo->applicationInfo.applicationName;
             m_configFilePath = openxr_api_layer::resolvePerAppConfigPath(localAppData, m_appName);
 
+            // Route the file logger to a per-app file so debugging one
+            // game doesn't mean sifting through messages from every other
+            // game that ran on this machine. Messages before this point
+            // (xrNegotiateLoaderApiLayerInterface's "layer is active")
+            // stay in the default <LayerName>.log.
+            const std::filesystem::path perAppLogPath =
+                localAppData / (openxr_api_layer::sanitizeForFilename(m_appName) + ".log");
+            openxr_api_layer::log::reopenLogFile(perAppLogPath);
+            Log(fmt::format("Log routed to per-app file: {}\n", perAppLogPath.string()));
+
             m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
             if (!m_config.enabled) {
                 Log(fmt::format("{} is disabled in {}\n", LayerName, m_configFilePath.string()));
