@@ -102,8 +102,24 @@ powershell -ExecutionPolicy Bypass -File .\Install-Layer.ps1
 - **Installer**: Settings → Apps → XR_APILAYER_MLEDOUR_fov_crop → Uninstall
 - **Manual**: run `Uninstall-Layer.ps1` from an elevated PowerShell
 
-> ⚠️ The DLL is **not code-signed**. Anti-cheat systems may reject unsigned
-> DLLs loaded into OpenXR games. A signed release is planned.
+### Code signing
+
+> ⚠️ Release binaries are **not** code-signed yet. Anti-cheat systems may
+> reject unsigned DLLs loaded into OpenXR games.
+
+Once approved by the [SignPath Foundation][signpath-foundation] open-source
+program, release builds of the DLL and the `Setup.exe` installer will be
+automatically code-signed in CI. The certificate will be issued in the
+name of "SignPath Foundation" — the signature is what matters for
+anti-cheat compatibility and Windows SmartScreen, not the display name.
+
+Once signing is active, builds triggered from a fork or from a pull
+request will still not be signed (GitHub secrets are not exposed to
+forked workflows), so only download binaries from the
+[official GitHub Releases page][releases] of this repository.
+
+[signpath-foundation]: https://signpath.org/
+[releases]: ../../releases
 
 ## Disabling without uninstalling
 
@@ -186,3 +202,7 @@ Based on the [`OpenXR-Layer-Template`](https://github.com/mbucchia/OpenXR-Layer-
 by Matthieu Bucchianeri (`mbucchia`), Copyright © 2022–2023. The framework
 code (dispatch generator, entry point, logging, graphics helpers) is his
 work; the `fov_crop` logic in `layer.cpp` / `layer.h` is this project.
+
+Release binaries will be code-signed by [SignPath Foundation][signpath-foundation]
+under their free program for open-source projects, once the project's
+application to that program is approved.
