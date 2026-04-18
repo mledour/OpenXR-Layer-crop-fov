@@ -1,143 +1,68 @@
 # XR_APILAYER_MLEDOUR_fov_crop
 
-An OpenXR API layer for Windows that reduces GPU / CPU load by narrowing the
-rendered field of view and / or scaling the recommended swapchain dimensions.
-The application submits fewer pixels per frame, so every frame is cheaper.
+An OpenXR API layer for Windows that reduces GPU load by narrowing the
+effective field of view and swapchain resolution. Your game renders
+fewer pixels per frame, so every frame is cheaper and the headroom goes
+into higher FPS — at the cost of slightly narrower peripheral vision,
+visible as black edges in the headset.
 
-## What it does
+Works transparently with any OpenXR application and runtime. No game or
+headset modification required.
 
-The layer intercepts two OpenXR calls:
-
-- [`xrEnumerateViewConfigurationViews`](https://registry.khronos.org/OpenXR/specs/1.0/html/xrspec.html#xrEnumerateViewConfigurationViews) —
-  scales down the `recommendedImageRectWidth` / `recommendedImageRectHeight`
-  returned to the application, so smaller swapchains are allocated.
-- [`xrLocateViews`](https://registry.khronos.org/OpenXR/specs/1.0/html/xrspec.html#xrLocateViews) —
-  narrows the `fov.angle{Left,Right,Up,Down}` values by the matching ratio so
-  the application's projection stays pixel-consistent with the reduced target.
-
-Everything else passes through untouched, and
-[`xrEndFrame`](https://registry.khronos.org/OpenXR/specs/1.0/html/xrspec.html#xrEndFrame)
-rewrites `XrCompositionLayerProjectionView::fov` on the way out so the active
-runtime composites the image with the narrowed view frustum.
-
-## Prerequisites
-
-- Visual Studio 2019 or newer
-- NuGet package manager (installed via Visual Studio Installer)
-- Python 3 in `PATH` — required by `framework/dispatch_generator.py`
-- Populated OpenXR SDK sources under `external/` (see below)
-
-## Relationship to the template
-
-This folder is a copy of [`../OpenXR-Layer-Template/`](../OpenXR-Layer-Template)
-(upstream: [`mbucchia/OpenXR-Layer-Template`](https://github.com/mbucchia/OpenXR-Layer-Template)),
-with the layer-specific edits applied. The upstream template is kept pristine
-so we can pull its updates cleanly — this folder holds our divergences.
-
-## Building from source
-
-This folder is not a git repo by design. To populate `external/`, either
-`git init` here and add the three submodules from `.gitmodules`, or clone
-the upstream template sources manually into `external/OpenXR-SDK/`,
-`external/OpenXR-SDK-Source/`, and `external/OpenXR-MixedReality/`.
-
-```bat
-:: once external/ is populated, on Windows
-:: open XR_APILAYER_MLEDOUR_fov_crop.sln in Visual Studio and build Release|x64
-```
-
-The post-build step runs `scripts\sed.exe` to substitute the `$(SolutionName)`
-placeholder into `XR_APILAYER_MLEDOUR_fov_crop.json`, so the layer name always tracks the
-`.sln` filename.
-
-## Releases
-
-A GitHub Actions workflow ([`build-and-release.yml`](./.github/workflows/build-and-release.yml))
-builds x64 `Release` and `Debug` on every push to `main` (as a sanity check)
-and on every `v*.*.*` tag (which additionally creates a GitHub Release and
-attaches the two ZIPs).
-
-To publish a new release:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-Each release includes an Inno Setup **installer** (recommended) and raw
-**ZIPs** (for manual install or development).
+> ⚠️ Release binaries are **not** code-signed yet. Anti-cheat systems
+> may reject unsigned DLLs loaded into OpenXR games, and Windows
+> SmartScreen will warn on the installer. A signed release via
+> [SignPath Foundation](https://signpath.org/) is pending approval —
+> see [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md#code-signing).
 
 ## Installing
 
 ### Installer (recommended)
 
-Download `XR_APILAYER_MLEDOUR_fov_crop-<version>-x64-Setup.exe` from the
-latest [GitHub Release](../../releases/latest) and run it. Admin elevation
-is handled automatically.
-
-The installer:
-- Copies the DLL and JSON manifest to
-  `C:\Program Files\OpenXR-Layer-fov-crop\`.
-- Registers the layer in `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit`.
-- Creates an entry in Add/Remove Programs for clean uninstall.
-- Program Files directory inherits the correct ACLs for sandboxed
-  identities (WebXR in Chrome, OpenXR Tools for WMR).
+1. Download `XR_APILAYER_MLEDOUR_fov_crop-<version>-x64-Setup.exe` from
+   the latest [GitHub Release](../../releases/latest).
+2. Run it. Admin elevation is handled automatically.
+3. The layer is installed under
+   `C:\Program Files\OpenXR-Layer-fov-crop\` and registered with the
+   OpenXR loader.
+4. A default `settings.json` is dropped in
+   `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\`. **The layer is
+   disabled by default** — see [Configuration](#configuration) below
+   to turn it on.
 
 ### Manual (ZIP)
 
-Download the `Release-x64` ZIP from the latest
-[GitHub Release](../../releases/latest), unzip it to a **permanent**
-location (the registry entry points at the DLL on disk, so the folder
-must not move), and run `Install-Layer.ps1` from an elevated PowerShell:
+Download `XR_APILAYER_MLEDOUR_fov_crop-Release-x64.zip`, unzip it to a
+**permanent** location (the registry entry points at the DLL on disk,
+so the folder must not move), and run `Install-Layer.ps1` from an
+elevated PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Install-Layer.ps1
 ```
 
-> ⚠️ Manual installs outside of `C:\Program Files\` may not be readable
-> by sandboxed identities. The installer method avoids this issue.
+> ⚠️ Manual installs outside `C:\Program Files\` may not be readable by
+> sandboxed identities (WebXR in Chrome, OpenXR Tools for WMR). The
+> installer method handles this automatically.
 
 ### Uninstalling
 
-- **Installer**: Settings → Apps → XR_APILAYER_MLEDOUR_fov_crop → Uninstall
-- **Manual**: run `Uninstall-Layer.ps1` from an elevated PowerShell
+- **Installer**: Settings → Apps → `XR_APILAYER_MLEDOUR_fov_crop` →
+  Uninstall.
+- **Manual**: run `Uninstall-Layer.ps1` from an elevated PowerShell.
 
-### Code signing
+### Disabling without uninstalling
 
-> ⚠️ Release binaries are **not** code-signed yet. Anti-cheat systems may
-> reject unsigned DLLs loaded into OpenXR games.
-
-Once approved by the [SignPath Foundation][signpath-foundation] open-source
-program, release builds of the DLL and the `Setup.exe` installer will be
-automatically code-signed in CI. The certificate will be issued in the
-name of "SignPath Foundation" — the signature is what matters for
-anti-cheat compatibility and Windows SmartScreen, not the display name.
-
-Once signing is active, builds triggered from a fork or from a pull
-request will still not be signed (GitHub secrets are not exposed to
-forked workflows), so only download binaries from the
-[official GitHub Releases page][releases] of this repository.
-
-[signpath-foundation]: https://signpath.org/
-[releases]: ../../releases
-
-## Disabling without uninstalling
-
-Set the following environment variable to any value before launching the
-OpenXR application:
-
-```
-DISABLE_XR_APILAYER_MLEDOUR_fov_crop=1
-```
-
-This is the standard OpenXR loader escape hatch. The layer will be skipped
-by the loader for that process.
+Set the environment variable `DISABLE_XR_APILAYER_MLEDOUR_fov_crop=1`
+for the target process. This is the standard OpenXR loader escape
+hatch — the layer is skipped entirely for that process.
 
 ## Configuration
 
-The layer keeps **a separate settings file per OpenXR application** inside
-`%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\`. Each file is named after
-the application's OpenXR name, sanitized to lowercase + underscores:
+The layer keeps **one settings file per OpenXR application** inside
+`%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\`. Each file is named
+after the application's OpenXR name, sanitized to lowercase with
+underscores:
 
 | Application name (reported via OpenXR) | Settings file |
 |-----------------------------------------|---------------|
@@ -146,25 +71,20 @@ the application's OpenXR name, sanitized to lowercase + underscores:
 | `iRacing Simulator` | `iracing_simulator_settings.json` |
 | `hello_xr` | `hello_xr_settings.json` |
 
-**Setup**
+### The two kinds of file
 
-- **`settings.json`** — the template with the built-in defaults. Created
-  by the **installer** during install so you can edit it before even
-  launching a game. The layer also auto-creates it on first run if it's
-  missing (e.g. after a manual ZIP install). The installer never
-  overwrites an existing file, so your edits survive upgrades.
-- **`<app>_settings.json`** — the per-app file for the active game.
-  Created by the layer at runtime by copying `settings.json` the first
-  time a given game runs. Edit this to tune the crop values for that
-  specific game.
+- **`settings.json`** — the template, dropped in by the installer (or
+  auto-created by the layer on manual install). Edit this file to
+  change the defaults that every **future** game will start with. Your
+  edits survive reinstalls.
+- **`<app>_settings.json`** — the per-app file for one specific game.
+  Created automatically the first time that game runs, by copying
+  `settings.json`. Edit this to tune crop values for that game without
+  affecting others.
 
-Subsequent behavior:
-- Each time a new game runs for the first time, its per-app file is
-  copied from `settings.json`.
-- An existing per-app file is never touched — games keep their own crop
-  values across runs.
-- Editing `settings.json` does **not** affect games that already have a
-  per-app file; only future new games inherit the updated defaults.
+An existing `<app>_settings.json` is never touched on subsequent runs.
+Editing `settings.json` only affects new games, not games that already
+have their own file.
 
 ### File format
 
@@ -181,28 +101,25 @@ Subsequent behavior:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | Master switch — the layer is **opt-in** and a no-op until you flip this to `true`. Applies either per-app (in the game's file) or globally by editing the template before a game creates its per-app file. |
+| `enabled` | bool | `false` | Master switch — the layer is **opt-in** and a no-op until you flip this to `true`. |
 | `crop_left_percent` | float | `10` | Percentage to crop from the left edge (0-50). |
 | `crop_right_percent` | float | `10` | Percentage to crop from the right edge (0-50). |
 | `crop_top_percent` | float | `15` | Percentage to crop from the top edge (0-50). |
 | `crop_bottom_percent` | float | `20` | Percentage to crop from the bottom edge (0-50). |
-| `live_edit` | bool | `false` | When true, the layer re-reads the config file every ~1 second. Set to true before launching the game to tune values in real time; set to false for normal use. |
+| `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Set back to false once you're happy. |
 
-> Because `enabled` defaults to `false`, installing the layer has no visible
-> effect until you edit `settings.json` (to turn it on globally for new
-> games) or a specific `<app>_settings.json` (to turn it on for that game).
-> This avoids any surprise rendering changes the first time you launch a
-> game after install.
+**To activate the layer**, flip `"enabled": false` to `"enabled": true`
+either:
+- in `settings.json` — applies to every **future** game you launch, or
+- in a specific `<app>_settings.json` — applies to that game only.
 
-## License and attribution
+## License
 
-MIT License — see [`LICENSE`](./LICENSE).
+MIT License — see [LICENSE](./LICENSE). Based on the
+[OpenXR-Layer-Template](https://github.com/mbucchia/OpenXR-Layer-Template)
+by Matthieu Bucchianeri (`mbucchia`).
 
-Based on the [`OpenXR-Layer-Template`](https://github.com/mbucchia/OpenXR-Layer-Template)
-by Matthieu Bucchianeri (`mbucchia`), Copyright © 2022–2023. The framework
-code (dispatch generator, entry point, logging, graphics helpers) is his
-work; the `fov_crop` logic in `layer.cpp` / `layer.h` is this project.
+## For developers
 
-Release binaries will be code-signed by [SignPath Foundation][signpath-foundation]
-under their free program for open-source projects, once the project's
-application to that program is approved.
+Build instructions, CI workflow, code signing details, and layer
+internals are in [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
