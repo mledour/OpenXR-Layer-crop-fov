@@ -42,6 +42,13 @@ namespace openxr_api_layer::log {
 #define TLXArg TLPArg
 #endif
 
+    // Closes the current file logger and reopens it at `path` in append
+    // mode. Used by the layer to switch from the bootstrap log (written
+    // during xrNegotiateLoaderApiLayerInterface, before the application
+    // name is known) to a per-app log file, once xrCreateInstance hands
+    // us an XrApplicationInfo.
+    void reopenLogFile(const std::filesystem::path& path);
+
     // General logging function.
     void Log(const char* fmt, ...);
     static inline void Log(const std::string_view& str) {

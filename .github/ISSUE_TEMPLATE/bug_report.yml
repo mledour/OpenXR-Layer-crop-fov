@@ -54,8 +54,9 @@ body:
       description: |
         Visible in [OpenXR Explorer](https://github.com/maluoi/openxr-explorer)
         (open the app, look for "Runtime name"). Or in the layer's own log
-        file at `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\XR_APILAYER_MLEDOUR_fov_crop.log`
-        — search for "Using OpenXR runtime:".
+        file at `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\<game>.log`
+        (sanitized game name, e.g. `le_mans_ultimate.log`) — search for
+        "Using OpenXR runtime:".
       options:
         - SteamVR
         - Meta / Oculus (Link or native)
@@ -133,7 +134,9 @@ body:
       label: Log excerpt
       description: |
         The relevant part of
-        `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\XR_APILAYER_MLEDOUR_fov_crop.log`.
+        `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\<game>.log`
+        (the file named after the sanitized game name, e.g.
+        `le_mans_ultimate.log`).
         Usually the first 30-50 lines show the instance creation and the
         loaded config; if the issue is mid-session, also include the
         lines around when the problem occurred. Don't paste the whole
