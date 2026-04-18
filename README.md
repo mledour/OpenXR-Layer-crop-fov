@@ -4,9 +4,6 @@ An OpenXR API layer for Windows that reduces GPU / CPU load by narrowing the
 rendered field of view and / or scaling the recommended swapchain dimensions.
 The application submits fewer pixels per frame, so every frame is cheaper.
 
-> Status: **work in progress** — see [`../CLAUDE.md`](../CLAUDE.md) for the
-> development plan and project-wide rules.
-
 ## What it does
 
 The layer intercepts two OpenXR calls:
@@ -50,7 +47,7 @@ the upstream template sources manually into `external/OpenXR-SDK/`,
 ```
 
 The post-build step runs `scripts\sed.exe` to substitute the `$(SolutionName)`
-placeholder into `openxr-api-layer.json`, so the layer name always tracks the
+placeholder into `XR_APILAYER_MLEDOUR_fov_crop.json`, so the layer name always tracks the
 `.sln` filename.
 
 ## Releases
@@ -80,7 +77,7 @@ is handled automatically.
 
 The installer:
 - Copies the DLL and JSON manifest to
-  `C:\Program Files\OpenXR-Layers\XR_APILAYER_MLEDOUR_fov_crop\`.
+  `C:\Program Files\OpenXR-Layer-fov-crop\`.
 - Registers the layer in `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit`.
 - Creates an entry in Add/Remove Programs for clean uninstall.
 - Program Files directory inherits the correct ACLs for sandboxed
@@ -135,13 +132,42 @@ by the loader for that process.
 
 ## Configuration
 
-The layer reads `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\settings.json`
-at startup (or live if `live_edit` is enabled). If the file is missing,
-defaults are used.
+The layer keeps **a separate settings file per OpenXR application** inside
+`%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\`. Each file is named after
+the application's OpenXR name, sanitized to lowercase + underscores:
+
+| Application name (reported via OpenXR) | Settings file |
+|-----------------------------------------|---------------|
+| `DiRT Rally 2.0` | `dirt_rally_2_0_settings.json` |
+| `Le Mans Ultimate` | `le_mans_ultimate_settings.json` |
+| `iRacing Simulator` | `iracing_simulator_settings.json` |
+| `hello_xr` | `hello_xr_settings.json` |
+
+**Setup**
+
+- **`settings.json`** — the template with the built-in defaults. Created
+  by the **installer** during install so you can edit it before even
+  launching a game. The layer also auto-creates it on first run if it's
+  missing (e.g. after a manual ZIP install). The installer never
+  overwrites an existing file, so your edits survive upgrades.
+- **`<app>_settings.json`** — the per-app file for the active game.
+  Created by the layer at runtime by copying `settings.json` the first
+  time a given game runs. Edit this to tune the crop values for that
+  specific game.
+
+Subsequent behavior:
+- Each time a new game runs for the first time, its per-app file is
+  copied from `settings.json`.
+- An existing per-app file is never touched — games keep their own crop
+  values across runs.
+- Editing `settings.json` does **not** affect games that already have a
+  per-app file; only future new games inherit the updated defaults.
+
+### File format
 
 ```json
 {
-  "enabled": true,
+  "enabled": false,
   "crop_left_percent": 10,
   "crop_right_percent": 10,
   "crop_top_percent": 15,
@@ -152,12 +178,18 @@ defaults are used.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `true` | Master switch. `false` bypasses the layer entirely. |
+| `enabled` | bool | `false` | Master switch — the layer is **opt-in** and a no-op until you flip this to `true`. Applies either per-app (in the game's file) or globally by editing the template before a game creates its per-app file. |
 | `crop_left_percent` | float | `10` | Percentage to crop from the left edge (0-50). |
 | `crop_right_percent` | float | `10` | Percentage to crop from the right edge (0-50). |
 | `crop_top_percent` | float | `15` | Percentage to crop from the top edge (0-50). |
 | `crop_bottom_percent` | float | `20` | Percentage to crop from the bottom edge (0-50). |
 | `live_edit` | bool | `false` | When true, the layer re-reads the config file every ~1 second. Set to true before launching the game to tune values in real time; set to false for normal use. |
+
+> Because `enabled` defaults to `false`, installing the layer has no visible
+> effect until you edit `settings.json` (to turn it on globally for new
+> games) or a specific `<app>_settings.json` (to turn it on for that game).
+> This avoids any surprise rendering changes the first time you launch a
+> game after install.
 
 ## License and attribution
 

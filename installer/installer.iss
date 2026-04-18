@@ -31,7 +31,7 @@ AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher=mledour
 AppPublisherURL=https://github.com/mledour/OpenXR-Layer-crop-fov
 AppSupportURL=https://github.com/mledour/OpenXR-Layer-crop-fov/issues
-DefaultDirName={autopf}\OpenXR-Layers\{#MyAppName}
+DefaultDirName={autopf}\OpenXR-Layer-fov-crop
 ; No Start Menu group — this layer has no user-facing executable.
 DisableProgramGroupPage=yes
 LicenseFile=..\LICENSE
@@ -51,11 +51,33 @@ UninstallDisplayName={#MyAppName}
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Dirs]
+; Make sure the per-user config dir exists before we drop the template in it.
+; localappdata resolves to the user's own AppData\Local for the common case
+; where the user elevates their own account via UAC. (If they elevate with
+; *different* admin credentials, this targets the admin's folder — in that
+; edge case the DLL's first-run logic recreates the template in the correct
+; place as soon as an OpenXR app actually runs.)
+Name: "{localappdata}\{#MyAppName}"
+
 [Files]
 ; The DLL and the processed JSON manifest from the Release x64 build.
 ; Paths are relative to this .iss file.
 Source: "..\bin\x64\Release\{#MyAppName}.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\bin\x64\Release\openxr-api-layer.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\bin\x64\Release\{#MyAppName}.json"; DestDir: "{app}"; Flags: ignoreversion
+
+; Drop a default settings.json template into the user's config dir so they
+; can edit their preferred defaults without having to launch a game first.
+;   - onlyifdoesntexist     : never overwrite an existing settings.json
+;                             (preserves the user's tuning on upgrade).
+;   - uninsneveruninstall   : leave the file on disk when the user uninstalls;
+;                             their per-app files live next to it and would be
+;                             orphaned if we removed just this one. A full
+;                             clean-up is the user's responsibility.
+; This file must stay in sync with writeDefaultConfig() in layer.cpp — both
+; produce the defaults the DLL falls back to.
+Source: "default_settings.json"; DestDir: "{localappdata}\{#MyAppName}"; \
+  DestName: "settings.json"; Flags: onlyifdoesntexist uninsneveruninstall
 
 [Registry]
 ; Register the layer as an implicit API layer for the OpenXR 1.x loader.
@@ -63,5 +85,5 @@ Source: "..\bin\x64\Release\openxr-api-layer.json"; DestDir: "{app}"; Flags: ign
 ; means "enabled" (the loader spec treats non-zero as "disabled").
 ; Flags: uninsdeletevalue removes this entry automatically on uninstall.
 Root: HKLM; Subkey: "Software\Khronos\OpenXR\1\ApiLayers\Implicit"; \
-  ValueName: "{app}\openxr-api-layer.json"; ValueType: dword; ValueData: 0; \
+  ValueName: "{app}\{#MyAppName}.json"; ValueType: dword; ValueData: 0; \
   Flags: uninsdeletevalue
