@@ -104,16 +104,19 @@ powershell -ExecutionPolicy Bypass -File .\Install-Layer.ps1
 
 ### Code signing
 
-Release builds of the DLL and the `Setup.exe` installer are code-signed
-free of charge by [SignPath Foundation][signpath-foundation] under their
-program for open-source projects. The certificate is issued in the name
-of "SignPath Foundation" — the signature is what matters for anti-cheat
-compatibility and Windows SmartScreen, not the display name.
+> ⚠️ Release binaries are **not** code-signed yet. Anti-cheat systems may
+> reject unsigned DLLs loaded into OpenXR games.
 
-Builds triggered from a fork or from a pull request are **not** signed
-(GitHub secrets are not exposed to forked workflows), so only download
-binaries from the [official GitHub Releases page][releases] of this
-repository.
+Once approved by the [SignPath Foundation][signpath-foundation] open-source
+program, release builds of the DLL and the `Setup.exe` installer will be
+automatically code-signed in CI. The certificate will be issued in the
+name of "SignPath Foundation" — the signature is what matters for
+anti-cheat compatibility and Windows SmartScreen, not the display name.
+
+Once signing is active, builds triggered from a fork or from a pull
+request will still not be signed (GitHub secrets are not exposed to
+forked workflows), so only download binaries from the
+[official GitHub Releases page][releases] of this repository.
 
 [signpath-foundation]: https://signpath.org/
 [releases]: ../../releases
@@ -200,5 +203,6 @@ by Matthieu Bucchianeri (`mbucchia`), Copyright © 2022–2023. The framework
 code (dispatch generator, entry point, logging, graphics helpers) is his
 work; the `fov_crop` logic in `layer.cpp` / `layer.h` is this project.
 
-Release binaries are code-signed by [SignPath Foundation][signpath-foundation]
-under their free program for open-source projects.
+Release binaries will be code-signed by [SignPath Foundation][signpath-foundation]
+under their free program for open-source projects, once the project's
+application to that program is approved.
