@@ -25,10 +25,11 @@
 
 #pragma once
 
-// Uncomment below the graphics frameworks used by the layer.
-
-#define XR_USE_GRAPHICS_API_D3D11
-#define XR_USE_GRAPHICS_API_D3D12
+// This layer performs no graphics work of its own — it only modifies
+// OpenXR data structures that the runtime reads. No XR_USE_GRAPHICS_API_*
+// define, no d3d*.h include, no graphics utility sources. This keeps
+// the DLL small and avoids forcing d3d12.dll / d3d11.dll to be
+// statically imported into every game process that loads the layer.
 
 // Standard library.
 #include <algorithm>
@@ -62,15 +63,6 @@ using namespace std::chrono_literals;
 
 using Microsoft::WRL::ComPtr;
 
-// Graphics APIs.
-#include <dxgiformat.h>
-#ifdef XR_USE_GRAPHICS_API_D3D11
-#include <d3d11_4.h>
-#endif
-#ifdef XR_USE_GRAPHICS_API_D3D12
-#include <d3d12.h>
-#endif
-
 // OpenXR + Windows-specific definitions.
 #define XR_NO_PROTOTYPES
 #define XR_USE_PLATFORM_WIN32
@@ -86,14 +78,6 @@ using Microsoft::WRL::ComPtr;
 #include <XrSide.h>
 #include <XrStereoView.h>
 #include <XrToString.h>
-#include <DirectXCollision.h>
 
 // FMT formatter.
 #include <fmt/format.h>
-
-#if defined(XR_USE_GRAPHICS_API_D3D11) || defined(XR_USE_GRAPHICS_API_D3D12)
-// Utilities framework.
-#include <utils/graphics.h>
-#endif
-
-#include <utils/inputs.h>

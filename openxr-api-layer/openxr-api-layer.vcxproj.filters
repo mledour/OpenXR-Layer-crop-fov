@@ -35,15 +35,6 @@
     <ClInclude Include="framework\util.h">
       <Filter>Framework</Filter>
     </ClInclude>
-    <ClInclude Include="utils\graphics.h">
-      <Filter>Utilities</Filter>
-    </ClInclude>
-    <ClInclude Include="utils\general.h">
-      <Filter>Utilities</Filter>
-    </ClInclude>
-    <ClInclude Include="utils\inputs.h">
-      <Filter>Utilities</Filter>
-    </ClInclude>
     <ClInclude Include="utils\crop_math.h">
       <Filter>Utilities</Filter>
     </ClInclude>
@@ -69,21 +60,6 @@
     </ClCompile>
     <ClCompile Include="framework\log.cpp">
       <Filter>Framework</Filter>
-    </ClCompile>
-    <ClCompile Include="utils\d3d11.cpp">
-      <Filter>Utilities</Filter>
-    </ClCompile>
-    <ClCompile Include="utils\composition.cpp">
-      <Filter>Utilities</Filter>
-    </ClCompile>
-    <ClCompile Include="utils\d3d12.cpp">
-      <Filter>Utilities</Filter>
-    </ClCompile>
-    <ClCompile Include="utils\input.cpp">
-      <Filter>Utilities</Filter>
-    </ClCompile>
-    <ClCompile Include="utils\general.cpp">
-      <Filter>Utilities</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
