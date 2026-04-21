@@ -27,10 +27,16 @@
 
 #include "framework/dispatch.gen.h"
 
+// version.h is generated at pre-build by scripts\Generate-VersionRc.ps1 from
+// the adjacent version.h.in template. It defines LAYER_VERSION with the same
+// value that feeds the DLL's VERSIONINFO resource, so "the version shown in
+// logs" always matches "the version shown in File Explorer properties".
+#include "version.h"
+
 namespace openxr_api_layer {
 
     const std::string LayerName = LAYER_NAME;
-    const std::string VersionString = "Unreleased (0.0.0)";
+    const std::string VersionString = LAYER_VERSION;
 
     // Singleton accessor.
     OpenXrApi* GetInstance();
