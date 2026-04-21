@@ -57,17 +57,32 @@ jobs:
 
       # Expose the release version to MSBuild's pre-build script
       # (scripts\Generate-VersionRc.ps1) so the VERSIONINFO resource baked
-      # into the DLL matches the git tag that triggered this build. For
-      # non-tag pushes we fall back to a synthetic dev version that still
-      # carries the commit SHA for crash-dump triage.
+      # into the DLL — and the installer filename, and the runtime log
+      # banner — match the git tag that triggered this build.
+      #
+      # Resolution order:
+      #   1. refs/tags/v<semver>         -> clean "<semver>" (e.g. 0.0.8)
+      #   2. any build after an existing tag  -> git-describe progression
+      #      (e.g. 0.0.8-5-gabc1234) so PR + main-push artifacts show
+      #      how far ahead of the last release they are, not a misleading
+      #      "0.0.0-dev-..." that predates every release.
+      #   3. no tags yet (fresh fork)   -> fall back to "0.0.0-dev-<sha>".
+      #
+      # Requires fetch-depth: 0 on actions/checkout — already set above.
       - name: Compute layer version
         shell: pwsh
         run: |
           if ($env:GITHUB_REF -match '^refs/tags/v(\d+\.\d+\.\d+.*)$') {
             $version = $matches[1]
           } else {
-            $shortSha = $env:GITHUB_SHA.Substring(0, 7)
-            $version = "0.0.0-dev-$shortSha"
+            $desc = git describe --tags --always 2>$null
+            if ($LASTEXITCODE -eq 0 -and $desc -match '^v\d+\.\d+\.\d+') {
+              # e.g. "v0.0.8-5-gabc1234" -> "0.0.8-5-gabc1234"
+              $version = $desc -replace '^v', ''
+            } else {
+              $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+              $version = "0.0.0-dev-$shortSha"
+            }
           }
           Write-Host "LAYER_VERSION=$version"
           "LAYER_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
