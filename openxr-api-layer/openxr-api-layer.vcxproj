@@ -136,10 +136,11 @@ copy $(SolutionDir)\scripts\Uninstall-Layer.ps1 $(OutDir)
     </PreLinkEvent>
     <PreBuildEvent>
       <Command>python $(ProjectDir)\framework\dispatch_generator.py
-powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)</Command>
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\version.h.in" -OutputPath "$(ProjectDir)\version.h" -SolutionName $(SolutionName)</Command>
     </PreBuildEvent>
     <PreBuildEvent>
-      <Message>Generating layer dispatcher and version RC...</Message>
+      <Message>Generating layer dispatcher, version RC, and version header...</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -181,10 +182,11 @@ copy $(SolutionDir)\scripts\Uninstall-Layer32.ps1 $(OutDir)
     </PreLinkEvent>
     <PreBuildEvent>
       <Command>python $(ProjectDir)\framework\dispatch_generator.py
-powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)</Command>
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\version.h.in" -OutputPath "$(ProjectDir)\version.h" -SolutionName $(SolutionName)</Command>
     </PreBuildEvent>
     <PreBuildEvent>
-      <Message>Generating layer dispatcher and version RC...</Message>
+      <Message>Generating layer dispatcher, version RC, and version header...</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -230,10 +232,11 @@ copy $(SolutionDir)\scripts\Uninstall-Layer.ps1 $(OutDir)
     </PreLinkEvent>
     <PreBuildEvent>
       <Command>python $(ProjectDir)\framework\dispatch_generator.py
-powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)</Command>
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\version.h.in" -OutputPath "$(ProjectDir)\version.h" -SolutionName $(SolutionName)</Command>
     </PreBuildEvent>
     <PreBuildEvent>
-      <Message>Generating layer dispatcher and version RC...</Message>
+      <Message>Generating layer dispatcher, version RC, and version header...</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -279,10 +282,11 @@ copy $(SolutionDir)\scripts\Uninstall-Layer32.ps1 $(OutDir)
     </PreLinkEvent>
     <PreBuildEvent>
       <Command>python $(ProjectDir)\framework\dispatch_generator.py
-powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)</Command>
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\openxr-api-layer.rc.in" -OutputPath "$(ProjectDir)\openxr-api-layer.rc" -SolutionName $(SolutionName)
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Generate-VersionRc.ps1" -TemplatePath "$(ProjectDir)\version.h.in" -OutputPath "$(ProjectDir)\version.h" -SolutionName $(SolutionName)</Command>
     </PreBuildEvent>
     <PreBuildEvent>
-      <Message>Generating layer dispatcher and version RC...</Message>
+      <Message>Generating layer dispatcher, version RC, and version header...</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -329,6 +333,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Gene
     <None Include="packages.config" />
     <None Include="XR_APILAYER_MLEDOUR_fov_crop-32.json" />
     <None Include="openxr-api-layer.rc.in" />
+    <None Include="version.h.in" />
     <None Include="XR_APILAYER_MLEDOUR_fov_crop.json">
       <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DeploymentContent>
       <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</DeploymentContent>
