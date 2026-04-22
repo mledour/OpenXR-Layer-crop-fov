@@ -42,6 +42,7 @@
 #include <doctest/doctest.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -255,11 +256,16 @@ TEST_CASE("integration: xrLocateViews narrows FOV per-edge") {
                 &li, &viewState, 2, &count, views.data()) == XR_SUCCESS);
     REQUIRE(count == 2);
 
-    // Factors: 0.90, 0.80, 0.85, 0.75.
-    CHECK(views[0].fov.angleLeft == doctest::Approx(kDefaultLeftAngle * 0.90f));
-    CHECK(views[0].fov.angleRight == doctest::Approx(kDefaultRightAngle * 0.80f));
-    CHECK(views[0].fov.angleUp == doctest::Approx(kDefaultUpAngle * 0.85f));
-    CHECK(views[0].fov.angleDown == doctest::Approx(kDefaultDownAngle * 0.75f));
+    // Factors: 0.90, 0.80, 0.85, 0.75. Applied in tan-space so the factor
+    // corresponds to a pixel fraction on the swapchain.
+    CHECK(views[0].fov.angleLeft ==
+          doctest::Approx(std::atan(std::tan(kDefaultLeftAngle) * 0.90f)));
+    CHECK(views[0].fov.angleRight ==
+          doctest::Approx(std::atan(std::tan(kDefaultRightAngle) * 0.80f)));
+    CHECK(views[0].fov.angleUp ==
+          doctest::Approx(std::atan(std::tan(kDefaultUpAngle) * 0.85f)));
+    CHECK(views[0].fov.angleDown ==
+          doctest::Approx(std::atan(std::tan(kDefaultDownAngle) * 0.75f)));
 }
 
 TEST_CASE("integration: xrLocateViews bypass path leaves FOV unchanged") {
@@ -315,12 +321,12 @@ TEST_CASE("integration: asymmetric WMR-style FOV narrows per-edge in xrLocateVie
                                  &li, &viewState, 2, &count, views.data()) == XR_SUCCESS);
     REQUIRE(count == 2);
 
-    // Factors: 0.95, 0.80, 0.70, 0.90 (from %: 5, 20, 30, 10).
-    // Each edge is multiplied by its own factor on the signed angle.
-    CHECK(views[0].fov.angleLeft == doctest::Approx(-0.95f * 0.95f));
-    CHECK(views[0].fov.angleRight == doctest::Approx(0.85f * 0.80f));
-    CHECK(views[0].fov.angleUp == doctest::Approx(0.70f * 0.70f));
-    CHECK(views[0].fov.angleDown == doctest::Approx(-0.60f * 0.90f));
+    // Factors: 0.95, 0.80, 0.70, 0.90 (from %: 5, 20, 30, 10). Applied in
+    // tan-space; each edge is multiplied independently on its own signed angle.
+    CHECK(views[0].fov.angleLeft == doctest::Approx(std::atan(std::tan(-0.95f) * 0.95f)));
+    CHECK(views[0].fov.angleRight == doctest::Approx(std::atan(std::tan(0.85f) * 0.80f)));
+    CHECK(views[0].fov.angleUp == doctest::Approx(std::atan(std::tan(0.70f) * 0.70f)));
+    CHECK(views[0].fov.angleDown == doctest::Approx(std::atan(std::tan(-0.60f) * 0.90f)));
 
     // Spec invariants that must hold after narrowing: left edge still negative,
     // right still positive, up still positive, down still negative. A bug in
@@ -372,10 +378,11 @@ TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
     };
 
     // First 89 frames: counter goes 1..89, no poll fires (90%90==0 is the
-    // trigger). Config stays at factor 0.9.
+    // trigger). Config stays at factor 0.9 (tan-space).
+    const float expectedBefore = std::atan(std::tan(fov.angleLeft) * 0.9f);
     for (int i = 0; i < 89; ++i) {
         const auto v = locateFrame();
-        CHECK(v.fov.angleLeft == doctest::Approx(fov.angleLeft * 0.9f));
+        CHECK(v.fov.angleLeft == doctest::Approx(expectedBefore));
     }
 
     // Rewrite the per-app file (not the settings.json template — the watcher
@@ -395,9 +402,10 @@ TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
 
     // Frame 90: counter hits 90, 90%90==0, poll fires, mtime changed -> reload.
     // The reload runs BEFORE the narrowFov call in xrLocateViews, so this
-    // frame already sees the new factor.
+    // frame already sees the new factor (0.7 in tan-space).
+    const float expectedAfter = std::atan(std::tan(fov.angleLeft) * 0.7f);
     const auto v = locateFrame();
-    CHECK(v.fov.angleLeft == doctest::Approx(fov.angleLeft * 0.7f));
+    CHECK(v.fov.angleLeft == doctest::Approx(expectedAfter));
 }
 
 // ---------------------------------------------------------------------------

@@ -35,9 +35,15 @@
 namespace openxr_api_layer {
 
     // Configuration loaded from %LOCALAPPDATA%\<layer-name>\settings.json.
-    // Factors are in [0.5, 1.0]; 1.0 means "no crop", 0.5 means "crop half of
-    // that edge off". Kept as factors (not percents) because we multiply by
-    // them in hot paths like xrLocateViews and xrEndFrame.
+    // Factors are in [0.5, 1.0] and act on the TANGENT of the half-angle (not
+    // the angle itself). 1.0 = no crop, 0.5 = half the pixel fraction on that
+    // edge removed. Because OpenXR projection is a perspective projection,
+    // pixels map linearly to tan(angle), not to angle — so a factor of 0.5
+    // makes the corresponding black bar reach exactly the middle of the image.
+    // This matches user intuition: "crop_bottom_percent: 50" moves the bottom
+    // bar to the vertical center of the swapchain, not somewhere above it.
+    // Kept as factors (not percents) because we multiply by them in the hot
+    // path (xrLocateViews).
     struct CropConfig {
         // Opt-in by default: the layer is a no-op until the user explicitly
         // sets "enabled": true in their per-app settings file.
@@ -182,16 +188,25 @@ namespace openxr_api_layer {
         return XrRect2Di{{newOffsetX, newOffsetY}, {newWidth, newHeight}};
     }
 
-    // Multiplies each half-angle of the FOV by its matching factor. The
-    // OpenXR convention has angleLeft negative and angleRight positive (both
-    // in radians), so multiplying by a positive factor < 1 narrows the FOV
-    // symmetrically toward zero — which is what we want.
+    // Narrows the FOV by multiplying each edge's TANGENT by the matching
+    // factor, then taking atan. Because a perspective projection maps pixels
+    // linearly to tan(angle), this makes the factor correspond directly to a
+    // pixel fraction on the swapchain: cropBottomFactor = 0.5 puts the bottom
+    // black bar at exactly the vertical center of the image. Scaling the raw
+    // angle (angle *= factor) would make the bar drift further from center
+    // as the factor gets smaller — not what users expect when they read
+    // "crop_bottom_percent: 50" as "crop the bottom half".
+    //
+    // tan and atan are both odd functions, so the OpenXR sign convention
+    // (angleLeft / angleDown negative, angleRight / angleUp positive) is
+    // preserved naturally: tan(-x) * factor = -tan(x) * factor, and
+    // atan(-y) = -atan(y).
     inline XrFovf narrowFov(const XrFovf& origFov, const CropConfig& cfg) {
         XrFovf fov = origFov;
-        fov.angleLeft *= cfg.cropLeftFactor;
-        fov.angleRight *= cfg.cropRightFactor;
-        fov.angleUp *= cfg.cropTopFactor;
-        fov.angleDown *= cfg.cropBottomFactor;
+        fov.angleLeft = std::atan(std::tan(fov.angleLeft) * cfg.cropLeftFactor);
+        fov.angleRight = std::atan(std::tan(fov.angleRight) * cfg.cropRightFactor);
+        fov.angleUp = std::atan(std::tan(fov.angleUp) * cfg.cropTopFactor);
+        fov.angleDown = std::atan(std::tan(fov.angleDown) * cfg.cropBottomFactor);
         return fov;
     }
 

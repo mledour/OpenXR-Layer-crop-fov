@@ -324,7 +324,10 @@ TEST_CASE("narrowFov: factors = 1.0 leave the FOV untouched") {
     CHECK(out.angleDown == doctest::Approx(orig.angleDown));
 }
 
-TEST_CASE("narrowFov: scales every half-angle by its matching factor") {
+TEST_CASE("narrowFov: scales the tangent of each half-angle by its matching factor") {
+    // We work in tan-space so the factor lines up with pixel fractions on
+    // the swapchain. For factor f on an input half-angle a, the output is
+    // atan(tan(a) * f) — NOT a * f.
     CropConfig cfg;
     cfg.cropLeftFactor = 0.8f;
     cfg.cropRightFactor = 0.9f;
@@ -334,10 +337,29 @@ TEST_CASE("narrowFov: scales every half-angle by its matching factor") {
     const XrFovf orig = {-1.0f, 1.0f, 1.0f, -1.0f};
     const XrFovf out = narrowFov(orig, cfg);
 
-    CHECK(out.angleLeft == doctest::Approx(-0.8f));
-    CHECK(out.angleRight == doctest::Approx(0.9f));
-    CHECK(out.angleUp == doctest::Approx(0.7f));
-    CHECK(out.angleDown == doctest::Approx(-0.6f));
+    CHECK(out.angleLeft == doctest::Approx(std::atan(std::tan(-1.0f) * 0.8f)));
+    CHECK(out.angleRight == doctest::Approx(std::atan(std::tan(1.0f) * 0.9f)));
+    CHECK(out.angleUp == doctest::Approx(std::atan(std::tan(1.0f) * 0.7f)));
+    CHECK(out.angleDown == doctest::Approx(std::atan(std::tan(-1.0f) * 0.6f)));
+}
+
+TEST_CASE("narrowFov: factor of 0.5 puts each edge at 50%% of the original tangent") {
+    // Concrete invariant the user cares about: crop_bottom_percent: 50 should
+    // put the bottom black bar at the vertical center of the image. That
+    // means tan(narrowed_angleDown) == 0.5 * tan(original_angleDown).
+    CropConfig cfg;
+    cfg.cropLeftFactor = 0.5f;
+    cfg.cropRightFactor = 0.5f;
+    cfg.cropTopFactor = 0.5f;
+    cfg.cropBottomFactor = 0.5f;
+
+    const XrFovf orig = {-1.0f, 1.0f, 0.8f, -0.9f};
+    const XrFovf out = narrowFov(orig, cfg);
+
+    CHECK(std::tan(out.angleLeft) == doctest::Approx(std::tan(orig.angleLeft) * 0.5f));
+    CHECK(std::tan(out.angleRight) == doctest::Approx(std::tan(orig.angleRight) * 0.5f));
+    CHECK(std::tan(out.angleUp) == doctest::Approx(std::tan(orig.angleUp) * 0.5f));
+    CHECK(std::tan(out.angleDown) == doctest::Approx(std::tan(orig.angleDown) * 0.5f));
 }
 
 TEST_CASE("narrowFov: negative half-angles become less negative (narrower) under factor < 1") {
@@ -417,24 +439,25 @@ Sample makeSample(std::mt19937& rng) {
 
 } // namespace
 
-TEST_CASE("property: narrowFov preserves per-edge magnitude × factor and sign") {
+TEST_CASE("property: narrowFov scales tan(half-angle) by the per-edge factor and preserves sign") {
     std::mt19937 rng(kPropertySeed);
     for (int i = 0; i < kPropertyIterations; ++i) {
         const Sample s = makeSample(rng);
         const XrFovf out = narrowFov(s.fov, s.cfg);
 
-        // Magnitude scales by the per-edge factor. We compare on absolute
-        // values so the sign convention (L/D negative) does not muddle the
-        // assertion. A single failure here fingers the edge that regressed.
+        // Magnitude relationship in tan-space: tan(|out|) == tan(|in|) * factor.
+        // Using absolute values keeps the sign convention (L/D negative) out of
+        // the arithmetic; tan is odd so tan(|x|) is the same as |tan(x)| for
+        // our input range (|half-angle| < 90°).
         INFO("iteration ", i);
-        CHECK(std::abs(out.angleLeft) ==
-              doctest::Approx(std::abs(s.fov.angleLeft) * s.cfg.cropLeftFactor));
-        CHECK(std::abs(out.angleRight) ==
-              doctest::Approx(std::abs(s.fov.angleRight) * s.cfg.cropRightFactor));
-        CHECK(std::abs(out.angleUp) ==
-              doctest::Approx(std::abs(s.fov.angleUp) * s.cfg.cropTopFactor));
-        CHECK(std::abs(out.angleDown) ==
-              doctest::Approx(std::abs(s.fov.angleDown) * s.cfg.cropBottomFactor));
+        CHECK(std::tan(std::abs(out.angleLeft)) ==
+              doctest::Approx(std::tan(std::abs(s.fov.angleLeft)) * s.cfg.cropLeftFactor));
+        CHECK(std::tan(std::abs(out.angleRight)) ==
+              doctest::Approx(std::tan(std::abs(s.fov.angleRight)) * s.cfg.cropRightFactor));
+        CHECK(std::tan(std::abs(out.angleUp)) ==
+              doctest::Approx(std::tan(std::abs(s.fov.angleUp)) * s.cfg.cropTopFactor));
+        CHECK(std::tan(std::abs(out.angleDown)) ==
+              doctest::Approx(std::tan(std::abs(s.fov.angleDown)) * s.cfg.cropBottomFactor));
 
         // Sign preservation. An abs()-then-multiply regression (which would
         // still pass the magnitude check above on positive inputs) gets
