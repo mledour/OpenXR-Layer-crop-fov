@@ -42,6 +42,7 @@
 #include <doctest/doctest.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -166,9 +167,11 @@ XrFovf defaultFov() {
 
 TEST_CASE("integration: xrEnumerateViewConfigurationViews scales recommended dims") {
     LayerFixture fx;
-    // 10/10/15/20% crop -> factors 0.9/0.9/0.85/0.80.
-    // scaleSwapchainExtents uses min(left,right)=0.9 for width, min(top,bot)=0.80 for height.
-    // 2000*0.9 = 1800 (8-aligned: 1800), 2200*0.8 = 1760 (8-aligned: 1760).
+    // clampFactor = 1 - percent/50. So 10/10/15/20% -> factors 0.80/0.80/0.70/0.60.
+    // scaleSwapchainExtents now averages per-axis (not min):
+    //   widthFactor = (0.80 + 0.80) / 2 = 0.80
+    //   heightFactor = (0.70 + 0.60) / 2 = 0.65
+    // 2000 * 0.80 = 1600 (8-aligned). 2200 * 0.65 = 1430 -> aligned down to 1424.
     fx.writeSettings(R"({
         "enabled": true,
         "crop_left_percent": 10,
@@ -197,11 +200,10 @@ TEST_CASE("integration: xrEnumerateViewConfigurationViews scales recommended dim
                 XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
                 count, &count, views.data()) == XR_SUCCESS);
 
-    // Expected: 2000 * 0.9 = 1800, aligned-down to 8 -> 1800. 2200 * 0.8 = 1760.
-    CHECK(views[0].recommendedImageRectWidth == 1800u);
-    CHECK(views[0].recommendedImageRectHeight == 1760u);
-    CHECK(views[1].recommendedImageRectWidth == 1800u);
-    CHECK(views[1].recommendedImageRectHeight == 1760u);
+    CHECK(views[0].recommendedImageRectWidth == 1600u);
+    CHECK(views[0].recommendedImageRectHeight == 1424u);
+    CHECK(views[1].recommendedImageRectWidth == 1600u);
+    CHECK(views[1].recommendedImageRectHeight == 1424u);
 }
 
 TEST_CASE("integration: bypass (enabled=false) leaves dims unchanged") {
@@ -224,6 +226,56 @@ TEST_CASE("integration: bypass (enabled=false) leaves dims unchanged") {
     // Bypass path: layer must not rescale.
     CHECK(views[0].recommendedImageRectWidth == 1920u);
     CHECK(views[0].recommendedImageRectHeight == 1080u);
+}
+
+TEST_CASE("integration: crop_bottom_percent 50 puts the bar at the image center end-to-end") {
+    // Regression guard for the Le Mans Ultimate / Pimax Crystal Light crash
+    // where scaleSwapchainExtents = min(..., 0) collapsed the swapchain
+    // height to 8 pixels and the runtime died during rendering. This pins
+    // the whole JSON -> clampFactor -> scaleSwapchainExtents -> narrowFov
+    // chain for the `bar-at-middle` case so any future regression is
+    // caught at the integration level rather than only in the unit tests.
+    LayerFixture fx;
+    fx.writeSettings(R"({
+        "enabled": true,
+        "crop_left_percent": 0,
+        "crop_right_percent": 0,
+        "crop_top_percent": 0,
+        "crop_bottom_percent": 50
+    })");
+    // Real Pimax Crystal Light view[0] FOV from the log that crashed.
+    const XrFovf hmdFov{-0.923f, 0.707f, 0.905f, -0.905f};
+    mock::state().recommendedWidth = 4352;
+    mock::state().recommendedHeight = 5102;
+    mock::state().viewCount = 1;
+    mock::state().locateFovs = {hmdFov};
+
+    auto* layer = fx.boot();
+
+    // xrEnumerateViewConfigurationViews: width unchanged (no left/right
+    // crop), height halved via (cropTop + cropBottom) / 2 = 0.5.
+    uint32_t count = 0;
+    std::vector<XrViewConfigurationView> cfgViews(1, {XR_TYPE_VIEW_CONFIGURATION_VIEW});
+    REQUIRE(layer->xrEnumerateViewConfigurationViews(
+                reinterpret_cast<XrInstance>(static_cast<uintptr_t>(0xBEEF)),
+                static_cast<XrSystemId>(1),
+                XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                1, &count, cfgViews.data()) == XR_SUCCESS);
+    CHECK(cfgViews[0].recommendedImageRectWidth == 4352u);
+    CHECK(cfgViews[0].recommendedImageRectHeight == 2544u);  // 5102 * 0.5 -> aligned down
+
+    // xrLocateViews: angleDown collapses to exactly 0 (factor 0 applied
+    // to its tangent), other edges untouched (factor 1.0 = atan(tan(x))).
+    std::vector<XrView> views(1, {XR_TYPE_VIEW});
+    XrViewState viewState{XR_TYPE_VIEW_STATE};
+    XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
+    li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    REQUIRE(layer->xrLocateViews(reinterpret_cast<XrSession>(static_cast<uintptr_t>(0xCAFE)),
+                                 &li, &viewState, 1, &count, views.data()) == XR_SUCCESS);
+    CHECK(views[0].fov.angleLeft == doctest::Approx(hmdFov.angleLeft));
+    CHECK(views[0].fov.angleRight == doctest::Approx(hmdFov.angleRight));
+    CHECK(views[0].fov.angleUp == doctest::Approx(hmdFov.angleUp));
+    CHECK(views[0].fov.angleDown == doctest::Approx(0.0f));
 }
 
 // ---------------------------------------------------------------------------
@@ -255,11 +307,18 @@ TEST_CASE("integration: xrLocateViews narrows FOV per-edge") {
                 &li, &viewState, 2, &count, views.data()) == XR_SUCCESS);
     REQUIRE(count == 2);
 
-    // Factors: 0.90, 0.80, 0.85, 0.75.
-    CHECK(views[0].fov.angleLeft == doctest::Approx(kDefaultLeftAngle * 0.90f));
-    CHECK(views[0].fov.angleRight == doctest::Approx(kDefaultRightAngle * 0.80f));
-    CHECK(views[0].fov.angleUp == doctest::Approx(kDefaultUpAngle * 0.85f));
-    CHECK(views[0].fov.angleDown == doctest::Approx(kDefaultDownAngle * 0.75f));
+    // Percents 10/20/15/25 map to tangent factors 0.80/0.60/0.70/0.50
+    // via clampFactor = 1 - percent/50 (so percent 50 puts the bar at the
+    // image center). Applied in tan-space so the factor corresponds
+    // directly to a pixel fraction on the swapchain.
+    CHECK(views[0].fov.angleLeft ==
+          doctest::Approx(std::atan(std::tan(kDefaultLeftAngle) * 0.80f)));
+    CHECK(views[0].fov.angleRight ==
+          doctest::Approx(std::atan(std::tan(kDefaultRightAngle) * 0.60f)));
+    CHECK(views[0].fov.angleUp ==
+          doctest::Approx(std::atan(std::tan(kDefaultUpAngle) * 0.70f)));
+    CHECK(views[0].fov.angleDown ==
+          doctest::Approx(std::atan(std::tan(kDefaultDownAngle) * 0.50f)));
 }
 
 TEST_CASE("integration: xrLocateViews bypass path leaves FOV unchanged") {
@@ -315,12 +374,13 @@ TEST_CASE("integration: asymmetric WMR-style FOV narrows per-edge in xrLocateVie
                                  &li, &viewState, 2, &count, views.data()) == XR_SUCCESS);
     REQUIRE(count == 2);
 
-    // Factors: 0.95, 0.80, 0.70, 0.90 (from %: 5, 20, 30, 10).
-    // Each edge is multiplied by its own factor on the signed angle.
-    CHECK(views[0].fov.angleLeft == doctest::Approx(-0.95f * 0.95f));
-    CHECK(views[0].fov.angleRight == doctest::Approx(0.85f * 0.80f));
-    CHECK(views[0].fov.angleUp == doctest::Approx(0.70f * 0.70f));
-    CHECK(views[0].fov.angleDown == doctest::Approx(-0.60f * 0.90f));
+    // Percents 5/20/30/10 map to tangent factors 0.90/0.60/0.40/0.80
+    // (clampFactor = 1 - p/50). Applied in tan-space, each edge
+    // independently on its own signed angle.
+    CHECK(views[0].fov.angleLeft == doctest::Approx(std::atan(std::tan(-0.95f) * 0.90f)));
+    CHECK(views[0].fov.angleRight == doctest::Approx(std::atan(std::tan(0.85f) * 0.60f)));
+    CHECK(views[0].fov.angleUp == doctest::Approx(std::atan(std::tan(0.70f) * 0.40f)));
+    CHECK(views[0].fov.angleDown == doctest::Approx(std::atan(std::tan(-0.60f) * 0.80f)));
 
     // Spec invariants that must hold after narrowing: left edge still negative,
     // right still positive, up still positive, down still negative. A bug in
@@ -372,10 +432,11 @@ TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
     };
 
     // First 89 frames: counter goes 1..89, no poll fires (90%90==0 is the
-    // trigger). Config stays at factor 0.9.
+    // trigger). Config stays at factor 0.8 (percent 10 -> 1 - 10/50 = 0.8).
+    const float expectedBefore = std::atan(std::tan(fov.angleLeft) * 0.8f);
     for (int i = 0; i < 89; ++i) {
         const auto v = locateFrame();
-        CHECK(v.fov.angleLeft == doctest::Approx(fov.angleLeft * 0.9f));
+        CHECK(v.fov.angleLeft == doctest::Approx(expectedBefore));
     }
 
     // Rewrite the per-app file (not the settings.json template — the watcher
@@ -395,9 +456,10 @@ TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
 
     // Frame 90: counter hits 90, 90%90==0, poll fires, mtime changed -> reload.
     // The reload runs BEFORE the narrowFov call in xrLocateViews, so this
-    // frame already sees the new factor.
+    // frame already sees the new factor (percent 30 -> 1 - 30/50 = 0.4).
+    const float expectedAfter = std::atan(std::tan(fov.angleLeft) * 0.4f);
     const auto v = locateFrame();
-    CHECK(v.fov.angleLeft == doctest::Approx(fov.angleLeft * 0.7f));
+    CHECK(v.fov.angleLeft == doctest::Approx(expectedAfter));
 }
 
 // ---------------------------------------------------------------------------

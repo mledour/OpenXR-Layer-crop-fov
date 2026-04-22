@@ -35,17 +35,28 @@
 namespace openxr_api_layer {
 
     // Configuration loaded from %LOCALAPPDATA%\<layer-name>\settings.json.
-    // Factors are in [0.5, 1.0]; 1.0 means "no crop", 0.5 means "crop half of
-    // that edge off". Kept as factors (not percents) because we multiply by
-    // them in hot paths like xrLocateViews and xrEndFrame.
+    // Factors are in [0.0, 1.0] and act on the TANGENT of the half-angle —
+    // not the angle itself — because OpenXR projection is perspective and
+    // pixels map linearly to tan(angle).
+    //
+    // The per-edge percent in the JSON is the **fraction of the image
+    // covered by the black bar on that edge**:
+    //   crop_bottom_percent: 0   -> factor 1.0, no crop, no bar
+    //   crop_bottom_percent: 25  -> factor 0.5, bar covers 25% of image height
+    //   crop_bottom_percent: 50  -> factor 0.0, bar reaches the middle of the image
+    // (Per-edge percents are clamped to [0, 50] upstream in clampFactor because
+    // a single edge's bar cannot meaningfully exceed half the image height.)
+    //
+    // Kept as factors (not percents) in the struct because we multiply by
+    // them in the hot path (xrLocateViews).
     struct CropConfig {
         // Opt-in by default: the layer is a no-op until the user explicitly
         // sets "enabled": true in their per-app settings file.
         bool enabled = false;
-        float cropLeftFactor = 0.90f;   // percent 10 -> factor 0.90
-        float cropRightFactor = 0.90f;  // percent 10 -> factor 0.90
-        float cropTopFactor = 0.85f;    // percent 15 -> factor 0.85
-        float cropBottomFactor = 0.80f; // percent 20 -> factor 0.80
+        float cropLeftFactor = 0.80f;   // percent 10 -> factor 0.80 (bar is 10% of image)
+        float cropRightFactor = 0.80f;  // percent 10 -> factor 0.80
+        float cropTopFactor = 0.70f;    // percent 15 -> factor 0.70 (bar is 15% of image)
+        float cropBottomFactor = 0.60f; // percent 20 -> factor 0.60 (bar is 20% of image)
 
         // When true, the layer re-reads settings.json every ~1 second (90
         // frames) to pick up changes without restarting the game. Intended
@@ -53,14 +64,18 @@ namespace openxr_api_layer {
         bool liveEdit = false;
     };
 
-    // Maps a user-facing "crop X percent" value in [0, 50] to a factor in
-    // [0.5, 1.0]. Out-of-range inputs are clamped so a malformed config
-    // never produces a factor that would flip the FOV sign or collapse it
-    // to zero.
+    // Maps a user-facing "crop X percent" value in [0, 50] to a tangent
+    // factor in [0.0, 1.0]. The percent is the **fraction of the image
+    // covered by the bar on that edge**, so percent = 50 means the bar
+    // reaches the image center → the tangent on that edge must collapse
+    // to zero → factor = 0. Out-of-range inputs are clamped defensively:
+    // negative percents become "no crop" (factor 1), and percents above
+    // 50 are capped there (a single edge cannot cover more than half the
+    // image without nonsensical geometry).
     inline float clampFactor(float percent) {
         if (percent < 0.0f) percent = 0.0f;
         if (percent > 50.0f) percent = 50.0f;
-        return 1.0f - (percent / 100.0f);
+        return 1.0f - (percent / 50.0f);
     }
 
     struct Extent2D {
@@ -80,17 +95,27 @@ namespace openxr_api_layer {
     constexpr uint32_t kDimensionAlignment = 8u;
 
     // Applies the crop to the recommended swapchain dimensions returned by
-    // xrEnumerateViewConfigurationViews. Uses the min of left/right for
-    // width (and top/bottom for height) so the allocated swapchain is still
-    // large enough for the widest individual crop. Result is force-aligned
-    // down to a multiple of kDimensionAlignment with that same value as a
-    // floor, so the runtime never receives a zero-size or awkwardly-aligned
-    // swapchain.
+    // xrEnumerateViewConfigurationViews. Uses the **average** of the per-edge
+    // factors on each axis — for a roughly-symmetric FOV this matches the
+    // actual tan-extent of the narrowed frustum exactly, so pixel density
+    // stays native. A previous min-based version collapsed the swapchain to
+    // zero as soon as one edge hit factor 0 (e.g. crop_bottom_percent = 50,
+    // bar at middle), which yielded a 8-pixel-tall texture and crashed the
+    // downstream runtime. The average is bounded below by 0 only when BOTH
+    // edges on that axis are at factor 0 — a genuinely degenerate config —
+    // and the kDimensionAlignment floor below still keeps the output >= 8
+    // in that case.
+    //
+    // Note: for strongly asymmetric FOVs (Pimax canted, WMR) combined with
+    // strongly asymmetric crops, the simple average can under- or over-
+    // provision by up to ~25% vs. a tan-weighted average. That's acceptable
+    // as a conservative default (no crash, slight density drift) and avoids
+    // plumbing the fov into this pure math helper.
     inline Extent2D scaleSwapchainExtents(uint32_t origWidth,
                                           uint32_t origHeight,
                                           const CropConfig& cfg) {
-        const float widthFactor = std::min(cfg.cropLeftFactor, cfg.cropRightFactor);
-        const float heightFactor = std::min(cfg.cropTopFactor, cfg.cropBottomFactor);
+        const float widthFactor = (cfg.cropLeftFactor + cfg.cropRightFactor) * 0.5f;
+        const float heightFactor = (cfg.cropTopFactor + cfg.cropBottomFactor) * 0.5f;
 
         uint32_t newWidth = static_cast<uint32_t>(origWidth * widthFactor);
         uint32_t newHeight = static_cast<uint32_t>(origHeight * heightFactor);
@@ -182,16 +207,25 @@ namespace openxr_api_layer {
         return XrRect2Di{{newOffsetX, newOffsetY}, {newWidth, newHeight}};
     }
 
-    // Multiplies each half-angle of the FOV by its matching factor. The
-    // OpenXR convention has angleLeft negative and angleRight positive (both
-    // in radians), so multiplying by a positive factor < 1 narrows the FOV
-    // symmetrically toward zero — which is what we want.
+    // Narrows the FOV by multiplying each edge's TANGENT by the matching
+    // factor, then taking atan. Because a perspective projection maps pixels
+    // linearly to tan(angle), this makes the factor correspond directly to a
+    // pixel fraction on the swapchain: cropBottomFactor = 0.5 puts the bottom
+    // black bar at exactly the vertical center of the image. Scaling the raw
+    // angle (angle *= factor) would make the bar drift further from center
+    // as the factor gets smaller — not what users expect when they read
+    // "crop_bottom_percent: 50" as "crop the bottom half".
+    //
+    // tan and atan are both odd functions, so the OpenXR sign convention
+    // (angleLeft / angleDown negative, angleRight / angleUp positive) is
+    // preserved naturally: tan(-x) * factor = -tan(x) * factor, and
+    // atan(-y) = -atan(y).
     inline XrFovf narrowFov(const XrFovf& origFov, const CropConfig& cfg) {
         XrFovf fov = origFov;
-        fov.angleLeft *= cfg.cropLeftFactor;
-        fov.angleRight *= cfg.cropRightFactor;
-        fov.angleUp *= cfg.cropTopFactor;
-        fov.angleDown *= cfg.cropBottomFactor;
+        fov.angleLeft = std::atan(std::tan(fov.angleLeft) * cfg.cropLeftFactor);
+        fov.angleRight = std::atan(std::tan(fov.angleRight) * cfg.cropRightFactor);
+        fov.angleUp = std::atan(std::tan(fov.angleUp) * cfg.cropTopFactor);
+        fov.angleDown = std::atan(std::tan(fov.angleDown) * cfg.cropBottomFactor);
         return fov;
     }
 

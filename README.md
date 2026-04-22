@@ -102,11 +102,32 @@ have their own file.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Master switch — the layer is **opt-in** and a no-op until you flip this to `true`. |
-| `crop_left_percent` | float | `10` | Percentage to crop from the left edge (0-50). |
-| `crop_right_percent` | float | `10` | Percentage to crop from the right edge (0-50). |
-| `crop_top_percent` | float | `15` | Percentage to crop from the top edge (0-50). |
-| `crop_bottom_percent` | float | `20` | Percentage to crop from the bottom edge (0-50). |
+| `crop_left_percent` | float | `10` | Percentage of the image covered by the black bar on the left edge (0-50). |
+| `crop_right_percent` | float | `10` | Percentage of the image covered by the black bar on the right edge (0-50). |
+| `crop_top_percent` | float | `15` | Percentage of the image covered by the black bar on the top edge (0-50). |
+| `crop_bottom_percent` | float | `20` | Percentage of the image covered by the black bar on the bottom edge (0-50). |
 | `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Set back to false once you're happy. |
+
+### How the percentages are interpreted
+
+Each `crop_*_percent` is the **fraction of the image covered by the black
+bar on that edge**. The mapping is linear in pixel space:
+
+- `crop_bottom_percent: 10` → the bottom bar covers the bottom 10% of
+  the image.
+- `crop_bottom_percent: 25` → the bottom bar covers the bottom 25%.
+- `crop_bottom_percent: 50` → the bottom bar reaches the image center
+  (covers the bottom 50%). This is the maximum: values above 50 are
+  clamped because a single edge cannot physically cover more than half
+  the image without overlapping the opposite bar.
+
+The same rule applies independently on each of the four edges, so
+`10/10/15/20` leaves a central content area spanning 80% of the width
+and 65% of the height of the full image, centered.
+
+The layer does the math in tan-space (the pixel ↔ angle mapping of
+perspective projection), so the bar lands at the configured percentage
+to the pixel — regardless of the HMD's native FOV or eye offset.
 
 **To activate the layer**, flip `"enabled": false` to `"enabled": true`
 either:

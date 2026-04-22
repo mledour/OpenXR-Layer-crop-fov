@@ -42,11 +42,15 @@ using openxr_api_layer::scaleSwapchainExtents;
 // clampFactor
 // ---------------------------------------------------------------------------
 
-TEST_CASE("clampFactor: maps percent to factor = 1 - percent/100") {
+TEST_CASE("clampFactor: maps percent to factor = 1 - percent/50") {
+    // The percent is the fraction of the image covered by the bar on
+    // that edge, so percent = 50 is the max (bar reaches the image
+    // center) and maps to factor 0 (the tangent on that edge collapses
+    // to zero).
     CHECK(clampFactor(0.0f) == doctest::Approx(1.0f));
-    CHECK(clampFactor(10.0f) == doctest::Approx(0.9f));
-    CHECK(clampFactor(25.0f) == doctest::Approx(0.75f));
-    CHECK(clampFactor(50.0f) == doctest::Approx(0.5f));
+    CHECK(clampFactor(10.0f) == doctest::Approx(0.8f));
+    CHECK(clampFactor(25.0f) == doctest::Approx(0.5f));
+    CHECK(clampFactor(50.0f) == doctest::Approx(0.0f));
 }
 
 TEST_CASE("clampFactor: clamps negative percents to 1.0 (no crop)") {
@@ -54,18 +58,18 @@ TEST_CASE("clampFactor: clamps negative percents to 1.0 (no crop)") {
     CHECK(clampFactor(-100.0f) == doctest::Approx(1.0f));
 }
 
-TEST_CASE("clampFactor: clamps percents above 50 to 0.5 (hard crop limit)") {
-    CHECK(clampFactor(50.01f) == doctest::Approx(0.5f));
-    CHECK(clampFactor(99.0f) == doctest::Approx(0.5f));
-    CHECK(clampFactor(1000.0f) == doctest::Approx(0.5f));
+TEST_CASE("clampFactor: clamps percents above 50 to 0.0 (hard crop limit)") {
+    CHECK(clampFactor(50.01f) == doctest::Approx(0.0f));
+    CHECK(clampFactor(99.0f) == doctest::Approx(0.0f));
+    CHECK(clampFactor(1000.0f) == doctest::Approx(0.0f));
 }
 
-TEST_CASE("clampFactor: NaN/infinity policy - infinity is clamped to 0.5") {
+TEST_CASE("clampFactor: NaN/infinity policy - infinity is clamped to 0.0") {
     // Not part of the "documented" API contract but worth pinning: +inf
     // percent should not turn into a negative factor. The current
-    // implementation treats +inf > 50.0f as true, so it returns 0.5f.
+    // implementation treats +inf > 50.0f as true, so it returns 0.0f.
     const float posInf = std::numeric_limits<float>::infinity();
-    CHECK(clampFactor(posInf) == doctest::Approx(0.5f));
+    CHECK(clampFactor(posInf) == doctest::Approx(0.0f));
 
     const float negInf = -std::numeric_limits<float>::infinity();
     CHECK(clampFactor(negInf) == doctest::Approx(1.0f));
@@ -94,17 +98,38 @@ TEST_CASE("scaleSwapchainExtents: symmetric 10% crop shrinks both axes by 10%") 
     CHECK(out.height == 1800u);
 }
 
-TEST_CASE("scaleSwapchainExtents: asymmetric factors take the smaller one per axis") {
-    // width uses min(left, right); height uses min(top, bottom).
+TEST_CASE("scaleSwapchainExtents: asymmetric factors are averaged per axis") {
+    // width uses (left + right) / 2; height uses (top + bottom) / 2.
+    // This matches the actual tan-extent of a narrowed FOV for symmetric
+    // inputs and avoids collapsing the swapchain to zero when one edge
+    // is at factor 0 (e.g. crop_bottom 50% -> bar at middle).
     CropConfig cfg;
-    cfg.cropLeftFactor = 0.9f;   // -> would give 1800
-    cfg.cropRightFactor = 0.8f;  // -> would give 1600; min wins
-    cfg.cropTopFactor = 0.7f;    // -> would give 1400; min wins
-    cfg.cropBottomFactor = 0.85f; // -> would give 1700
+    cfg.cropLeftFactor = 0.9f;    // avg(0.9, 0.8) = 0.85 -> 2000 * 0.85 = 1700 -> aligned 1696
+    cfg.cropRightFactor = 0.8f;
+    cfg.cropTopFactor = 0.7f;     // avg(0.7, 0.85) = 0.775 -> 2000 * 0.775 = 1550 -> aligned 1544
+    cfg.cropBottomFactor = 0.85f;
 
     const Extent2D out = scaleSwapchainExtents(2000, 2000, cfg);
-    CHECK(out.width == 1600u);
-    CHECK(out.height == 1400u);
+    CHECK(out.width == 1696u);
+    CHECK(out.height == 1544u);
+}
+
+TEST_CASE("scaleSwapchainExtents: factor 0 on a single edge halves the axis (no zero swapchain)") {
+    // Regression guard: crop_bottom_percent = 50 produces cropBottomFactor = 0,
+    // and the old min-based version dropped the swapchain height to 0 (then
+    // floored to 8), which crashed the downstream runtime on real HMDs
+    // (observed with Pimax Crystal Light + Le Mans Ultimate).
+    CropConfig cfg;
+    cfg.cropLeftFactor = 1.0f;
+    cfg.cropRightFactor = 1.0f;
+    cfg.cropTopFactor = 1.0f;
+    cfg.cropBottomFactor = 0.0f;   // bar at middle -> half the axis is content
+
+    const Extent2D out = scaleSwapchainExtents(4352, 5102, cfg);
+    // Width unchanged (1.0 + 1.0) / 2 = 1.0 -> 4352 (already aligned).
+    CHECK(out.width == 4352u);
+    // Height = 5102 * 0.5 = 2551 -> aligned down to 2544 (not 8).
+    CHECK(out.height == 2544u);
 }
 
 TEST_CASE("scaleSwapchainExtents: rounds down to the nearest multiple of 8") {
@@ -324,7 +349,10 @@ TEST_CASE("narrowFov: factors = 1.0 leave the FOV untouched") {
     CHECK(out.angleDown == doctest::Approx(orig.angleDown));
 }
 
-TEST_CASE("narrowFov: scales every half-angle by its matching factor") {
+TEST_CASE("narrowFov: scales the tangent of each half-angle by its matching factor") {
+    // We work in tan-space so the factor lines up with pixel fractions on
+    // the swapchain. For factor f on an input half-angle a, the output is
+    // atan(tan(a) * f) — NOT a * f.
     CropConfig cfg;
     cfg.cropLeftFactor = 0.8f;
     cfg.cropRightFactor = 0.9f;
@@ -334,10 +362,51 @@ TEST_CASE("narrowFov: scales every half-angle by its matching factor") {
     const XrFovf orig = {-1.0f, 1.0f, 1.0f, -1.0f};
     const XrFovf out = narrowFov(orig, cfg);
 
-    CHECK(out.angleLeft == doctest::Approx(-0.8f));
-    CHECK(out.angleRight == doctest::Approx(0.9f));
-    CHECK(out.angleUp == doctest::Approx(0.7f));
-    CHECK(out.angleDown == doctest::Approx(-0.6f));
+    CHECK(out.angleLeft == doctest::Approx(std::atan(std::tan(-1.0f) * 0.8f)));
+    CHECK(out.angleRight == doctest::Approx(std::atan(std::tan(1.0f) * 0.9f)));
+    CHECK(out.angleUp == doctest::Approx(std::atan(std::tan(1.0f) * 0.7f)));
+    CHECK(out.angleDown == doctest::Approx(std::atan(std::tan(-1.0f) * 0.6f)));
+}
+
+TEST_CASE("narrowFov: factor of 0.5 puts each edge at 50%% of the original tangent") {
+    // Concrete invariant the user cares about: crop_bottom_percent: 50 should
+    // put the bottom black bar at the vertical center of the image. That
+    // means tan(narrowed_angleDown) == 0.5 * tan(original_angleDown).
+    CropConfig cfg;
+    cfg.cropLeftFactor = 0.5f;
+    cfg.cropRightFactor = 0.5f;
+    cfg.cropTopFactor = 0.5f;
+    cfg.cropBottomFactor = 0.5f;
+
+    const XrFovf orig = {-1.0f, 1.0f, 0.8f, -0.9f};
+    const XrFovf out = narrowFov(orig, cfg);
+
+    CHECK(std::tan(out.angleLeft) == doctest::Approx(std::tan(orig.angleLeft) * 0.5f));
+    CHECK(std::tan(out.angleRight) == doctest::Approx(std::tan(orig.angleRight) * 0.5f));
+    CHECK(std::tan(out.angleUp) == doctest::Approx(std::tan(orig.angleUp) * 0.5f));
+    CHECK(std::tan(out.angleDown) == doctest::Approx(std::tan(orig.angleDown) * 0.5f));
+}
+
+TEST_CASE("narrowFov: factor = 0 collapses that edge to exactly zero") {
+    // Boundary case: crop_*_percent = 50 maps to factor 0 via clampFactor.
+    // narrowFov must produce a finite zero angle on each zeroed edge (not
+    // NaN, not a sign flip), so the bar lands exactly at the image center
+    // and downstream math (sub-image calculations, reprojection in the
+    // compositor) stays well-defined. Exercised end-to-end by the
+    // "crop_bottom_percent: 50 -> bar at middle" integration test.
+    CropConfig cfg;
+    cfg.cropLeftFactor = 0.0f;
+    cfg.cropRightFactor = 0.0f;
+    cfg.cropTopFactor = 0.0f;
+    cfg.cropBottomFactor = 0.0f;
+
+    const XrFovf orig = {-0.95f, 0.85f, 0.70f, -0.60f};
+    const XrFovf out = narrowFov(orig, cfg);
+
+    CHECK(out.angleLeft == doctest::Approx(0.0f));
+    CHECK(out.angleRight == doctest::Approx(0.0f));
+    CHECK(out.angleUp == doctest::Approx(0.0f));
+    CHECK(out.angleDown == doctest::Approx(0.0f));
 }
 
 TEST_CASE("narrowFov: negative half-angles become less negative (narrower) under factor < 1") {
@@ -417,24 +486,25 @@ Sample makeSample(std::mt19937& rng) {
 
 } // namespace
 
-TEST_CASE("property: narrowFov preserves per-edge magnitude × factor and sign") {
+TEST_CASE("property: narrowFov scales tan(half-angle) by the per-edge factor and preserves sign") {
     std::mt19937 rng(kPropertySeed);
     for (int i = 0; i < kPropertyIterations; ++i) {
         const Sample s = makeSample(rng);
         const XrFovf out = narrowFov(s.fov, s.cfg);
 
-        // Magnitude scales by the per-edge factor. We compare on absolute
-        // values so the sign convention (L/D negative) does not muddle the
-        // assertion. A single failure here fingers the edge that regressed.
+        // Magnitude relationship in tan-space: tan(|out|) == tan(|in|) * factor.
+        // Using absolute values keeps the sign convention (L/D negative) out of
+        // the arithmetic; tan is odd so tan(|x|) is the same as |tan(x)| for
+        // our input range (|half-angle| < 90°).
         INFO("iteration ", i);
-        CHECK(std::abs(out.angleLeft) ==
-              doctest::Approx(std::abs(s.fov.angleLeft) * s.cfg.cropLeftFactor));
-        CHECK(std::abs(out.angleRight) ==
-              doctest::Approx(std::abs(s.fov.angleRight) * s.cfg.cropRightFactor));
-        CHECK(std::abs(out.angleUp) ==
-              doctest::Approx(std::abs(s.fov.angleUp) * s.cfg.cropTopFactor));
-        CHECK(std::abs(out.angleDown) ==
-              doctest::Approx(std::abs(s.fov.angleDown) * s.cfg.cropBottomFactor));
+        CHECK(std::tan(std::abs(out.angleLeft)) ==
+              doctest::Approx(std::tan(std::abs(s.fov.angleLeft)) * s.cfg.cropLeftFactor));
+        CHECK(std::tan(std::abs(out.angleRight)) ==
+              doctest::Approx(std::tan(std::abs(s.fov.angleRight)) * s.cfg.cropRightFactor));
+        CHECK(std::tan(std::abs(out.angleUp)) ==
+              doctest::Approx(std::tan(std::abs(s.fov.angleUp)) * s.cfg.cropTopFactor));
+        CHECK(std::tan(std::abs(out.angleDown)) ==
+              doctest::Approx(std::tan(std::abs(s.fov.angleDown)) * s.cfg.cropBottomFactor));
 
         // Sign preservation. An abs()-then-multiply regression (which would
         // still pass the magnitude check above on positive inputs) gets
