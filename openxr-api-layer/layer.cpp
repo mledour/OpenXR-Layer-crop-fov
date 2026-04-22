@@ -45,9 +45,11 @@ namespace openxr_api_layer {
     const std::vector<std::string> blockedExtensions = {};
     const std::vector<std::string> implicitExtensions = {};
 
-    // CropConfig, clampFactor, scaleSwapchainExtents, computeCroppedImageRect,
-    // and narrowFov live in <utils/crop_math.h> so they can be unit-tested
-    // from a standalone binary without linking the layer DLL.
+    // CropConfig, clampFactor, scaleSwapchainExtents, and narrowFov live in
+    // <utils/crop_math.h> so they can be unit-tested from a standalone binary
+    // without linking the layer DLL. (computeCroppedImageRect also lives there
+    // for now — unused by the layer since we moved to single-application, but
+    // kept as a reusable helper and covered by tests.)
 
     // Reads an optional float field from a rapidjson object. Returns defaultVal if
     // the field is absent or not a number. Accepts both integer and floating JSON numbers.
@@ -245,18 +247,6 @@ namespace openxr_api_layer {
                               TLArg(createInfo->createFlags, "CreateFlags"));
             Log(fmt::format("Application: {}\n", createInfo->applicationInfo.applicationName));
 
-            // The singleton OpenXrLayer outlives a single XrInstance in some
-            // scenarios (notably the CTS, which creates and destroys instances
-            // back to back). If the previous instance left entries behind
-            // (e.g. app skipped xrDestroySession, or the runtime tore things
-            // down out of band) a handle value could be reused by the runtime
-            // for this new instance and collide. Start every instance with a
-            // clean map.
-            {
-                std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
-                m_swapchainInfoMap.clear();
-            }
-
             // Ensure the global settings.json template exists. It seeds the
             // per-app file below, and gives the user a single place to edit
             // the defaults applied to future games.
@@ -288,7 +278,7 @@ namespace openxr_api_layer {
             }
 
             // If live_edit is on, record the per-app config's mtime so
-            // xrEndFrame can detect changes without recomputing the path
+            // xrLocateViews can detect changes without recomputing the path
             // each frame.
             if (m_config.liveEdit) {
                 try {
@@ -428,6 +418,24 @@ namespace openxr_api_layer {
                                uint32_t viewCapacityInput,
                                uint32_t* viewCountOutput,
                                XrView* views) override {
+            // ---- Live-edit: periodic config reload --------------------------
+            // xrLocateViews is the hot path — called ~once per frame. Wrap the
+            // poll here (rather than a dedicated xrEndFrame override) so the
+            // user can tune the crop factors mid-session without restarting
+            // the game. Swapchain dims stay fixed (allocated at session start)
+            // so live_edit only affects the per-frame FOV narrowing.
+            if (m_config.liveEdit && ++m_liveEditFrameCounter % kLiveEditCheckInterval == 0) {
+                try {
+                    const auto mtime = std::filesystem::last_write_time(m_configFilePath);
+                    if (mtime != m_configLastWriteTime) {
+                        m_configLastWriteTime = mtime;
+                        m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
+                    }
+                } catch (...) {
+                    // File mid-write, locked, or deleted. Skip, try next interval.
+                }
+            }
+
             TraceLoggingWrite(g_traceProvider,
                               "xrLocateViews",
                               TLXArg(session, "Session"),
@@ -464,177 +472,6 @@ namespace openxr_api_layer {
             return result;
         }
 
-        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrCreateSwapchain
-        XrResult xrCreateSwapchain(XrSession session,
-                                   const XrSwapchainCreateInfo* createInfo,
-                                   XrSwapchain* swapchain) override {
-            TraceLoggingWrite(g_traceProvider,
-                              "xrCreateSwapchain",
-                              TLXArg(session, "Session"),
-                              TLArg(createInfo->width, "Width"),
-                              TLArg(createInfo->height, "Height"),
-                              TLArg(createInfo->format, "Format"),
-                              TLArg(createInfo->usageFlags, "UsageFlags"),
-                              TLArg(createInfo->sampleCount, "SampleCount"),
-                              TLArg(createInfo->arraySize, "ArraySize"));
-
-            const XrResult result = OpenXrApi::xrCreateSwapchain(session, createInfo, swapchain);
-            if (XR_SUCCEEDED(result)) {
-                // The caller's `next` chain points to extension structs that are
-                // typically on the caller's stack: after xrCreateSwapchain returns
-                // the runtime has consumed them and those pointers may be
-                // reused/freed. We only need width/height/format later, so null
-                // `next` defensively before we persist the struct.
-                XrSwapchainCreateInfo snapshot = *createInfo;
-                snapshot.next = nullptr;
-
-                std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
-                m_swapchainInfoMap[*swapchain] = SwapchainEntry{session, snapshot};
-
-                Log(fmt::format("Swapchain created: {}x{} format={}\n",
-                                 createInfo->width, createInfo->height, createInfo->format));
-                TraceLoggingWrite(g_traceProvider,
-                                  "xrCreateSwapchain",
-                                  TLXArg(*swapchain, "Swapchain"));
-            }
-
-            return result;
-        }
-
-        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrDestroySession
-        XrResult xrDestroySession(XrSession session) override {
-            TraceLoggingWrite(g_traceProvider, "xrDestroySession", TLXArg(session, "Session"));
-
-            const XrResult result = OpenXrApi::xrDestroySession(session);
-            if (XR_SUCCEEDED(result)) {
-                // Per the spec, the app is supposed to destroy every swapchain
-                // before destroying the session, but buggy apps skip this and
-                // some runtimes also invalidate swapchains implicitly without
-                // routing xrDestroySwapchain through the layer chain. Purge any
-                // entries we still hold for this session so a handle reused by
-                // the runtime for a later session cannot collide.
-                std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
-                size_t erased = 0;
-                for (auto it = m_swapchainInfoMap.begin(); it != m_swapchainInfoMap.end(); ) {
-                    if (it->second.session == session) {
-                        it = m_swapchainInfoMap.erase(it);
-                        ++erased;
-                    } else {
-                        ++it;
-                    }
-                }
-                if (erased > 0) {
-                    Log(fmt::format("xrDestroySession: purged {} orphan swapchain entr{}\n",
-                                     erased, erased == 1 ? "y" : "ies"));
-                }
-            }
-
-            return result;
-        }
-
-        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrDestroySwapchain
-        XrResult xrDestroySwapchain(XrSwapchain swapchain) override {
-            TraceLoggingWrite(g_traceProvider, "xrDestroySwapchain", TLXArg(swapchain, "Swapchain"));
-
-            const XrResult result = OpenXrApi::xrDestroySwapchain(swapchain);
-            if (XR_SUCCEEDED(result)) {
-                std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
-                m_swapchainInfoMap.erase(swapchain);
-            }
-
-            return result;
-        }
-
-        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEndFrame
-        XrResult xrEndFrame(XrSession session, const XrFrameEndInfo* frameEndInfo) override {
-            // ---- Live-edit: periodic config reload --------------------------
-            // Runs before the enabled check so the user can re-enable the
-            // layer mid-session (though swapchain dims stay fixed — see README).
-            if (m_config.liveEdit && ++m_liveEditFrameCounter % kLiveEditCheckInterval == 0) {
-                try {
-                    const auto mtime = std::filesystem::last_write_time(m_configFilePath);
-                    if (mtime != m_configLastWriteTime) {
-                        m_configLastWriteTime = mtime;
-                        m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
-                        // If the reloaded config turned live_edit off, this is
-                        // the last reload — the next frame skips the check.
-                    }
-                } catch (...) {
-                    // File mid-write, locked, or deleted. Skip, try next interval.
-                }
-            }
-
-            if (!m_config.enabled || !frameEndInfo || frameEndInfo->layerCount == 0) {
-                return OpenXrApi::xrEndFrame(session, frameEndInfo);
-            }
-
-            XrFrameEndInfo modifiedFrameEndInfo = *frameEndInfo;
-
-            std::vector<const XrCompositionLayerBaseHeader*> modifiedLayerPointers;
-            std::vector<XrCompositionLayerProjection> modifiedProjectionLayers;
-            std::vector<std::vector<XrCompositionLayerProjectionView>> modifiedViewsArrays;
-
-            modifiedProjectionLayers.reserve(frameEndInfo->layerCount);
-            modifiedViewsArrays.reserve(frameEndInfo->layerCount);
-
-            for (uint32_t i = 0; i < frameEndInfo->layerCount; i++) {
-                const auto* layer = frameEndInfo->layers[i];
-
-                if (layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
-                    const auto* projLayer = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
-
-                    std::vector<XrCompositionLayerProjectionView> views(
-                        projLayer->views, projLayer->views + projLayer->viewCount);
-
-                    for (auto& view : views) {
-                        // Capture the app's rendered FOV BEFORE we narrow it.
-                        // computeCroppedImageRect needs the rendered FOV (not
-                        // the soon-to-be-submitted one) to know how pixels
-                        // map to tan-space on the existing swapchain.
-                        const XrFovf renderedFov = view.fov;
-
-                        // Look up swapchain dimensions.
-                        XrSwapchainCreateInfo swapInfo{};
-                        {
-                            std::lock_guard<std::mutex> lock(m_swapchainMapMutex);
-                            auto it = m_swapchainInfoMap.find(view.subImage.swapchain);
-                            if (it != m_swapchainInfoMap.end()) {
-                                swapInfo = it->second.createInfo;
-                            }
-                        }
-
-                        if (swapInfo.width > 0 && swapInfo.height > 0) {
-                            const XrRect2Di cropped = computeCroppedImageRect(
-                                swapInfo.width, swapInfo.height, renderedFov, m_config);
-                            if (cropped.extent.width > 0 && cropped.extent.height > 0) {
-                                view.subImage.imageRect = cropped;
-                            }
-                        }
-
-                        // Adjust the FOV in the projection view to match the crop.
-                        view.fov = narrowFov(renderedFov, m_config);
-                    }
-
-                    modifiedViewsArrays.push_back(std::move(views));
-
-                    XrCompositionLayerProjection modifiedProjLayer = *projLayer;
-                    modifiedProjLayer.views = modifiedViewsArrays.back().data();
-                    modifiedProjLayer.viewCount = static_cast<uint32_t>(modifiedViewsArrays.back().size());
-                    modifiedProjectionLayers.push_back(modifiedProjLayer);
-
-                    modifiedLayerPointers.push_back(
-                        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&modifiedProjectionLayers.back()));
-                } else {
-                    modifiedLayerPointers.push_back(layer);
-                }
-            }
-
-            modifiedFrameEndInfo.layers = modifiedLayerPointers.data();
-            modifiedFrameEndInfo.layerCount = static_cast<uint32_t>(modifiedLayerPointers.size());
-
-            return OpenXrApi::xrEndFrame(session, &modifiedFrameEndInfo);
-        }
-
       private:
         bool isSystemHandled(XrSystemId systemId) const {
             return systemId == m_systemId;
@@ -648,22 +485,14 @@ namespace openxr_api_layer {
         bool m_fovLogged{false};
 
         // Live-edit: poll the config file for changes every kLiveEditCheckInterval
-        // frames (~1 s at 90 Hz). Only active when m_config.liveEdit is true.
+        // calls to xrLocateViews (~1 s at 90 Hz). Only active when m_config.liveEdit
+        // is true. Swapchain dimensions stay fixed (xrEnumerateViewConfigurationViews
+        // runs once at session start), so live_edit only picks up FOV factor changes.
         static constexpr uint32_t kLiveEditCheckInterval = 90u;
         uint32_t m_liveEditFrameCounter{0};
         std::filesystem::path m_configFilePath;
         std::filesystem::file_time_type m_configLastWriteTime{};
         std::string m_appName;
-
-        // We keep the owning session alongside the createInfo so that when a
-        // session is destroyed we can purge its swapchains without walking
-        // every app handle.
-        struct SwapchainEntry {
-            XrSession session;
-            XrSwapchainCreateInfo createInfo;
-        };
-        std::unordered_map<XrSwapchain, SwapchainEntry> m_swapchainInfoMap;
-        std::mutex m_swapchainMapMutex;
     };
 
     // This method is required by the framework to instantiate your OpenXrApi implementation.
