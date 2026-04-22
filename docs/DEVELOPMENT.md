@@ -5,20 +5,91 @@ End-user install and configuration are in the [README](../README.md).
 
 ## What the layer does (internal view)
 
-The layer intercepts a handful of OpenXR calls:
+The layer intercepts exactly two OpenXR calls:
 
 - [`xrEnumerateViewConfigurationViews`](https://registry.khronos.org/OpenXR/specs/1.0/html/xrspec.html#xrEnumerateViewConfigurationViews) —
   scales down the `recommendedImageRectWidth` / `recommendedImageRectHeight`
-  returned to the application, so smaller swapchains are allocated.
+  returned to the application, so smaller swapchains are allocated and the
+  app renders fewer pixels per frame.
 - [`xrLocateViews`](https://registry.khronos.org/OpenXR/specs/1.0/html/xrspec.html#xrLocateViews) —
-  narrows the `fov.angle{Left,Right,Up,Down}` values by the matching ratio so
-  the application's projection stays pixel-consistent with the reduced target.
-- [`xrEndFrame`](https://registry.khronos.org/OpenXR/specs/1.0/html/xrspec.html#xrEndFrame) —
-  rewrites `XrCompositionLayerProjectionView::fov` and `subImage.imageRect` so
-  the active runtime composites the image with the narrowed view frustum and
-  sub-region.
+  narrows the `fov.angle{Left,Right,Up,Down}` values the app uses to build
+  its projection matrix. The app forwards this narrowed fov to
+  `xrEndFrame` naturally (via `XrCompositionLayerProjectionView::fov`), so
+  the active runtime composites the image with the same frustum the app
+  rendered — the black bars around the content come from the compositor
+  placing that narrower frustum inside the HMD's native FOV.
 
-Everything else passes through untouched.
+Everything else (including `xrEndFrame`) passes through untouched. An
+earlier design also rewrote `xrEndFrame` and tracked swapchains — we
+dropped it when we confirmed the single-application path (see below)
+produces correct geometry on reprojection and saves ~20pp more GPU for
+the same visible crop.
+
+## The crop math (why tan, why average)
+
+**Factors, not percents.** A `CropConfig` stores four per-edge factors
+in `[0, 1]` (one per edge). `clampFactor` converts the user-facing
+`crop_*_percent` (0-50, "fraction of the image covered by the bar on
+that edge") to a factor via `1 - percent/50`: 0% → factor 1.0 (no
+crop), 50% → factor 0.0 (bar reaches the image center).
+
+**Narrowing is done in tan-space, not angle-space.**
+`narrowFov(fov, cfg)` computes each output edge as:
+
+```
+out.angleX = atan( tan(in.angleX) * cfg.cropXFactor )
+```
+
+The `tan` is there because an OpenXR projection is a perspective
+projection: swapchain pixels are uniform in `tan(angle)`, not in angle
+itself. Scaling `tan(angle)` directly by the factor is what makes a
+config of `50%` land the bar exactly at the image center — if we
+scaled the raw angle instead, the bar would drift off-center as the
+factor gets smaller (non-linearly, because `tan` is super-linear near
+π/2).
+
+Both `tan` and `atan` are odd functions, so the OpenXR sign convention
+(`angleLeft`/`angleDown` negative, `angleRight`/`angleUp` positive) is
+preserved automatically. At the boundary factor = 0 the result is
+exactly 0 for every edge, which is the "bar at middle" configuration
+for that side.
+
+**Swapchain scaling uses the per-axis average.**
+`scaleSwapchainExtents` picks a single width factor and a single height
+factor out of the four per-edge ones:
+
+```
+widthFactor  = (cropLeftFactor + cropRightFactor) / 2
+heightFactor = (cropTopFactor  + cropBottomFactor) / 2
+```
+
+Average (not min, not max) is the best simple choice here:
+
+- For a symmetric HMD FOV the average matches the tan-extent of the
+  narrowed frustum exactly, so pixel density stays native (1:1).
+- For strongly asymmetric FOVs (Pimax canted, WMR off-axis) the
+  average can under- or over-provision by up to ~25% — acceptable as a
+  conservative default; the alternative is plumbing the raw fov into
+  this pure helper, which we explicitly avoid to keep `crop_math.h`
+  dependency-free and trivially unit-testable.
+- Using `min` would collapse the swapchain to zero as soon as one
+  edge hits factor 0 (e.g. `crop_bottom_percent: 50`), which crashed
+  the Pimax runtime on Le Mans Ultimate — the regression is pinned
+  by the `scaleSwapchainExtents: factor 0 on a single edge` unit test
+  and the `crop_bottom_percent 50 ... end-to-end` integration test.
+
+The result is always aligned down to a multiple of 8 pixels with 8 as a
+floor, so BC-compressed formats, tiled memory layouts, and the usual
+DLSS/FSR tile sizes stay well-behaved, and no downstream runtime ever
+receives a zero-dimension swapchain.
+
+**Unused-but-kept helper: `computeCroppedImageRect`.**
+`crop_math.h` still exposes `computeCroppedImageRect`, which maps the
+narrowed tan-fov onto a `XrRect2Di` inside the swapchain. The layer no
+longer uses it (that was the `xrEndFrame` sub-image path we removed),
+but it's kept as a reusable utility with full unit-test coverage in
+case we ever need a defensive `xrEndFrame` override for apps that
+don't forward the `xrLocateViews` fov.
 
 ## Prerequisites
 

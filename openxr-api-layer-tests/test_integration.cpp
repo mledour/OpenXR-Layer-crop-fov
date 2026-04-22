@@ -228,6 +228,56 @@ TEST_CASE("integration: bypass (enabled=false) leaves dims unchanged") {
     CHECK(views[0].recommendedImageRectHeight == 1080u);
 }
 
+TEST_CASE("integration: crop_bottom_percent 50 puts the bar at the image center end-to-end") {
+    // Regression guard for the Le Mans Ultimate / Pimax Crystal Light crash
+    // where scaleSwapchainExtents = min(..., 0) collapsed the swapchain
+    // height to 8 pixels and the runtime died during rendering. This pins
+    // the whole JSON -> clampFactor -> scaleSwapchainExtents -> narrowFov
+    // chain for the `bar-at-middle` case so any future regression is
+    // caught at the integration level rather than only in the unit tests.
+    LayerFixture fx;
+    fx.writeSettings(R"({
+        "enabled": true,
+        "crop_left_percent": 0,
+        "crop_right_percent": 0,
+        "crop_top_percent": 0,
+        "crop_bottom_percent": 50
+    })");
+    // Real Pimax Crystal Light view[0] FOV from the log that crashed.
+    const XrFovf hmdFov{-0.923f, 0.707f, 0.905f, -0.905f};
+    mock::state().recommendedWidth = 4352;
+    mock::state().recommendedHeight = 5102;
+    mock::state().viewCount = 1;
+    mock::state().locateFovs = {hmdFov};
+
+    auto* layer = fx.boot();
+
+    // xrEnumerateViewConfigurationViews: width unchanged (no left/right
+    // crop), height halved via (cropTop + cropBottom) / 2 = 0.5.
+    uint32_t count = 0;
+    std::vector<XrViewConfigurationView> cfgViews(1, {XR_TYPE_VIEW_CONFIGURATION_VIEW});
+    REQUIRE(layer->xrEnumerateViewConfigurationViews(
+                reinterpret_cast<XrInstance>(static_cast<uintptr_t>(0xBEEF)),
+                static_cast<XrSystemId>(1),
+                XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                1, &count, cfgViews.data()) == XR_SUCCESS);
+    CHECK(cfgViews[0].recommendedImageRectWidth == 4352u);
+    CHECK(cfgViews[0].recommendedImageRectHeight == 2544u);  // 5102 * 0.5 -> aligned down
+
+    // xrLocateViews: angleDown collapses to exactly 0 (factor 0 applied
+    // to its tangent), other edges untouched (factor 1.0 = atan(tan(x))).
+    std::vector<XrView> views(1, {XR_TYPE_VIEW});
+    XrViewState viewState{XR_TYPE_VIEW_STATE};
+    XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
+    li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    REQUIRE(layer->xrLocateViews(reinterpret_cast<XrSession>(static_cast<uintptr_t>(0xCAFE)),
+                                 &li, &viewState, 1, &count, views.data()) == XR_SUCCESS);
+    CHECK(views[0].fov.angleLeft == doctest::Approx(hmdFov.angleLeft));
+    CHECK(views[0].fov.angleRight == doctest::Approx(hmdFov.angleRight));
+    CHECK(views[0].fov.angleUp == doctest::Approx(hmdFov.angleUp));
+    CHECK(views[0].fov.angleDown == doctest::Approx(0.0f));
+}
+
 // ---------------------------------------------------------------------------
 // xrLocateViews: FOV narrowed by the configured factors
 // ---------------------------------------------------------------------------

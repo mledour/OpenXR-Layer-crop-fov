@@ -387,6 +387,28 @@ TEST_CASE("narrowFov: factor of 0.5 puts each edge at 50%% of the original tange
     CHECK(std::tan(out.angleDown) == doctest::Approx(std::tan(orig.angleDown) * 0.5f));
 }
 
+TEST_CASE("narrowFov: factor = 0 collapses that edge to exactly zero") {
+    // Boundary case: crop_*_percent = 50 maps to factor 0 via clampFactor.
+    // narrowFov must produce a finite zero angle on each zeroed edge (not
+    // NaN, not a sign flip), so the bar lands exactly at the image center
+    // and downstream math (sub-image calculations, reprojection in the
+    // compositor) stays well-defined. Exercised end-to-end by the
+    // "crop_bottom_percent: 50 -> bar at middle" integration test.
+    CropConfig cfg;
+    cfg.cropLeftFactor = 0.0f;
+    cfg.cropRightFactor = 0.0f;
+    cfg.cropTopFactor = 0.0f;
+    cfg.cropBottomFactor = 0.0f;
+
+    const XrFovf orig = {-0.95f, 0.85f, 0.70f, -0.60f};
+    const XrFovf out = narrowFov(orig, cfg);
+
+    CHECK(out.angleLeft == doctest::Approx(0.0f));
+    CHECK(out.angleRight == doctest::Approx(0.0f));
+    CHECK(out.angleUp == doctest::Approx(0.0f));
+    CHECK(out.angleDown == doctest::Approx(0.0f));
+}
+
 TEST_CASE("narrowFov: negative half-angles become less negative (narrower) under factor < 1") {
     // angleLeft and angleDown are negative per spec. Multiplying a negative
     // by a positive factor < 1 moves it toward zero (narrower FOV), which is
