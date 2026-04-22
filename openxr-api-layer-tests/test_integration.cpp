@@ -168,8 +168,10 @@ XrFovf defaultFov() {
 TEST_CASE("integration: xrEnumerateViewConfigurationViews scales recommended dims") {
     LayerFixture fx;
     // clampFactor = 1 - percent/50. So 10/10/15/20% -> factors 0.80/0.80/0.70/0.60.
-    // scaleSwapchainExtents uses min(left,right)=0.80 for width, min(top,bot)=0.60 for height.
-    // 2000*0.80 = 1600 (already 8-aligned), 2200*0.60 = 1320 (already 8-aligned).
+    // scaleSwapchainExtents now averages per-axis (not min):
+    //   widthFactor = (0.80 + 0.80) / 2 = 0.80
+    //   heightFactor = (0.70 + 0.60) / 2 = 0.65
+    // 2000 * 0.80 = 1600 (8-aligned). 2200 * 0.65 = 1430 -> aligned down to 1424.
     fx.writeSettings(R"({
         "enabled": true,
         "crop_left_percent": 10,
@@ -198,11 +200,10 @@ TEST_CASE("integration: xrEnumerateViewConfigurationViews scales recommended dim
                 XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
                 count, &count, views.data()) == XR_SUCCESS);
 
-    // Expected: 2000 * 0.80 = 1600 (aligned), 2200 * 0.60 = 1320 (aligned).
     CHECK(views[0].recommendedImageRectWidth == 1600u);
-    CHECK(views[0].recommendedImageRectHeight == 1320u);
+    CHECK(views[0].recommendedImageRectHeight == 1424u);
     CHECK(views[1].recommendedImageRectWidth == 1600u);
-    CHECK(views[1].recommendedImageRectHeight == 1320u);
+    CHECK(views[1].recommendedImageRectHeight == 1424u);
 }
 
 TEST_CASE("integration: bypass (enabled=false) leaves dims unchanged") {

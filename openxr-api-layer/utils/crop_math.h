@@ -95,17 +95,27 @@ namespace openxr_api_layer {
     constexpr uint32_t kDimensionAlignment = 8u;
 
     // Applies the crop to the recommended swapchain dimensions returned by
-    // xrEnumerateViewConfigurationViews. Uses the min of left/right for
-    // width (and top/bottom for height) so the allocated swapchain is still
-    // large enough for the widest individual crop. Result is force-aligned
-    // down to a multiple of kDimensionAlignment with that same value as a
-    // floor, so the runtime never receives a zero-size or awkwardly-aligned
-    // swapchain.
+    // xrEnumerateViewConfigurationViews. Uses the **average** of the per-edge
+    // factors on each axis — for a roughly-symmetric FOV this matches the
+    // actual tan-extent of the narrowed frustum exactly, so pixel density
+    // stays native. A previous min-based version collapsed the swapchain to
+    // zero as soon as one edge hit factor 0 (e.g. crop_bottom_percent = 50,
+    // bar at middle), which yielded a 8-pixel-tall texture and crashed the
+    // downstream runtime. The average is bounded below by 0 only when BOTH
+    // edges on that axis are at factor 0 — a genuinely degenerate config —
+    // and the kDimensionAlignment floor below still keeps the output >= 8
+    // in that case.
+    //
+    // Note: for strongly asymmetric FOVs (Pimax canted, WMR) combined with
+    // strongly asymmetric crops, the simple average can under- or over-
+    // provision by up to ~25% vs. a tan-weighted average. That's acceptable
+    // as a conservative default (no crash, slight density drift) and avoids
+    // plumbing the fov into this pure math helper.
     inline Extent2D scaleSwapchainExtents(uint32_t origWidth,
                                           uint32_t origHeight,
                                           const CropConfig& cfg) {
-        const float widthFactor = std::min(cfg.cropLeftFactor, cfg.cropRightFactor);
-        const float heightFactor = std::min(cfg.cropTopFactor, cfg.cropBottomFactor);
+        const float widthFactor = (cfg.cropLeftFactor + cfg.cropRightFactor) * 0.5f;
+        const float heightFactor = (cfg.cropTopFactor + cfg.cropBottomFactor) * 0.5f;
 
         uint32_t newWidth = static_cast<uint32_t>(origWidth * widthFactor);
         uint32_t newHeight = static_cast<uint32_t>(origHeight * heightFactor);

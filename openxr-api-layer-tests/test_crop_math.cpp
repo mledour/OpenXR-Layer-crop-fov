@@ -98,17 +98,38 @@ TEST_CASE("scaleSwapchainExtents: symmetric 10% crop shrinks both axes by 10%") 
     CHECK(out.height == 1800u);
 }
 
-TEST_CASE("scaleSwapchainExtents: asymmetric factors take the smaller one per axis") {
-    // width uses min(left, right); height uses min(top, bottom).
+TEST_CASE("scaleSwapchainExtents: asymmetric factors are averaged per axis") {
+    // width uses (left + right) / 2; height uses (top + bottom) / 2.
+    // This matches the actual tan-extent of a narrowed FOV for symmetric
+    // inputs and avoids collapsing the swapchain to zero when one edge
+    // is at factor 0 (e.g. crop_bottom 50% -> bar at middle).
     CropConfig cfg;
-    cfg.cropLeftFactor = 0.9f;   // -> would give 1800
-    cfg.cropRightFactor = 0.8f;  // -> would give 1600; min wins
-    cfg.cropTopFactor = 0.7f;    // -> would give 1400; min wins
-    cfg.cropBottomFactor = 0.85f; // -> would give 1700
+    cfg.cropLeftFactor = 0.9f;    // avg(0.9, 0.8) = 0.85 -> 2000 * 0.85 = 1700 -> aligned 1696
+    cfg.cropRightFactor = 0.8f;
+    cfg.cropTopFactor = 0.7f;     // avg(0.7, 0.85) = 0.775 -> 2000 * 0.775 = 1550 -> aligned 1544
+    cfg.cropBottomFactor = 0.85f;
 
     const Extent2D out = scaleSwapchainExtents(2000, 2000, cfg);
-    CHECK(out.width == 1600u);
-    CHECK(out.height == 1400u);
+    CHECK(out.width == 1696u);
+    CHECK(out.height == 1544u);
+}
+
+TEST_CASE("scaleSwapchainExtents: factor 0 on a single edge halves the axis (no zero swapchain)") {
+    // Regression guard: crop_bottom_percent = 50 produces cropBottomFactor = 0,
+    // and the old min-based version dropped the swapchain height to 0 (then
+    // floored to 8), which crashed the downstream runtime on real HMDs
+    // (observed with Pimax Crystal Light + Le Mans Ultimate).
+    CropConfig cfg;
+    cfg.cropLeftFactor = 1.0f;
+    cfg.cropRightFactor = 1.0f;
+    cfg.cropTopFactor = 1.0f;
+    cfg.cropBottomFactor = 0.0f;   // bar at middle -> half the axis is content
+
+    const Extent2D out = scaleSwapchainExtents(4352, 5102, cfg);
+    // Width unchanged (1.0 + 1.0) / 2 = 1.0 -> 4352 (already aligned).
+    CHECK(out.width == 4352u);
+    // Height = 5102 * 0.5 = 2551 -> aligned down to 2544 (not 8).
+    CHECK(out.height == 2544u);
 }
 
 TEST_CASE("scaleSwapchainExtents: rounds down to the nearest multiple of 8") {
