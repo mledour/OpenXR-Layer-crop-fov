@@ -256,16 +256,18 @@ TEST_CASE("integration: xrLocateViews narrows FOV per-edge") {
                 &li, &viewState, 2, &count, views.data()) == XR_SUCCESS);
     REQUIRE(count == 2);
 
-    // Factors: 0.90, 0.80, 0.85, 0.75. Applied in tan-space so the factor
-    // corresponds to a pixel fraction on the swapchain.
+    // Percents 10/20/15/25 map to tangent factors 0.80/0.60/0.70/0.50
+    // via clampFactor = 1 - percent/50 (so percent 50 puts the bar at the
+    // image center). Applied in tan-space so the factor corresponds
+    // directly to a pixel fraction on the swapchain.
     CHECK(views[0].fov.angleLeft ==
-          doctest::Approx(std::atan(std::tan(kDefaultLeftAngle) * 0.90f)));
+          doctest::Approx(std::atan(std::tan(kDefaultLeftAngle) * 0.80f)));
     CHECK(views[0].fov.angleRight ==
-          doctest::Approx(std::atan(std::tan(kDefaultRightAngle) * 0.80f)));
+          doctest::Approx(std::atan(std::tan(kDefaultRightAngle) * 0.60f)));
     CHECK(views[0].fov.angleUp ==
-          doctest::Approx(std::atan(std::tan(kDefaultUpAngle) * 0.85f)));
+          doctest::Approx(std::atan(std::tan(kDefaultUpAngle) * 0.70f)));
     CHECK(views[0].fov.angleDown ==
-          doctest::Approx(std::atan(std::tan(kDefaultDownAngle) * 0.75f)));
+          doctest::Approx(std::atan(std::tan(kDefaultDownAngle) * 0.50f)));
 }
 
 TEST_CASE("integration: xrLocateViews bypass path leaves FOV unchanged") {
@@ -321,12 +323,13 @@ TEST_CASE("integration: asymmetric WMR-style FOV narrows per-edge in xrLocateVie
                                  &li, &viewState, 2, &count, views.data()) == XR_SUCCESS);
     REQUIRE(count == 2);
 
-    // Factors: 0.95, 0.80, 0.70, 0.90 (from %: 5, 20, 30, 10). Applied in
-    // tan-space; each edge is multiplied independently on its own signed angle.
-    CHECK(views[0].fov.angleLeft == doctest::Approx(std::atan(std::tan(-0.95f) * 0.95f)));
-    CHECK(views[0].fov.angleRight == doctest::Approx(std::atan(std::tan(0.85f) * 0.80f)));
-    CHECK(views[0].fov.angleUp == doctest::Approx(std::atan(std::tan(0.70f) * 0.70f)));
-    CHECK(views[0].fov.angleDown == doctest::Approx(std::atan(std::tan(-0.60f) * 0.90f)));
+    // Percents 5/20/30/10 map to tangent factors 0.90/0.60/0.40/0.80
+    // (clampFactor = 1 - p/50). Applied in tan-space, each edge
+    // independently on its own signed angle.
+    CHECK(views[0].fov.angleLeft == doctest::Approx(std::atan(std::tan(-0.95f) * 0.90f)));
+    CHECK(views[0].fov.angleRight == doctest::Approx(std::atan(std::tan(0.85f) * 0.60f)));
+    CHECK(views[0].fov.angleUp == doctest::Approx(std::atan(std::tan(0.70f) * 0.40f)));
+    CHECK(views[0].fov.angleDown == doctest::Approx(std::atan(std::tan(-0.60f) * 0.80f)));
 
     // Spec invariants that must hold after narrowing: left edge still negative,
     // right still positive, up still positive, down still negative. A bug in
@@ -378,8 +381,8 @@ TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
     };
 
     // First 89 frames: counter goes 1..89, no poll fires (90%90==0 is the
-    // trigger). Config stays at factor 0.9 (tan-space).
-    const float expectedBefore = std::atan(std::tan(fov.angleLeft) * 0.9f);
+    // trigger). Config stays at factor 0.8 (percent 10 -> 1 - 10/50 = 0.8).
+    const float expectedBefore = std::atan(std::tan(fov.angleLeft) * 0.8f);
     for (int i = 0; i < 89; ++i) {
         const auto v = locateFrame();
         CHECK(v.fov.angleLeft == doctest::Approx(expectedBefore));
@@ -402,8 +405,8 @@ TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
 
     // Frame 90: counter hits 90, 90%90==0, poll fires, mtime changed -> reload.
     // The reload runs BEFORE the narrowFov call in xrLocateViews, so this
-    // frame already sees the new factor (0.7 in tan-space).
-    const float expectedAfter = std::atan(std::tan(fov.angleLeft) * 0.7f);
+    // frame already sees the new factor (percent 30 -> 1 - 30/50 = 0.4).
+    const float expectedAfter = std::atan(std::tan(fov.angleLeft) * 0.4f);
     const auto v = locateFrame();
     CHECK(v.fov.angleLeft == doctest::Approx(expectedAfter));
 }

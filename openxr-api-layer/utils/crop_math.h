@@ -35,23 +35,28 @@
 namespace openxr_api_layer {
 
     // Configuration loaded from %LOCALAPPDATA%\<layer-name>\settings.json.
-    // Factors are in [0.5, 1.0] and act on the TANGENT of the half-angle (not
-    // the angle itself). 1.0 = no crop, 0.5 = half the pixel fraction on that
-    // edge removed. Because OpenXR projection is a perspective projection,
-    // pixels map linearly to tan(angle), not to angle — so a factor of 0.5
-    // makes the corresponding black bar reach exactly the middle of the image.
-    // This matches user intuition: "crop_bottom_percent: 50" moves the bottom
-    // bar to the vertical center of the swapchain, not somewhere above it.
-    // Kept as factors (not percents) because we multiply by them in the hot
-    // path (xrLocateViews).
+    // Factors are in [0.0, 1.0] and act on the TANGENT of the half-angle —
+    // not the angle itself — because OpenXR projection is perspective and
+    // pixels map linearly to tan(angle).
+    //
+    // The per-edge percent in the JSON is the **fraction of the image
+    // covered by the black bar on that edge**:
+    //   crop_bottom_percent: 0   -> factor 1.0, no crop, no bar
+    //   crop_bottom_percent: 25  -> factor 0.5, bar covers 25% of image height
+    //   crop_bottom_percent: 50  -> factor 0.0, bar reaches the middle of the image
+    // (Per-edge percents are clamped to [0, 50] upstream in clampFactor because
+    // a single edge's bar cannot meaningfully exceed half the image height.)
+    //
+    // Kept as factors (not percents) in the struct because we multiply by
+    // them in the hot path (xrLocateViews).
     struct CropConfig {
         // Opt-in by default: the layer is a no-op until the user explicitly
         // sets "enabled": true in their per-app settings file.
         bool enabled = false;
-        float cropLeftFactor = 0.90f;   // percent 10 -> factor 0.90
-        float cropRightFactor = 0.90f;  // percent 10 -> factor 0.90
-        float cropTopFactor = 0.85f;    // percent 15 -> factor 0.85
-        float cropBottomFactor = 0.80f; // percent 20 -> factor 0.80
+        float cropLeftFactor = 0.80f;   // percent 10 -> factor 0.80 (bar is 10% of image)
+        float cropRightFactor = 0.80f;  // percent 10 -> factor 0.80
+        float cropTopFactor = 0.70f;    // percent 15 -> factor 0.70 (bar is 15% of image)
+        float cropBottomFactor = 0.60f; // percent 20 -> factor 0.60 (bar is 20% of image)
 
         // When true, the layer re-reads settings.json every ~1 second (90
         // frames) to pick up changes without restarting the game. Intended
@@ -59,14 +64,18 @@ namespace openxr_api_layer {
         bool liveEdit = false;
     };
 
-    // Maps a user-facing "crop X percent" value in [0, 50] to a factor in
-    // [0.5, 1.0]. Out-of-range inputs are clamped so a malformed config
-    // never produces a factor that would flip the FOV sign or collapse it
-    // to zero.
+    // Maps a user-facing "crop X percent" value in [0, 50] to a tangent
+    // factor in [0.0, 1.0]. The percent is the **fraction of the image
+    // covered by the bar on that edge**, so percent = 50 means the bar
+    // reaches the image center → the tangent on that edge must collapse
+    // to zero → factor = 0. Out-of-range inputs are clamped defensively:
+    // negative percents become "no crop" (factor 1), and percents above
+    // 50 are capped there (a single edge cannot cover more than half the
+    // image without nonsensical geometry).
     inline float clampFactor(float percent) {
         if (percent < 0.0f) percent = 0.0f;
         if (percent > 50.0f) percent = 50.0f;
-        return 1.0f - (percent / 100.0f);
+        return 1.0f - (percent / 50.0f);
     }
 
     struct Extent2D {

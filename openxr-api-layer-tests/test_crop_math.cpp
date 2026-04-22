@@ -42,11 +42,15 @@ using openxr_api_layer::scaleSwapchainExtents;
 // clampFactor
 // ---------------------------------------------------------------------------
 
-TEST_CASE("clampFactor: maps percent to factor = 1 - percent/100") {
+TEST_CASE("clampFactor: maps percent to factor = 1 - percent/50") {
+    // The percent is the fraction of the image covered by the bar on
+    // that edge, so percent = 50 is the max (bar reaches the image
+    // center) and maps to factor 0 (the tangent on that edge collapses
+    // to zero).
     CHECK(clampFactor(0.0f) == doctest::Approx(1.0f));
-    CHECK(clampFactor(10.0f) == doctest::Approx(0.9f));
-    CHECK(clampFactor(25.0f) == doctest::Approx(0.75f));
-    CHECK(clampFactor(50.0f) == doctest::Approx(0.5f));
+    CHECK(clampFactor(10.0f) == doctest::Approx(0.8f));
+    CHECK(clampFactor(25.0f) == doctest::Approx(0.5f));
+    CHECK(clampFactor(50.0f) == doctest::Approx(0.0f));
 }
 
 TEST_CASE("clampFactor: clamps negative percents to 1.0 (no crop)") {
@@ -54,18 +58,18 @@ TEST_CASE("clampFactor: clamps negative percents to 1.0 (no crop)") {
     CHECK(clampFactor(-100.0f) == doctest::Approx(1.0f));
 }
 
-TEST_CASE("clampFactor: clamps percents above 50 to 0.5 (hard crop limit)") {
-    CHECK(clampFactor(50.01f) == doctest::Approx(0.5f));
-    CHECK(clampFactor(99.0f) == doctest::Approx(0.5f));
-    CHECK(clampFactor(1000.0f) == doctest::Approx(0.5f));
+TEST_CASE("clampFactor: clamps percents above 50 to 0.0 (hard crop limit)") {
+    CHECK(clampFactor(50.01f) == doctest::Approx(0.0f));
+    CHECK(clampFactor(99.0f) == doctest::Approx(0.0f));
+    CHECK(clampFactor(1000.0f) == doctest::Approx(0.0f));
 }
 
-TEST_CASE("clampFactor: NaN/infinity policy - infinity is clamped to 0.5") {
+TEST_CASE("clampFactor: NaN/infinity policy - infinity is clamped to 0.0") {
     // Not part of the "documented" API contract but worth pinning: +inf
     // percent should not turn into a negative factor. The current
-    // implementation treats +inf > 50.0f as true, so it returns 0.5f.
+    // implementation treats +inf > 50.0f as true, so it returns 0.0f.
     const float posInf = std::numeric_limits<float>::infinity();
-    CHECK(clampFactor(posInf) == doctest::Approx(0.5f));
+    CHECK(clampFactor(posInf) == doctest::Approx(0.0f));
 
     const float negInf = -std::numeric_limits<float>::infinity();
     CHECK(clampFactor(negInf) == doctest::Approx(1.0f));
