@@ -159,14 +159,11 @@ Release binaries are **not** code-signed yet. Anti-cheat systems may
 reject unsigned DLLs loaded into OpenXR games; Windows SmartScreen
 may flag the installer.
 
-Once approved by the [SignPath Foundation](https://signpath.org/)
-open-source program, release builds of the DLL and the `Setup.exe`
-installer will be automatically code-signed in CI. The certificate is
-issued in the name of "SignPath Foundation" — the signature is what
-matters for anti-cheat compatibility and Windows SmartScreen, not the
-display name.
+A code-signing certificate is being procured. Once it is issued,
+release builds of the DLL and the `Setup.exe` installer will be
+automatically code-signed in CI.
 
-Once signing is active, builds triggered from a fork or from a pull
+When signing is active, builds triggered from a fork or from a pull
 request will still not be signed (GitHub secrets are not exposed to
 forked workflows), so only binaries from the [official GitHub Releases
 page](../../../releases) of this repository should be trusted.
