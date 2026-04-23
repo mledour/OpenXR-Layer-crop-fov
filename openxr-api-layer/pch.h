@@ -69,8 +69,9 @@ using Microsoft::WRL::ComPtr;
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
-// OpenXR loader interfaces.
-#include <loader_interfaces.h>
+// OpenXR loader interfaces. Promoted to a public header in OpenXR 1.1;
+// was <loader_interfaces.h> under src/common/ in 1.0.
+#include <openxr/openxr_loader_negotiation.h>
 
 // OpenXR/DirectX utilities.
 #include <XrError.h>
