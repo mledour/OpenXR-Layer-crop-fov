@@ -11,9 +11,8 @@ headset modification required.
 
 > ⚠️ Release binaries are **not** code-signed yet. Anti-cheat systems
 > may reject unsigned DLLs loaded into OpenXR games, and Windows
-> SmartScreen will warn on the installer. A signed release via
-> [SignPath Foundation](https://signpath.org/) is pending approval —
-> see [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md#code-signing).
+> SmartScreen will warn on the installer. A signed release is
+> planned — see [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md#code-signing).
 
 ## Installing
 
