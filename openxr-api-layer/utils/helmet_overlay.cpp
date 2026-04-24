@@ -274,7 +274,12 @@ namespace openxr_api_layer {
         td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_IMMUTABLE;
-        td.BindFlags = 0;
+        // D3D11_USAGE_IMMUTABLE requires BindFlags != 0. SHADER_RESOURCE
+        // is the lightest flag that satisfies the validator; we never
+        // actually sample from the texture — it is only ever the source
+        // of a CopyResource into the swapchain image — but the runtime
+        // would reject (hresult 0x80070057 / E_INVALIDARG) without it.
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         td.CPUAccessFlags = 0;
         td.MiscFlags = 0;
 
@@ -283,8 +288,10 @@ namespace openxr_api_layer {
         sd.SysMemPitch = kSwapchainWidth * 4u;
         sd.SysMemSlicePitch = 0;
 
-        if (FAILED(m_impl->device->CreateTexture2D(&td, &sd, &m_impl->stagingTexture))) {
-            Log("HelmetOverlay: CreateTexture2D(staging) failed\n");
+        const HRESULT hr = m_impl->device->CreateTexture2D(&td, &sd, &m_impl->stagingTexture);
+        if (FAILED(hr)) {
+            Log(fmt::format("HelmetOverlay: CreateTexture2D(staging) failed, hr=0x{:08X}\n",
+                            static_cast<uint32_t>(hr)));
             return false;
         }
 
