@@ -36,7 +36,7 @@ Khronos publishes tagged releases:
 - https://github.com/KhronosGroup/OpenXR-CTS/releases
 
 Pick the latest `openxr-cts-*-win64.zip` that matches the
-`XR_CURRENT_API_VERSION` of this layer's SDK submodule (currently 1.0.x).
+`XR_CURRENT_API_VERSION` of this layer's SDK submodule (currently 1.1.x).
 The archive contains `conformance_cli.exe` and `conformance_test.exe`
 plus their graphics-plugin DLLs (`conformance_test_D3D11.dll`,
 `conformance_test_D3D12.dll`, `conformance_test_Vulkan2.dll`,
