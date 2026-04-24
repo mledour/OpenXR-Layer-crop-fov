@@ -127,6 +127,7 @@
       <Command>$(SolutionDir)\scripts\sed.exe "s/XR_APILAYER_name/$(SolutionName)/g" $(ProjectDir)\$(SolutionName).json &gt; $(OutDir)\$(SolutionName).json
 copy $(SolutionDir)\scripts\Install-Layer.ps1 $(OutDir)
 copy $(SolutionDir)\scripts\Uninstall-Layer.ps1 $(OutDir)
+copy $(ProjectDir)\assets\helmet_visor.png $(OutDir)
 </Command>
     </PostBuildEvent>
     <PostBuildEvent>
@@ -235,6 +236,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Gene
       <Command>$(SolutionDir)\scripts\sed.exe "s/XR_APILAYER_name/$(SolutionName)/g" $(ProjectDir)\$(SolutionName).json &gt; $(OutDir)\$(SolutionName).json
 copy $(SolutionDir)\scripts\Install-Layer.ps1 $(OutDir)
 copy $(SolutionDir)\scripts\Uninstall-Layer.ps1 $(OutDir)
+copy $(ProjectDir)\assets\helmet_visor.png $(OutDir)
 </Command>
     </PostBuildEvent>
     <PostBuildEvent>
@@ -345,6 +347,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Gene
     <ResourceCompile Include="openxr-api-layer.rc" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="assets\helmet_visor.png" />
     <None Include="framework\dispatch_generator.py" />
     <None Include="framework\layer_apis.py" />
     <None Include="module.def" />
