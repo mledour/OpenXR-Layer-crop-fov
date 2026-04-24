@@ -95,6 +95,13 @@ namespace openxr_api_layer {
         bool isArmed() const;
 
     private:
+        // Split out the two rendering backends so initialize() stays
+        // a readable sequence of "try preferred, then fall back". Both
+        // assume the common D3D11 / format / space setup in initialize()
+        // has already populated m_impl.
+        bool tryInitEquirect2(const std::filesystem::path& pngPath);
+        bool tryInitQuad();
+
         struct Impl;
         std::unique_ptr<Impl> m_impl;
     };
