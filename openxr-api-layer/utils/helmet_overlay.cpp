@@ -267,36 +267,55 @@ namespace openxr_api_layer {
             return false;
         }
 
-        // ---- Try equirect2 path first if extension + PNG are both OK.
+        // ---- Load PNG once, reused by whichever backend wins. ---------
+        // If no PNG is present (or it fails to decode) we still run the
+        // quad backend with the procedural mask, so this is not a fatal
+        // step. pngPixels is owned by stb_image; freed via PixelGuard.
         const bool extGranted = isEquirect2Granted(api->GetGrantedExtensions());
         const std::filesystem::path pngPath = dllHome / config.textureRelativePath;
-        const bool pngExists = std::filesystem::exists(pngPath);
 
-        if (extGranted && pngExists) {
-            if (tryInitEquirect2(pngPath)) {
+        uint8_t* pngPixels = nullptr;
+        int pngW = 0, pngH = 0;
+        struct PixelGuard {
+            uint8_t* p;
+            ~PixelGuard() { if (p) stbi_image_free(p); }
+        };
+        if (std::filesystem::exists(pngPath)) {
+            loadPngRgba8(pngPath, &pngPixels, &pngW, &pngH);
+        } else {
+            Log(fmt::format("HelmetOverlay: no PNG at '{}', will use procedural mask\n",
+                            pngPath.string()));
+        }
+        PixelGuard guard{pngPixels};
+
+        // ---- Decision tree. -------------------------------------------
+        // 1. PNG + equirect2 extension → spherical surround.
+        // 2. PNG but no equirect2 extension (or equirect2 init failed)
+        //    → quad textured with the same PNG, aspect preserved.
+        // 3. No PNG → quad with procedural elliptical mask.
+
+        if (pngPixels && extGranted) {
+            if (tryInitEquirect2(pngPixels, pngW, pngH)) {
                 m_impl->mode = HelmetOverlayMode::Equirect2;
-                Log(fmt::format("HelmetOverlay: armed (equirect2 + PNG), texture='{}'\n",
-                                pngPath.string()));
+                Log(fmt::format("HelmetOverlay: armed (equirect2 + PNG {}x{}), texture='{}'\n",
+                                pngW, pngH, pngPath.string()));
                 return true;
             }
-            Log("HelmetOverlay: equirect2 init failed, falling back to quad+procedural\n");
-            // fall through to quad path
-        } else {
-            if (!extGranted) {
-                Log("HelmetOverlay: runtime does not support XR_KHR_composition_layer_equirect2, "
-                    "using quad+procedural fallback\n");
-            } else {
-                Log(fmt::format("HelmetOverlay: no PNG at '{}', using quad+procedural fallback\n",
-                                pngPath.string()));
-            }
+            Log("HelmetOverlay: equirect2 init failed, falling back to quad path\n");
+        } else if (pngPixels) {
+            Log("HelmetOverlay: runtime does not support XR_KHR_composition_layer_equirect2, "
+                "using quad + PNG\n");
         }
 
-        // ---- Fallback: quad + procedural mask. ------------------------
-        if (tryInitQuad()) {
+        // ---- Quad path: either with PNG (case 2) or procedural (case 3).
+        if (tryInitQuad(pngPixels, pngW, pngH)) {
             m_impl->mode = HelmetOverlayMode::Quad;
-            Log(fmt::format("HelmetOverlay: armed (quad+procedural). "
+            Log(fmt::format("HelmetOverlay: armed (quad {}). "
                             "distance={:.2f}m, size={:.2f}x{:.2f}m\n",
-                            config.distance_m, config.width_m, config.height_m));
+                            pngPixels ? "+ PNG" : "+ procedural",
+                            config.distance_m,
+                            m_impl->quadLayer.size.width,
+                            m_impl->quadLayer.size.height));
             return true;
         }
 
@@ -306,20 +325,8 @@ namespace openxr_api_layer {
 
     // --- Equirect2 init: one-shot PNG upload into a static swapchain. ---
 
-    bool HelmetOverlay::tryInitEquirect2(const std::filesystem::path& pngPath) {
-        uint8_t* pixels = nullptr;
-        int width = 0, height = 0;
-        if (!loadPngRgba8(pngPath, &pixels, &width, &height)) {
-            return false;
-        }
-        // Guard: stbi output is opaque-typed; use a RAII wrapper.
-        struct PixelGuard {
-            uint8_t* p;
-            ~PixelGuard() { if (p) stbi_image_free(p); }
-        } guard{pixels};
-
-        if (width <= 0 || height <= 0) {
-            Log(fmt::format("HelmetOverlay: PNG has invalid dimensions {}x{}\n", width, height));
+    bool HelmetOverlay::tryInitEquirect2(const uint8_t* pixels, int width, int height) {
+        if (!pixels || width <= 0 || height <= 0) {
             return false;
         }
 
@@ -428,15 +435,26 @@ namespace openxr_api_layer {
         return true;
     }
 
-    // --- Quad init: unchanged from before the refactor. -----------------
+    // --- Quad init. Accepts an optional PNG; falls back to the
+    // procedural elliptical mask when pngPixels is null. If a PNG is
+    // supplied, the swapchain + staging are sized to the PNG and the
+    // quad height in meters is derived from the PNG aspect ratio so
+    // the image is never stretched — the user controls width_m, the
+    // height follows automatically. The configured height_m is
+    // retained only when the procedural mask is used (it is square,
+    // so any aspect works).
 
-    bool HelmetOverlay::tryInitQuad() {
+    bool HelmetOverlay::tryInitQuad(const uint8_t* pngPixels, int pngWidth, int pngHeight) {
+        const bool havePng = pngPixels != nullptr && pngWidth > 0 && pngHeight > 0;
+        const uint32_t texW = havePng ? static_cast<uint32_t>(pngWidth) : kQuadSwapchainWidth;
+        const uint32_t texH = havePng ? static_cast<uint32_t>(pngHeight) : kQuadSwapchainHeight;
+
         XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
         sci.format = kPreferredFormat;
         sci.sampleCount = 1;
-        sci.width = kQuadSwapchainWidth;
-        sci.height = kQuadSwapchainHeight;
+        sci.width = texW;
+        sci.height = texH;
         sci.faceCount = 1;
         sci.arraySize = 1;
         sci.mipCount = 1;
@@ -463,12 +481,20 @@ namespace openxr_api_layer {
             m_impl->swapchainImages[i] = images[i].texture;
         }
 
-        std::vector<uint8_t> maskBytes(static_cast<size_t>(kQuadSwapchainWidth) * kQuadSwapchainHeight * 4u);
-        generateVisorMask(maskBytes.data());
+        // Build the source pixel buffer: either forward the decoded PNG
+        // bytes, or synthesize the procedural mask. Either way we end
+        // up with an immutable staging texture of size texW × texH.
+        std::vector<uint8_t> proceduralBytes;
+        const uint8_t* srcPixels = pngPixels;
+        if (!havePng) {
+            proceduralBytes.resize(static_cast<size_t>(kQuadSwapchainWidth) * kQuadSwapchainHeight * 4u);
+            generateVisorMask(proceduralBytes.data());
+            srcPixels = proceduralBytes.data();
+        }
 
         D3D11_TEXTURE2D_DESC td{};
-        td.Width = kQuadSwapchainWidth;
-        td.Height = kQuadSwapchainHeight;
+        td.Width = texW;
+        td.Height = texH;
         td.MipLevels = 1;
         td.ArraySize = 1;
         td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -479,8 +505,8 @@ namespace openxr_api_layer {
         td.MiscFlags = 0;
 
         D3D11_SUBRESOURCE_DATA sd{};
-        sd.pSysMem = maskBytes.data();
-        sd.SysMemPitch = kQuadSwapchainWidth * 4u;
+        sd.pSysMem = srcPixels;
+        sd.SysMemPitch = texW * 4u;
         sd.SysMemSlicePitch = 0;
 
         const HRESULT hr = m_impl->device->CreateTexture2D(&td, &sd, &m_impl->stagingTexture);
@@ -490,6 +516,15 @@ namespace openxr_api_layer {
             return false;
         }
 
+        // Aspect-preserving quad sizing when a PNG is used. width_m is
+        // honoured as the user's input; height_m becomes width_m * H/W.
+        // Without a PNG (procedural 1:1 mask), height_m from config is
+        // used as-is.
+        const float quadW = m_impl->config.width_m;
+        const float quadH = havePng
+            ? m_impl->config.width_m * (static_cast<float>(pngHeight) / static_cast<float>(pngWidth))
+            : m_impl->config.height_m;
+
         m_impl->quadLayer.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
         m_impl->quadLayer.next = nullptr;
         m_impl->quadLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
@@ -498,12 +533,12 @@ namespace openxr_api_layer {
         m_impl->quadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         m_impl->quadLayer.subImage.swapchain = m_impl->swapchain;
         m_impl->quadLayer.subImage.imageRect.offset = {0, 0};
-        m_impl->quadLayer.subImage.imageRect.extent = {static_cast<int32_t>(kQuadSwapchainWidth),
-                                                       static_cast<int32_t>(kQuadSwapchainHeight)};
+        m_impl->quadLayer.subImage.imageRect.extent = {static_cast<int32_t>(texW),
+                                                       static_cast<int32_t>(texH)};
         m_impl->quadLayer.subImage.imageArrayIndex = 0;
         m_impl->quadLayer.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
         m_impl->quadLayer.pose.position = {0.0f, 0.0f, -m_impl->config.distance_m};
-        m_impl->quadLayer.size = {m_impl->config.width_m, m_impl->config.height_m};
+        m_impl->quadLayer.size = {quadW, quadH};
 
         return true;
     }
