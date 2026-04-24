@@ -122,6 +122,7 @@
          The stubs in test_stubs.cpp cover the data symbols entry.cpp normally
          defines (dllHome, localAppData, log::logStream). -->
     <ClCompile Include="..\openxr-api-layer\layer.cpp" />
+    <ClCompile Include="..\openxr-api-layer\utils\helmet_overlay.cpp" />
     <ClCompile Include="..\openxr-api-layer\framework\dispatch.gen.cpp" />
     <ClCompile Include="..\openxr-api-layer\framework\log.cpp" />
   </ItemGroup>
