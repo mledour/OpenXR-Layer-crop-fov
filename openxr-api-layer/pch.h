@@ -33,7 +33,9 @@
 
 // Standard library.
 #include <algorithm>
+#include <array>
 #include <cstdarg>
+#include <cstring>
 #include <ctime>
 #define _USE_MATH_DEFINES
 #include <cmath>

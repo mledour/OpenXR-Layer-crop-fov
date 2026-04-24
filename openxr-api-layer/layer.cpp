@@ -272,6 +272,7 @@ namespace openxr_api_layer {
             Log(fmt::format("Log routed to per-app file: {}\n", perAppLogPath.string()));
 
             m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
+            ++m_configGen;
             if (!m_config.enabled) {
                 Log(fmt::format("{} is disabled in {}\n", LayerName, m_configFilePath.string()));
                 m_bypassApiLayer = true;
@@ -430,6 +431,7 @@ namespace openxr_api_layer {
                     if (mtime != m_configLastWriteTime) {
                         m_configLastWriteTime = mtime;
                         m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
+                        ++m_configGen;
                     }
                 } catch (...) {
                     // File mid-write, locked, or deleted. Skip, try next interval.
@@ -448,7 +450,28 @@ namespace openxr_api_layer {
                 for (uint32_t i = 0; i < *viewCountOutput && i < viewCapacityInput; i++) {
                     const XrFovf origFov = views[i].fov;
 
-                    views[i].fov = narrowFov(origFov, m_config);
+                    // Cache the narrowed FOV per view. narrowFov() does 4 tan +
+                    // 4 atan calls and the runtime returns an essentially
+                    // constant FOV frame-to-frame (it tracks IPD and runtime
+                    // config, not head pose), so this cache hits ~every frame
+                    // after the first. Memcmp on the raw XrFovf is correct
+                    // because identical bit patterns produce identical atan/tan
+                    // outputs — we don't need IEEE equality semantics here,
+                    // just "did the input change".
+                    XrFovf narrowed;
+                    if (i < kMaxCachedViews &&
+                        m_fovCache[i].configGen == m_configGen &&
+                        std::memcmp(&m_fovCache[i].origFov, &origFov, sizeof(XrFovf)) == 0) {
+                        narrowed = m_fovCache[i].narrowedFov;
+                    } else {
+                        narrowed = narrowFov(origFov, m_config);
+                        if (i < kMaxCachedViews) {
+                            m_fovCache[i].origFov = origFov;
+                            m_fovCache[i].narrowedFov = narrowed;
+                            m_fovCache[i].configGen = m_configGen;
+                        }
+                    }
+                    views[i].fov = narrowed;
 
                     if (!m_fovLogged) {
                         Log(fmt::format("View[{}] FOV: L={:.3f} R={:.3f} U={:.3f} D={:.3f} -> L={:.3f} R={:.3f} U={:.3f} D={:.3f}\n",
@@ -493,6 +516,22 @@ namespace openxr_api_layer {
         std::filesystem::path m_configFilePath;
         std::filesystem::file_time_type m_configLastWriteTime{};
         std::string m_appName;
+
+        // Per-view cache for narrowFov(). xrLocateViews is externally
+        // synchronized (OpenXR spec), so no locking is needed. 4 covers every
+        // XrViewConfigurationType currently defined (MONO, STEREO,
+        // QUAD_VARJO, STEREO_WITH_FOVEATED_INSET); views beyond that bypass
+        // the cache without breaking correctness.
+        static constexpr uint32_t kMaxCachedViews = 4u;
+        struct FovCacheEntry {
+            XrFovf origFov{};
+            XrFovf narrowedFov{};
+            uint32_t configGen{UINT32_MAX}; // sentinel: never-written entry
+        };
+        std::array<FovCacheEntry, kMaxCachedViews> m_fovCache{};
+        // Bumped every time m_config is (re)loaded, so a live-edit reload
+        // forces a full recompute on the next xrLocateViews.
+        uint32_t m_configGen{0};
     };
 
     // This method is required by the framework to instantiate your OpenXrApi implementation.
