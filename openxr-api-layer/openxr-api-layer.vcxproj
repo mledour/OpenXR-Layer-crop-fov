@@ -297,6 +297,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Gene
     <ClInclude Include="layer.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="utils\crop_math.h" />
+    <ClInclude Include="utils\helmet_overlay.h" />
     <ClInclude Include="utils\name_utils.h" />
   </ItemGroup>
   <ItemGroup>
@@ -305,6 +306,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Gene
     <ClCompile Include="framework\entry.cpp" />
     <ClCompile Include="framework\log.cpp" />
     <ClCompile Include="layer.cpp" />
+    <ClCompile Include="utils\helmet_overlay.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>

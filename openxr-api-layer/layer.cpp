@@ -29,6 +29,7 @@
 #include <log.h>
 #include <util.h>
 #include <utils/crop_math.h>
+#include <utils/helmet_overlay.h>
 #include <utils/name_utils.h>
 
 #include <rapidjson/document.h>
@@ -97,7 +98,15 @@ namespace openxr_api_layer {
             << "  \"crop_right_percent\": 10,\n"
             << "  \"crop_top_percent\": 15,\n"
             << "  \"crop_bottom_percent\": 20,\n"
-            << "  \"live_edit\": false\n"
+            << "  \"live_edit\": false,\n"
+            << "  \"helmet_overlay\": {\n"
+            << "    \"_comment\": \"Draws a motorcycle-helmet-interior mask on top of the game. Rendering backend not yet implemented; enabling this has no effect until a future layer version.\",\n"
+            << "    \"enabled\": false,\n"
+            << "    \"texture\": \"helmet_visor.png\",\n"
+            << "    \"distance_m\": 0.5,\n"
+            << "    \"width_m\": 0.6,\n"
+            << "    \"height_m\": 0.4\n"
+            << "  }\n"
             << "}\n";
         return out.good();
     }
@@ -197,6 +206,44 @@ namespace openxr_api_layer {
         return config;
     }
 
+    // Parses the "helmet_overlay" object from the same settings.json that
+    // loadConfig() reads. Kept as a standalone reader (rather than folded
+    // into CropConfig) so the crop and overlay subsystems stay loosely
+    // coupled — the overlay is opt-in, optional, and logically distinct
+    // from the FOV narrowing. Silently returns defaults (disabled) if the
+    // file, the block, or any field is missing or malformed.
+    static HelmetOverlayConfig loadHelmetConfig(const std::filesystem::path& configPath) {
+        HelmetOverlayConfig hc;
+
+        std::string fileContent;
+        {
+            std::ifstream file(configPath.string());
+            if (!file.is_open()) return hc;
+            std::ostringstream ss;
+            ss << file.rdbuf();
+            fileContent = ss.str();
+        }
+
+        rapidjson::Document doc;
+        doc.Parse(fileContent.c_str(), fileContent.size());
+        if (doc.HasParseError() || !doc.IsObject()) return hc;
+        if (!doc.HasMember("helmet_overlay") || !doc["helmet_overlay"].IsObject()) return hc;
+
+        const auto& ho = doc["helmet_overlay"];
+        hc.enabled = readJsonBool(ho, "enabled", false);
+        hc.distance_m = readJsonFloat(ho, "distance_m", 0.5f);
+        hc.width_m = readJsonFloat(ho, "width_m", 0.6f);
+        hc.height_m = readJsonFloat(ho, "height_m", 0.4f);
+        if (ho.HasMember("texture") && ho["texture"].IsString()) {
+            hc.textureRelativePath = ho["texture"].GetString();
+        }
+
+        Log(fmt::format("Helmet overlay config: enabled={}, distance={:.2f}m, size={:.2f}x{:.2f}m, texture={}\n",
+                         hc.enabled, hc.distance_m, hc.width_m, hc.height_m, hc.textureRelativePath));
+
+        return hc;
+    }
+
     // This class implements our API layer.
     class OpenXrLayer : public openxr_api_layer::OpenXrApi {
       public:
@@ -272,6 +319,7 @@ namespace openxr_api_layer {
             Log(fmt::format("Log routed to per-app file: {}\n", perAppLogPath.string()));
 
             m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
+            m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
             ++m_configGen;
             if (!m_config.enabled) {
                 Log(fmt::format("{} is disabled in {}\n", LayerName, m_configFilePath.string()));
@@ -365,9 +413,73 @@ namespace openxr_api_layer {
                 }
 
                 TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
+
+                // Arm the helmet overlay (no-op stub until the D3D11 backend
+                // lands — see helmet_overlay.cpp). Best-practices: any
+                // failure here must NEVER crash the host; the overlay
+                // degrades to "not armed" and the rest of the layer keeps
+                // running.
+                if (!m_bypassApiLayer) {
+                    try {
+                        m_helmetOverlay.initialize(*session, createInfo->next, m_helmetConfig, dllHome);
+                    } catch (const std::exception& exc) {
+                        ErrorLog(fmt::format("HelmetOverlay::initialize threw: {}\n", exc.what()));
+                    }
+                }
             }
 
             return result;
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrDestroySession
+        XrResult xrDestroySession(XrSession session) override {
+            TraceLoggingWrite(g_traceProvider, "xrDestroySession", TLXArg(session, "Session"));
+
+            // Release overlay resources BEFORE forwarding: once the runtime
+            // destroys the session, its XrSwapchain / XrSpace handles are
+            // invalid and calling the destroy PFNs on them would be UB.
+            try {
+                m_helmetOverlay.shutdown();
+            } catch (const std::exception& exc) {
+                ErrorLog(fmt::format("HelmetOverlay::shutdown threw: {}\n", exc.what()));
+            }
+
+            return OpenXrApi::xrDestroySession(session);
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEndFrame
+        XrResult xrEndFrame(XrSession session, const XrFrameEndInfo* frameEndInfo) override {
+            if (!frameEndInfo || frameEndInfo->type != XR_TYPE_FRAME_END_INFO) {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+
+            // Fast path: nothing to add — forward untouched so the original
+            // layer array (which may live in the app's stack) is not copied.
+            const XrCompositionLayerBaseHeader* helmetLayer = nullptr;
+            const bool haveHelmet =
+                !m_bypassApiLayer && m_helmetOverlay.isArmed() &&
+                m_helmetOverlay.appendLayer(frameEndInfo->displayTime, &helmetLayer) &&
+                helmetLayer != nullptr;
+
+            if (!haveHelmet) {
+                return OpenXrApi::xrEndFrame(session, frameEndInfo);
+            }
+
+            // Append the helmet visor on top of the app's layers. OpenXR
+            // composition is strictly back-to-front, so placing our layer
+            // last puts it in front of everything the game submitted.
+            std::vector<const XrCompositionLayerBaseHeader*> patched;
+            patched.reserve(frameEndInfo->layerCount + 1u);
+            for (uint32_t i = 0; i < frameEndInfo->layerCount; ++i) {
+                patched.push_back(frameEndInfo->layers[i]);
+            }
+            patched.push_back(helmetLayer);
+
+            XrFrameEndInfo patchedInfo = *frameEndInfo;
+            patchedInfo.layerCount = static_cast<uint32_t>(patched.size());
+            patchedInfo.layers = patched.data();
+
+            return OpenXrApi::xrEndFrame(session, &patchedInfo);
         }
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEnumerateViewConfigurationViews
@@ -431,6 +543,14 @@ namespace openxr_api_layer {
                     if (mtime != m_configLastWriteTime) {
                         m_configLastWriteTime = mtime;
                         m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
+                        // NB: live-edit refresh of the helmet block updates
+                        // the cached config, but swapchain/space resources
+                        // already created in xrCreateSession are NOT
+                        // rebuilt. Toggling enabled, distance, or size will
+                        // only fully apply after a session restart. The
+                        // stub honours this: it doesn't own runtime
+                        // resources yet, so the refresh is cheap here.
+                        m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
                         ++m_configGen;
                     }
                 } catch (...) {
@@ -532,6 +652,12 @@ namespace openxr_api_layer {
         // Bumped every time m_config is (re)loaded, so a live-edit reload
         // forces a full recompute on the next xrLocateViews.
         uint32_t m_configGen{0};
+
+        // Helmet overlay: default-constructed (disabled) until the
+        // settings.json loader writes into m_helmetConfig. Owning the
+        // overlay by value keeps its lifetime tied to the layer instance.
+        HelmetOverlayConfig m_helmetConfig{};
+        HelmetOverlay m_helmetOverlay{};
     };
 
     // This method is required by the framework to instantiate your OpenXrApi implementation.

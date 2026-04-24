@@ -38,6 +38,9 @@
     <ClInclude Include="utils\crop_math.h">
       <Filter>Utilities</Filter>
     </ClInclude>
+    <ClInclude Include="utils\helmet_overlay.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
     <ClInclude Include="utils\name_utils.h">
       <Filter>Utilities</Filter>
     </ClInclude>
@@ -60,6 +63,9 @@
     </ClCompile>
     <ClCompile Include="framework\log.cpp">
       <Filter>Framework</Filter>
+    </ClCompile>
+    <ClCompile Include="utils\helmet_overlay.cpp">
+      <Filter>Utilities</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
