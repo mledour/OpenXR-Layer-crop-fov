@@ -25,11 +25,14 @@
 
 #pragma once
 
-// This layer performs no graphics work of its own — it only modifies
-// OpenXR data structures that the runtime reads. No XR_USE_GRAPHICS_API_*
-// define, no d3d*.h include, no graphics utility sources. This keeps
-// the DLL small and avoids forcing d3d12.dll / d3d11.dll to be
-// statically imported into every game process that loads the layer.
+// The FOV-crop portion of this layer does no graphics work of its own —
+// it only modifies OpenXR data structures. The helmet-overlay portion
+// (utils/helmet_overlay.cpp) does need D3D11 to render its quad, so
+// XR_USE_GRAPHICS_API_D3D11 + <d3d11.h> are pulled in here. To avoid
+// forcing d3d11.dll / d3dcompiler_47.dll to be loaded into every
+// OpenXR game process (even Vulkan games like X-Plane 12 that would
+// never exercise the overlay), the vcxproj delay-loads those DLLs —
+// they are only actually loaded when the overlay path runs.
 
 // Standard library.
 #include <algorithm>
@@ -63,11 +66,20 @@ using namespace std::chrono_literals;
 #include <traceloggingactivity.h>
 #include <traceloggingprovider.h>
 
+// D3D11 is used by the helmet-overlay path in utils/helmet_overlay.cpp.
+// These includes are harmless for every other TU (types only, no symbol
+// references) and the d3d11.dll / d3dcompiler_47.dll DLLs are delay-loaded
+// at link time so they are not mapped into host processes that never
+// exercise the overlay.
+#include <d3d11.h>
+#include <d3dcompiler.h>
+
 using Microsoft::WRL::ComPtr;
 
 // OpenXR + Windows-specific definitions.
 #define XR_NO_PROTOTYPES
 #define XR_USE_PLATFORM_WIN32
+#define XR_USE_GRAPHICS_API_D3D11
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 

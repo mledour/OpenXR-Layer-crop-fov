@@ -154,6 +154,68 @@ namespace mock {
             return XR_SUCCESS;
         }
 
+        // Helmet-overlay companion stubs. The integration tests never
+        // enable the overlay, so none of these is actually exercised
+        // end-to-end — they only need to resolve at layer init time.
+        // Returning XR_ERROR_FUNCTION_UNSUPPORTED when the overlay path
+        // does call them surfaces as a graceful degrade in the layer
+        // (isArmed() stays false) rather than a silent null-pointer
+        // call, matching how the layer treats hostile runtimes.
+
+        XrResult XRAPI_CALL m_xrCreateReferenceSpace(XrSession /*session*/,
+                                                    const XrReferenceSpaceCreateInfo* /*info*/,
+                                                    XrSpace* space) {
+            if (!space) return XR_ERROR_VALIDATION_FAILURE;
+            *space = makeHandle<XrSpace>();
+            return XR_SUCCESS;
+        }
+
+        XrResult XRAPI_CALL m_xrDestroySpace(XrSpace /*space*/) {
+            return XR_SUCCESS;
+        }
+
+        XrResult XRAPI_CALL m_xrEnumerateSwapchainFormats(XrSession /*session*/,
+                                                         uint32_t capacity,
+                                                         uint32_t* count,
+                                                         int64_t* formats) {
+            if (!count) return XR_ERROR_VALIDATION_FAILURE;
+            *count = 1;
+            if (capacity == 0) return XR_SUCCESS;
+            if (capacity < 1) return XR_ERROR_SIZE_INSUFFICIENT;
+            // DXGI_FORMAT_R8G8B8A8_UNORM = 28. The real format value does
+            // not matter here — the overlay code never runs in tests.
+            formats[0] = 28;
+            return XR_SUCCESS;
+        }
+
+        XrResult XRAPI_CALL m_xrEnumerateSwapchainImages(XrSwapchain /*swapchain*/,
+                                                        uint32_t capacity,
+                                                        uint32_t* count,
+                                                        XrSwapchainImageBaseHeader* /*images*/) {
+            if (!count) return XR_ERROR_VALIDATION_FAILURE;
+            *count = 0;
+            (void)capacity;
+            return XR_SUCCESS;
+        }
+
+        XrResult XRAPI_CALL m_xrAcquireSwapchainImage(XrSwapchain /*swapchain*/,
+                                                    const XrSwapchainImageAcquireInfo* /*info*/,
+                                                    uint32_t* index) {
+            if (!index) return XR_ERROR_VALIDATION_FAILURE;
+            *index = 0;
+            return XR_SUCCESS;
+        }
+
+        XrResult XRAPI_CALL m_xrWaitSwapchainImage(XrSwapchain /*swapchain*/,
+                                                  const XrSwapchainImageWaitInfo* /*info*/) {
+            return XR_SUCCESS;
+        }
+
+        XrResult XRAPI_CALL m_xrReleaseSwapchainImage(XrSwapchain /*swapchain*/,
+                                                     const XrSwapchainImageReleaseInfo* /*info*/) {
+            return XR_SUCCESS;
+        }
+
         XrResult XRAPI_CALL m_xrEndFrame(XrSession /*session*/, const XrFrameEndInfo* info) {
             g_state.endFrameCallCount++;
             g_state.lastEndFrameProjLayers.clear();
@@ -212,6 +274,20 @@ namespace mock {
             *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrCreateSwapchain);
         else if (n == "xrDestroySwapchain")
             *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrDestroySwapchain);
+        else if (n == "xrCreateReferenceSpace")
+            *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrCreateReferenceSpace);
+        else if (n == "xrDestroySpace")
+            *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrDestroySpace);
+        else if (n == "xrEnumerateSwapchainFormats")
+            *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrEnumerateSwapchainFormats);
+        else if (n == "xrEnumerateSwapchainImages")
+            *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrEnumerateSwapchainImages);
+        else if (n == "xrAcquireSwapchainImage")
+            *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrAcquireSwapchainImage);
+        else if (n == "xrWaitSwapchainImage")
+            *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrWaitSwapchainImage);
+        else if (n == "xrReleaseSwapchainImage")
+            *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrReleaseSwapchainImage);
         else if (n == "xrEndFrame")
             *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrEndFrame);
         else {

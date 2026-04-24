@@ -414,14 +414,15 @@ namespace openxr_api_layer {
 
                 TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
 
-                // Arm the helmet overlay (no-op stub until the D3D11 backend
-                // lands — see helmet_overlay.cpp). Best-practices: any
-                // failure here must NEVER crash the host; the overlay
-                // degrades to "not armed" and the rest of the layer keeps
-                // running.
+                // Arm the helmet overlay. Best-practices: any failure
+                // here must NEVER crash the host; the overlay degrades
+                // to "not armed" and the rest of the layer keeps running.
+                // We pass `this` so the overlay can call downstream PFNs
+                // (xrCreateSwapchain, xrAcquireSwapchainImage, …) through
+                // the layer's own dispatch.
                 if (!m_bypassApiLayer) {
                     try {
-                        m_helmetOverlay.initialize(*session, createInfo->next, m_helmetConfig, dllHome);
+                        m_helmetOverlay.initialize(this, *session, createInfo->next, m_helmetConfig, dllHome);
                     } catch (const std::exception& exc) {
                         ErrorLog(fmt::format("HelmetOverlay::initialize threw: {}\n", exc.what()));
                     }

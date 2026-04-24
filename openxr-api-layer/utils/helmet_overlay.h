@@ -39,6 +39,12 @@
 
 namespace openxr_api_layer {
 
+    // Forward declaration — full definition in <framework/dispatch.gen.h>,
+    // which helmet_overlay.cpp includes. Keeping it as a forward decl here
+    // means TUs that only drive the overlay lifecycle do not pull the
+    // framework dispatch header transitively.
+    class OpenXrApi;
+
     // User-facing configuration, mirrored from settings.json.
     struct HelmetOverlayConfig {
         bool enabled = false;
@@ -61,10 +67,14 @@ namespace openxr_api_layer {
         // Called from xrCreateSession after the runtime has accepted the
         // session. sessionCreateInfoNextChain is the XrSessionCreateInfo::next
         // pointer (void*) — the overlay walks it to find a graphics
-        // binding it can use. Returns true if the overlay is armed and
-        // will contribute a layer in appendLayer(); false means "silently
+        // binding it can use. `api` is kept by the overlay so it can
+        // reach downstream xrCreateSwapchain / xrAcquire…Image / etc.
+        // through the layer's own dispatch (same as every other part of
+        // the layer). Returns true if the overlay is armed and will
+        // contribute a layer in appendLayer(); false means "silently
         // degrade to bypass" per best-practices.
-        bool initialize(XrSession session,
+        bool initialize(OpenXrApi* api,
+                        XrSession session,
                         const void* sessionCreateInfoNextChain,
                         const HelmetOverlayConfig& config,
                         const std::filesystem::path& dllHome);
