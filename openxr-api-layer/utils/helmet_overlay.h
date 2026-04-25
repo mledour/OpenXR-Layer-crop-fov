@@ -50,26 +50,21 @@ namespace openxr_api_layer {
         bool enabled = false;
         std::string textureRelativePath = "helmet_visor.png";
 
-        // distance_m has two interpretations depending on the
-        // backend the runtime can support:
-        //   - Quad (flat, fallback)     : distance from eye to the
-        //                                 quad's plane in meters.
-        //   - Cylinder (curved arc)     : radius from cylinder axis
-        //                                 (= eye position) to the
-        //                                 cylinder surface in meters.
-        // Both are "how close the helmet sits to your face". Live-tunable.
+        // distance_m: how close the helmet sits to the user's face.
+        //   - Quad (flat, the path Pimax actually uses) : distance
+        //     from eye to the quad's plane, in meters.
+        //   - Cylinder (curved, only on runtimes that grant the KHR
+        //     extension)                              : radius from
+        //     the cylinder axis (= eye position) to the surface.
+        // Live-tunable in both modes.
         float distance_m = 0.5f;
 
-        // Quad-mode only: width of the flat quad in meters. Height is
-        // derived from the PNG aspect ratio. Live-tunable.
+        // Quad-mode only: width of the flat quad in meters. Height
+        // is derived from the PNG aspect ratio. Live-tunable.
+        // (Cylinder mode hardcodes a 130° horizontal span, since the
+        // user-facing knob would be dead on every runtime we test —
+        // see tools/cylinder_warp.py for offline curvature instead.)
         float width_m = 0.6f;
-
-        // Cylinder-mode only: total horizontal angular extent of the
-        // arc, in degrees. ~130° gives a moderate wraparound; 180°
-        // wraps from ear to ear; up to ~270° wraps further behind.
-        // Vertical extent is derived from this and the PNG aspect.
-        // Live-tunable.
-        float central_angle_deg = 130.0f;
 
         // RGB multiplier applied to the texture at upload time. 1.0 =
         // pristine, 0.5 = half brightness, 0.0 = pure black. Useful when
