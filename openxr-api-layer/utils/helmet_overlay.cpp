@@ -44,25 +44,26 @@
 
 // D3D11 helmet-interior overlay.
 //
-// Two rendering paths, chosen at session init:
-//  (1) equirect2 — preferred. Requires the runtime to support
-//      XR_KHR_composition_layer_equirect2 AND a readable PNG at
-//      dllHome / config.textureRelativePath. The PNG is uploaded once
-//      into a static swapchain (XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT)
-//      and never re-copied per frame — the compositor samples it
-//      directly from the sphere. Gives a 360° head-locked surround
-//      that is the natural geometry for an inside-a-helmet view.
-//  (2) quad — fallback. Head-locked XrCompositionLayerQuad with a
-//      procedurally generated elliptical mask (black periphery,
-//      transparent visor cutout). Used whenever the extension is
-//      absent, the PNG is missing, or the PNG fails to decode. Per-
-//      frame CopyResource of a small staging texture into the
-//      swapchain image.
+// Single rendering path: a head-locked XrCompositionLayerQuad
+// textured either with the user's helmet_visor.png (loaded once via
+// stb_image at session init) or, if the PNG is missing/unreadable,
+// with a procedurally-generated elliptical mask (black periphery,
+// transparent visor cutout). Per-frame work is one CopyResource of
+// the staging texture into the acquired swapchain image; final
+// alpha blending happens in the OpenXR compositor via
+// XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT.
 //
-// Either way the session's graphics binding must be D3D11; other
-// bindings bypass silently (see CLAUDE.md — never crash the host).
-// D3D11 entry points are delay-loaded at link time so a Vulkan-only
-// game that never enables the overlay never pulls d3d11.dll into its
+// A spherical XR_KHR_composition_layer_equirect2 path was prototyped
+// and removed because the runtime we test against (Pimax OpenXR)
+// does not expose the extension. Bringing it back later is just a
+// matter of restoring the implicit extension request in layer.cpp
+// and a tryInitEquirect2() that re-uses the PNG already decoded in
+// initialize().
+//
+// The session's graphics binding must be D3D11; other bindings
+// bypass silently (see CLAUDE.md — never crash the host). D3D11
+// entry points are delay-loaded at link time so a Vulkan-only game
+// that never enables the overlay never pulls d3d11.dll into its
 // process.
 
 namespace openxr_api_layer {
@@ -71,7 +72,7 @@ namespace openxr_api_layer {
 
     namespace {
 
-        // --- Quad path tunables. Equirect2 is full-sphere, no tuning. --
+        // --- Procedural-mask tunables. -----------------------------
 
         constexpr uint32_t kQuadSwapchainWidth = 512;
         constexpr uint32_t kQuadSwapchainHeight = 512;
@@ -125,16 +126,6 @@ namespace openxr_api_layer {
             return nullptr;
         }
 
-        // Returns true iff the supplied granted-extension list contains
-        // XR_KHR_composition_layer_equirect2. Called once at session
-        // init to decide between the equirect2 and quad paths.
-        bool isEquirect2Granted(const std::vector<std::string>& granted) {
-            for (const auto& e : granted) {
-                if (e == XR_KHR_COMPOSITION_LAYER_EQUIRECT2_EXTENSION_NAME) return true;
-            }
-            return false;
-        }
-
         // True iff a swapchain format list contains our preferred format.
         bool listHasFormat(const std::vector<int64_t>& formats, int64_t wanted) {
             for (auto f : formats) if (f == wanted) return true;
@@ -146,7 +137,6 @@ namespace openxr_api_layer {
     enum class HelmetOverlayMode {
         Disabled,
         Quad,
-        Equirect2,
     };
 
     struct HelmetOverlay::Impl {
@@ -162,15 +152,15 @@ namespace openxr_api_layer {
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
 
-        // Quad-mode per-frame copy source. Unused in Equirect2 mode.
+        // Per-frame copy source. Filled at init from either the PNG or
+        // the procedural mask, then unchanged for the session lifetime.
         ComPtr<ID3D11Texture2D> stagingTexture;
         std::vector<ComPtr<ID3D11Texture2D>> swapchainImages;
 
-        // Composition layer structs kept stable between appendLayer()
-        // calls so the pointer we hand to layer.cpp remains valid
-        // through xrEndFrame. Exactly one is used, depending on mode.
+        // Composition layer kept stable between appendLayer() calls so
+        // the pointer we hand back to layer.cpp remains valid through
+        // xrEndFrame.
         XrCompositionLayerQuad quadLayer{};
-        XrCompositionLayerEquirect2KHR equirectLayer{};
     };
 
     HelmetOverlay::HelmetOverlay() : m_impl(std::make_unique<Impl>()) {}
@@ -267,11 +257,10 @@ namespace openxr_api_layer {
             return false;
         }
 
-        // ---- Load PNG once, reused by whichever backend wins. ---------
-        // If no PNG is present (or it fails to decode) we still run the
-        // quad backend with the procedural mask, so this is not a fatal
-        // step. pngPixels is owned by stb_image; freed via PixelGuard.
-        const bool extGranted = isEquirect2Granted(api->GetGrantedExtensions());
+        // ---- Load PNG (if present), then arm the quad. ----------------
+        // If no PNG is at the expected path (or it fails to decode), we
+        // still arm the overlay with a procedural elliptical mask, so
+        // the layer always has *something* to show when enabled.
         const std::filesystem::path pngPath = dllHome / config.textureRelativePath;
 
         uint8_t* pngPixels = nullptr;
@@ -288,26 +277,6 @@ namespace openxr_api_layer {
         }
         PixelGuard guard{pngPixels};
 
-        // ---- Decision tree. -------------------------------------------
-        // 1. PNG + equirect2 extension → spherical surround.
-        // 2. PNG but no equirect2 extension (or equirect2 init failed)
-        //    → quad textured with the same PNG, aspect preserved.
-        // 3. No PNG → quad with procedural elliptical mask.
-
-        if (pngPixels && extGranted) {
-            if (tryInitEquirect2(pngPixels, pngW, pngH)) {
-                m_impl->mode = HelmetOverlayMode::Equirect2;
-                Log(fmt::format("HelmetOverlay: armed (equirect2 + PNG {}x{}), texture='{}'\n",
-                                pngW, pngH, pngPath.string()));
-                return true;
-            }
-            Log("HelmetOverlay: equirect2 init failed, falling back to quad path\n");
-        } else if (pngPixels) {
-            Log("HelmetOverlay: runtime does not support XR_KHR_composition_layer_equirect2, "
-                "using quad + PNG\n");
-        }
-
-        // ---- Quad path: either with PNG (case 2) or procedural (case 3).
         if (tryInitQuad(pngPixels, pngW, pngH)) {
             m_impl->mode = HelmetOverlayMode::Quad;
             Log(fmt::format("HelmetOverlay: armed (quad {}). "
@@ -319,120 +288,8 @@ namespace openxr_api_layer {
             return true;
         }
 
-        Log("HelmetOverlay: both init paths failed, staying inert\n");
+        Log("HelmetOverlay: quad init failed, staying inert\n");
         return false;
-    }
-
-    // --- Equirect2 init: one-shot PNG upload into a static swapchain. ---
-
-    bool HelmetOverlay::tryInitEquirect2(const uint8_t* pixels, int width, int height) {
-        if (!pixels || width <= 0 || height <= 0) {
-            return false;
-        }
-
-        // ---- Static swapchain sized to the PNG. -----------------------
-        XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-        sci.createFlags = XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
-        sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-        sci.format = kPreferredFormat;
-        sci.sampleCount = 1;
-        sci.width = static_cast<uint32_t>(width);
-        sci.height = static_cast<uint32_t>(height);
-        sci.faceCount = 1;
-        sci.arraySize = 1;
-        sci.mipCount = 1;
-        if (XR_FAILED(m_impl->api->xrCreateSwapchain(m_impl->session, &sci, &m_impl->swapchain))) {
-            Log("HelmetOverlay: equirect2 xrCreateSwapchain failed\n");
-            return false;
-        }
-
-        // ---- Enumerate images (STATIC_IMAGE_BIT guarantees exactly 1).
-        uint32_t imageCount = 0;
-        if (XR_FAILED(m_impl->api->xrEnumerateSwapchainImages(m_impl->swapchain, 0, &imageCount, nullptr)) ||
-            imageCount == 0) {
-            Log("HelmetOverlay: equirect2 xrEnumerateSwapchainImages returned 0\n");
-            return false;
-        }
-        std::vector<XrSwapchainImageD3D11KHR> images(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
-        if (XR_FAILED(m_impl->api->xrEnumerateSwapchainImages(
-                m_impl->swapchain, imageCount, &imageCount,
-                reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())))) {
-            Log("HelmetOverlay: equirect2 xrEnumerateSwapchainImages (second call) failed\n");
-            return false;
-        }
-
-        // ---- Upload the PNG bytes into a staging texture, then
-        // CopyResource them into the swapchain image once. After
-        // release the compositor samples that image for every frame.
-        D3D11_TEXTURE2D_DESC td{};
-        td.Width = static_cast<UINT>(width);
-        td.Height = static_cast<UINT>(height);
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_IMMUTABLE;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        td.CPUAccessFlags = 0;
-        td.MiscFlags = 0;
-
-        D3D11_SUBRESOURCE_DATA sd{};
-        sd.pSysMem = pixels;
-        sd.SysMemPitch = static_cast<UINT>(width) * 4u;
-        sd.SysMemSlicePitch = 0;
-
-        ComPtr<ID3D11Texture2D> staging;
-        const HRESULT hr = m_impl->device->CreateTexture2D(&td, &sd, &staging);
-        if (FAILED(hr)) {
-            Log(fmt::format("HelmetOverlay: equirect2 CreateTexture2D failed, hr=0x{:08X}\n",
-                            static_cast<uint32_t>(hr)));
-            return false;
-        }
-
-        uint32_t imageIndex = 0;
-        XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-        if (XR_FAILED(m_impl->api->xrAcquireSwapchainImage(m_impl->swapchain, &ai, &imageIndex))) {
-            Log("HelmetOverlay: equirect2 xrAcquireSwapchainImage failed\n");
-            return false;
-        }
-        XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-        wi.timeout = XR_INFINITE_DURATION;
-        if (XR_FAILED(m_impl->api->xrWaitSwapchainImage(m_impl->swapchain, &wi))) {
-            Log("HelmetOverlay: equirect2 xrWaitSwapchainImage failed\n");
-            return false;
-        }
-        m_impl->context->CopyResource(images[imageIndex].texture, staging.Get());
-        XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        if (XR_FAILED(m_impl->api->xrReleaseSwapchainImage(m_impl->swapchain, &ri))) {
-            Log("HelmetOverlay: equirect2 xrReleaseSwapchainImage failed\n");
-            return false;
-        }
-
-        // ---- Prepare the stable equirect2 layer struct. ---------------
-        // Full-sphere coverage: central horizontal = 2π, vertical spans
-        // from +π/2 (zenith) to -π/2 (nadir). radius = 0 means "treat
-        // the sphere as having infinite radius" per the extension spec —
-        // ideal for a head-locked surround that should never feel
-        // "closer" or "further" as the user moves.
-        constexpr float kPi = 3.14159265358979323846f;
-        m_impl->equirectLayer.type = XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR;
-        m_impl->equirectLayer.next = nullptr;
-        m_impl->equirectLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
-                                           XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
-        m_impl->equirectLayer.space = m_impl->viewSpace;
-        m_impl->equirectLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-        m_impl->equirectLayer.subImage.swapchain = m_impl->swapchain;
-        m_impl->equirectLayer.subImage.imageRect.offset = {0, 0};
-        m_impl->equirectLayer.subImage.imageRect.extent = {width, height};
-        m_impl->equirectLayer.subImage.imageArrayIndex = 0;
-        m_impl->equirectLayer.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
-        m_impl->equirectLayer.pose.position = {0.0f, 0.0f, 0.0f};
-        m_impl->equirectLayer.radius = 0.0f;
-        m_impl->equirectLayer.centralHorizontalAngle = 2.0f * kPi;
-        m_impl->equirectLayer.upperVerticalAngle = kPi * 0.5f;
-        m_impl->equirectLayer.lowerVerticalAngle = -kPi * 0.5f;
-
-        return true;
     }
 
     // --- Quad init. Accepts an optional PNG; falls back to the
@@ -551,15 +408,8 @@ namespace openxr_api_layer {
         if (m_impl->mode == HelmetOverlayMode::Disabled) return false;
         if (!m_impl->api || m_impl->swapchain == XR_NULL_HANDLE) return false;
 
-        if (m_impl->mode == HelmetOverlayMode::Equirect2) {
-            // Static swapchain: image contents are already in place, no
-            // per-frame copy. Just hand the layer pointer back.
-            *outLayer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&m_impl->equirectLayer);
-            return true;
-        }
-
-        // HelmetOverlayMode::Quad — per-frame CopyResource sandwiched
-        // between acquire/wait and release.
+        // Per-frame CopyResource sandwiched between acquire/wait and
+        // release.
         uint32_t imageIndex = 0;
         XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
         if (XR_FAILED(m_impl->api->xrAcquireSwapchainImage(m_impl->swapchain, &ai, &imageIndex))) {

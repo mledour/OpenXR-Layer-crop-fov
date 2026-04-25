@@ -44,14 +44,7 @@ namespace openxr_api_layer {
 
     // Initialize these vectors with arrays of extensions to block and implicitly request for the instance.
     const std::vector<std::string> blockedExtensions = {};
-    // XR_KHR_composition_layer_equirect2 is requested implicitly so the
-    // helmet overlay can map a 360° equirectangular PNG onto a head-
-    // locked sphere when the runtime supports it. If it does not, the
-    // framework logs "Cannot satisfy implicit extension request" and
-    // the overlay falls back to the quad + procedural mask path.
-    const std::vector<std::string> implicitExtensions = {
-        XR_KHR_COMPOSITION_LAYER_EQUIRECT2_EXTENSION_NAME
-    };
+    const std::vector<std::string> implicitExtensions = {};
 
     // CropConfig, clampFactor, scaleSwapchainExtents, and narrowFov live in
     // <utils/crop_math.h> so they can be unit-tested from a standalone binary

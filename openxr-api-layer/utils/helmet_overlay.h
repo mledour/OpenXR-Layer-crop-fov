@@ -95,13 +95,10 @@ namespace openxr_api_layer {
         bool isArmed() const;
 
     private:
-        // Split out the two rendering backends so initialize() stays
-        // a readable sequence of "try preferred, then fall back". Both
-        // assume the common D3D11 / format / space setup in initialize()
-        // has already populated m_impl. PNG pixels are decoded once in
-        // initialize() and handed down as RGBA8 buffer + dims; for the
-        // quad path, a null pointer selects the procedural mask.
-        bool tryInitEquirect2(const uint8_t* pngPixels, int pngWidth, int pngHeight);
+        // PNG pixels are decoded once in initialize() and handed down
+        // as an RGBA8 buffer + dims; a null pointer selects the
+        // procedural elliptical mask. Common D3D11 / format / space
+        // setup is done by initialize() before this is called.
         bool tryInitQuad(const uint8_t* pngPixels, int pngWidth, int pngHeight);
 
         struct Impl;
