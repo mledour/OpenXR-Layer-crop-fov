@@ -52,6 +52,14 @@ namespace openxr_api_layer {
         float distance_m = 0.5f;
         float width_m = 0.6f;
         float height_m = 0.4f;
+        // RGB multiplier applied to the texture at upload time. 1.0 =
+        // pristine, 0.5 = half brightness, 0.0 = pure black. Useful when
+        // the PNG has highlights that look natural in studio lighting
+        // but cramée on a bright VR HMD in a dim cockpit. Alpha is
+        // never multiplied, so the visor cutout stays transparent.
+        // Applied once at session start; needs a session restart to
+        // re-apply (no live-edit yet).
+        float brightness = 1.0f;
     };
 
     // Opaque backend — hides D3D types from every TU that only needs to

@@ -375,15 +375,30 @@ namespace openxr_api_layer {
             m_impl->swapchainImages[i] = images[i].texture;
         }
 
-        // Build the source pixel buffer: either forward the decoded PNG
-        // bytes, or synthesize the procedural mask. Either way we end
-        // up with an immutable staging texture of size texW × texH.
-        std::vector<uint8_t> proceduralBytes;
-        const uint8_t* srcPixels = pngPixels;
-        if (!havePng) {
-            proceduralBytes.resize(static_cast<size_t>(kQuadSwapchainWidth) * kQuadSwapchainHeight * 4u);
-            generateVisorMask(proceduralBytes.data());
-            srcPixels = proceduralBytes.data();
+        // Build the source pixel buffer we own and can mutate. PNG path
+        // copies stb_image's bytes; procedural path synthesises them.
+        // Either way we end up with an immutable staging texture of
+        // size texW × texH.
+        const size_t pixelBytes = static_cast<size_t>(texW) * texH * 4u;
+        std::vector<uint8_t> uploadBytes(pixelBytes);
+        if (havePng) {
+            std::memcpy(uploadBytes.data(), pngPixels, pixelBytes);
+        } else {
+            generateVisorMask(uploadBytes.data());
+        }
+
+        // Apply brightness multiplier on the RGB channels before upload.
+        // Alpha is left untouched so the visor cutout stays transparent
+        // even at brightness=0. Skipped when the multiplier is ~1.0
+        // (no perceptible change, saves ~50 ms on a 6K image).
+        const float bright = m_impl->config.brightness;
+        if (bright < 0.999f) {
+            for (size_t i = 0; i + 3 < uploadBytes.size(); i += 4) {
+                uploadBytes[i + 0] = static_cast<uint8_t>(uploadBytes[i + 0] * bright);
+                uploadBytes[i + 1] = static_cast<uint8_t>(uploadBytes[i + 1] * bright);
+                uploadBytes[i + 2] = static_cast<uint8_t>(uploadBytes[i + 2] * bright);
+            }
+            Log(fmt::format("HelmetOverlay: applied brightness={:.2f} to texture\n", bright));
         }
 
         D3D11_TEXTURE2D_DESC td{};
@@ -402,7 +417,7 @@ namespace openxr_api_layer {
         td.MiscFlags = 0;
 
         D3D11_SUBRESOURCE_DATA sd{};
-        sd.pSysMem = srcPixels;
+        sd.pSysMem = uploadBytes.data();
         sd.SysMemPitch = texW * 4u;
         sd.SysMemSlicePitch = 0;
 
