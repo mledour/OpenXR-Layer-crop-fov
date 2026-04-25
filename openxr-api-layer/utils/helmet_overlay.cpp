@@ -44,14 +44,18 @@
 
 // D3D11 helmet-interior overlay.
 //
-// Single rendering path: a head-locked XrCompositionLayerQuad
-// textured either with the user's helmet_visor.png (loaded once via
-// stb_image at session init) or, if the PNG is missing/unreadable,
-// with a procedurally-generated elliptical mask (black periphery,
-// transparent visor cutout). Per-frame work is one CopyResource of
-// the staging texture into the acquired swapchain image; final
-// alpha blending happens in the OpenXR compositor via
+// Renders the user's helmet_visor.png as a head-locked
+// XrCompositionLayerQuad. The PNG is decoded once via stb_image at
+// session init, optionally darkened by config.brightness, then
+// uploaded to a staging texture. Per-frame work is one CopyResource
+// of that staging into the acquired swapchain image; final alpha
+// blending happens in the OpenXR compositor via
 // XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT.
+//
+// The PNG is mandatory: if no helmet_visor.png is found at
+// dllHome / config.textureRelativePath, the overlay does not arm.
+// (Earlier revisions had a procedural elliptical mask fallback,
+// removed once a default PNG started shipping with the build.)
 //
 // A spherical XR_KHR_composition_layer_equirect2 path was prototyped
 // and removed because the runtime we test against (Pimax OpenXR)
@@ -72,11 +76,6 @@ namespace openxr_api_layer {
 
     namespace {
 
-        // --- Procedural-mask tunables. -----------------------------
-
-        constexpr uint32_t kQuadSwapchainWidth = 512;
-        constexpr uint32_t kQuadSwapchainHeight = 512;
-
         // DXGI format constants. Avoid pulling <dxgiformat.h> just for
         // these two values — the underlying types are stable.
         //   - 28: DXGI_FORMAT_R8G8B8A8_UNORM       (linear interpretation)
@@ -87,46 +86,9 @@ namespace openxr_api_layer {
         // UNORM would skip the sRGB decode and the compositor would
         // treat midtones / highlights as already-linear, blowing them
         // out. Fallback to UNORM is kept for runtimes that don't expose
-        // SRGB (rare, but possible) — in that case the procedural mask
-        // still looks correct (pure 0/0/0 RGB) but PNG photo content
-        // will look slightly over-bright.
+        // SRGB (rare, but possible).
         constexpr int64_t kFormatSRGB  = 29;
         constexpr int64_t kFormatUNORM = 28;
-
-        // Procedural mask for the quad fallback: kQuadSwapchainWidth *
-        // kQuadSwapchainHeight RGBA8 bytes. Alpha ramps from 0 inside an
-        // ellipse (horizontal visor slit) to 255 outside, with a
-        // feathered edge. RGB stays (0,0,0) everywhere so the unmasked
-        // region is opaque black.
-        void generateVisorMask(uint8_t* out) {
-            constexpr float kAx = 0.46f;
-            constexpr float kAy = 0.30f;
-            constexpr float kFeather = 0.08f;
-
-            const float cx = kQuadSwapchainWidth * 0.5f;
-            const float cy = kQuadSwapchainHeight * 0.5f;
-            const float rx = kQuadSwapchainWidth * kAx;
-            const float ry = kQuadSwapchainHeight * kAy;
-
-            for (uint32_t y = 0; y < kQuadSwapchainHeight; ++y) {
-                for (uint32_t x = 0; x < kQuadSwapchainWidth; ++x) {
-                    const float dx = (static_cast<float>(x) - cx) / rx;
-                    const float dy = (static_cast<float>(y) - cy) / ry;
-                    const float r = std::sqrt(dx * dx + dy * dy);
-
-                    float alpha;
-                    if (r <= 1.0f)                      alpha = 0.0f;
-                    else if (r >= 1.0f + kFeather)      alpha = 1.0f;
-                    else                                alpha = (r - 1.0f) / kFeather;
-
-                    const size_t idx = (static_cast<size_t>(y) * kQuadSwapchainWidth + x) * 4u;
-                    out[idx + 0] = 0;
-                    out[idx + 1] = 0;
-                    out[idx + 2] = 0;
-                    out[idx + 3] = static_cast<uint8_t>(alpha * 255.0f + 0.5f);
-                }
-            }
-        }
 
         const void* findInNextChain(const void* head, XrStructureType targetType) {
             const auto* current = reinterpret_cast<const XrBaseInStructure*>(head);
@@ -163,8 +125,9 @@ namespace openxr_api_layer {
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
 
-        // Per-frame copy source. Filled at init from either the PNG or
-        // the procedural mask, then unchanged for the session lifetime.
+        // Per-frame copy source. Filled at init from the PNG (with
+        // optional brightness multiplier), unchanged for the session
+        // lifetime.
         ComPtr<ID3D11Texture2D> stagingTexture;
         std::vector<ComPtr<ID3D11Texture2D>> swapchainImages;
 
@@ -173,11 +136,9 @@ namespace openxr_api_layer {
         // xrEndFrame.
         XrCompositionLayerQuad quadLayer{};
 
-        // Sizing strategy used at init, recorded so live-edit can
-        // recompute the quad height the same way without re-checking
-        // the PNG. usePngAspect=true means height = width * aspect;
-        // false means height = config.height_m verbatim.
-        bool usePngAspect = false;
+        // PNG aspect ratio captured at init so live-edit can recompute
+        // the quad height when the user changes width_m, without
+        // re-decoding the PNG.
         float pngAspectRatio = 1.0f;  // height / width
 
         // DXGI format selected at init, used for both the staging
@@ -294,11 +255,17 @@ namespace openxr_api_layer {
             return false;
         }
 
-        // ---- Load PNG (if present), then arm the quad. ----------------
-        // If no PNG is at the expected path (or it fails to decode), we
-        // still arm the overlay with a procedural elliptical mask, so
-        // the layer always has *something* to show when enabled.
+        // ---- Load PNG (mandatory). -----------------------------------
+        // No fallback: if the PNG is absent or fails to decode, the
+        // overlay does not arm. The build ships a default helmet_visor.png
+        // alongside the DLL so this only fails when the user explicitly
+        // deleted it.
         const std::filesystem::path pngPath = dllHome / config.textureRelativePath;
+        if (!std::filesystem::exists(pngPath)) {
+            Log(fmt::format("HelmetOverlay: no PNG at '{}', overlay will not arm\n",
+                            pngPath.string()));
+            return false;
+        }
 
         uint8_t* pngPixels = nullptr;
         int pngW = 0, pngH = 0;
@@ -306,19 +273,14 @@ namespace openxr_api_layer {
             uint8_t* p;
             ~PixelGuard() { if (p) stbi_image_free(p); }
         };
-        if (std::filesystem::exists(pngPath)) {
-            loadPngRgba8(pngPath, &pngPixels, &pngW, &pngH);
-        } else {
-            Log(fmt::format("HelmetOverlay: no PNG at '{}', will use procedural mask\n",
-                            pngPath.string()));
+        if (!loadPngRgba8(pngPath, &pngPixels, &pngW, &pngH)) {
+            return false;
         }
         PixelGuard guard{pngPixels};
 
         if (tryInitQuad(pngPixels, pngW, pngH)) {
             m_impl->mode = HelmetOverlayMode::Quad;
-            Log(fmt::format("HelmetOverlay: armed (quad {}). "
-                            "distance={:.2f}m, size={:.2f}x{:.2f}m\n",
-                            pngPixels ? "+ PNG" : "+ procedural",
+            Log(fmt::format("HelmetOverlay: armed. distance={:.2f}m, size={:.2f}x{:.2f}m\n",
                             config.distance_m,
                             m_impl->quadLayer.size.width,
                             m_impl->quadLayer.size.height));
@@ -329,19 +291,18 @@ namespace openxr_api_layer {
         return false;
     }
 
-    // --- Quad init. Accepts an optional PNG; falls back to the
-    // procedural elliptical mask when pngPixels is null. If a PNG is
-    // supplied, the swapchain + staging are sized to the PNG and the
-    // quad height in meters is derived from the PNG aspect ratio so
-    // the image is never stretched — the user controls width_m, the
-    // height follows automatically. The configured height_m is
-    // retained only when the procedural mask is used (it is square,
-    // so any aspect works).
+    // --- Quad init. The PNG is mandatory: swapchain + staging are
+    // sized to it, and the quad height in meters is derived from the
+    // PNG aspect ratio so the image is never stretched — the user
+    // controls width_m, the height follows automatically.
 
     bool HelmetOverlay::tryInitQuad(const uint8_t* pngPixels, int pngWidth, int pngHeight) {
-        const bool havePng = pngPixels != nullptr && pngWidth > 0 && pngHeight > 0;
-        const uint32_t texW = havePng ? static_cast<uint32_t>(pngWidth) : kQuadSwapchainWidth;
-        const uint32_t texH = havePng ? static_cast<uint32_t>(pngHeight) : kQuadSwapchainHeight;
+        if (!pngPixels || pngWidth <= 0 || pngHeight <= 0) {
+            Log("HelmetOverlay: tryInitQuad called with invalid PNG, aborting\n");
+            return false;
+        }
+        const uint32_t texW = static_cast<uint32_t>(pngWidth);
+        const uint32_t texH = static_cast<uint32_t>(pngHeight);
 
         XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
@@ -375,17 +336,13 @@ namespace openxr_api_layer {
             m_impl->swapchainImages[i] = images[i].texture;
         }
 
-        // Build the source pixel buffer we own and can mutate. PNG path
-        // copies stb_image's bytes; procedural path synthesises them.
-        // Either way we end up with an immutable staging texture of
-        // size texW × texH.
+        // Build the source pixel buffer we own and can mutate (so the
+        // brightness multiplier below can run without touching stb_image's
+        // internal allocation). Either way we end up with an immutable
+        // staging texture of size texW × texH.
         const size_t pixelBytes = static_cast<size_t>(texW) * texH * 4u;
         std::vector<uint8_t> uploadBytes(pixelBytes);
-        if (havePng) {
-            std::memcpy(uploadBytes.data(), pngPixels, pixelBytes);
-        } else {
-            generateVisorMask(uploadBytes.data());
-        }
+        std::memcpy(uploadBytes.data(), pngPixels, pixelBytes);
 
         // Apply brightness multiplier on the RGB channels before upload.
         // Alpha is left untouched so the visor cutout stays transparent
@@ -428,21 +385,14 @@ namespace openxr_api_layer {
             return false;
         }
 
-        // Aspect-preserving quad sizing when a PNG is used. width_m is
-        // honoured as the user's input; height_m becomes width_m * H/W.
-        // Without a PNG (procedural 1:1 mask), height_m from config is
-        // used as-is. The strategy is recorded for live-edit (see
-        // updateLiveTunables) so a width_m change recomputes height
-        // the same way without re-touching the PNG.
-        m_impl->usePngAspect = havePng;
-        m_impl->pngAspectRatio = havePng
-            ? static_cast<float>(pngHeight) / static_cast<float>(pngWidth)
-            : 1.0f;
-
+        // Aspect-preserving quad sizing. width_m is the user's input;
+        // the quad height becomes width_m * (pngH / pngW), so the
+        // image is never stretched. The ratio is recorded for
+        // live-edit (see updateLiveTunables) so a width_m change
+        // recomputes height the same way without re-touching the PNG.
+        m_impl->pngAspectRatio = static_cast<float>(pngHeight) / static_cast<float>(pngWidth);
         const float quadW = m_impl->config.width_m;
-        const float quadH = havePng
-            ? quadW * m_impl->pngAspectRatio
-            : m_impl->config.height_m;
+        const float quadH = quadW * m_impl->pngAspectRatio;
 
         m_impl->quadLayer.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
         m_impl->quadLayer.next = nullptr;
@@ -517,18 +467,13 @@ namespace openxr_api_layer {
             std::abs(m_impl->config.distance_m - newConfig.distance_m) < 1e-4f;
         const bool sameWidth =
             std::abs(m_impl->config.width_m - newConfig.width_m) < 1e-4f;
-        const bool sameHeight =
-            std::abs(m_impl->config.height_m - newConfig.height_m) < 1e-4f;
-        if (sameDistance && sameWidth && (m_impl->usePngAspect || sameHeight)) return;
+        if (sameDistance && sameWidth) return;
 
         m_impl->config.distance_m = newConfig.distance_m;
         m_impl->config.width_m    = newConfig.width_m;
-        m_impl->config.height_m   = newConfig.height_m;
 
         const float quadW = newConfig.width_m;
-        const float quadH = m_impl->usePngAspect
-            ? quadW * m_impl->pngAspectRatio
-            : newConfig.height_m;
+        const float quadH = quadW * m_impl->pngAspectRatio;
 
         m_impl->quadLayer.pose.position.z = -newConfig.distance_m;
         m_impl->quadLayer.size = {quadW, quadH};

@@ -100,12 +100,11 @@ namespace openxr_api_layer {
             << "  \"crop_bottom_percent\": 20,\n"
             << "  \"live_edit\": false,\n"
             << "  \"helmet_overlay\": {\n"
-            << "    \"_comment\": \"Draws a head-locked helmet interior on top of the game. Drop a helmet_visor.png next to the DLL to use a custom texture; otherwise a procedural elliptical mask is used. brightness multiplies RGB at load time (0.0 = black, 1.0 = pristine PNG) — useful when studio-lit photos look cramée on a bright VR HMD.\",\n"
+            << "    \"_comment\": \"Draws a head-locked helmet interior on top of the game. Requires helmet_visor.png next to the DLL — the height of the quad follows the PNG aspect ratio automatically. brightness multiplies RGB at load time (0.0 = black, 1.0 = pristine PNG) — useful when studio-lit photos look cramée on a bright VR HMD.\",\n"
             << "    \"enabled\": false,\n"
             << "    \"texture\": \"helmet_visor.png\",\n"
             << "    \"distance_m\": 0.5,\n"
             << "    \"width_m\": 0.6,\n"
-            << "    \"height_m\": 0.4,\n"
             << "    \"brightness\": 1.0\n"
             << "  }\n"
             << "}\n";
@@ -234,7 +233,6 @@ namespace openxr_api_layer {
         hc.enabled = readJsonBool(ho, "enabled", false);
         hc.distance_m = readJsonFloat(ho, "distance_m", 0.5f);
         hc.width_m = readJsonFloat(ho, "width_m", 0.6f);
-        hc.height_m = readJsonFloat(ho, "height_m", 0.4f);
         // Clamp to [0.0, 1.0]. Above 1.0 would amplify highlights past
         // the original PNG values — never useful, only blows things out.
         hc.brightness = std::max(0.0f, std::min(1.0f,
@@ -244,9 +242,9 @@ namespace openxr_api_layer {
         }
 
         Log(fmt::format(
-            "Helmet overlay config: enabled={}, distance={:.2f}m, size={:.2f}x{:.2f}m, "
+            "Helmet overlay config: enabled={}, distance={:.2f}m, width={:.2f}m, "
             "brightness={:.2f}, texture={}\n",
-            hc.enabled, hc.distance_m, hc.width_m, hc.height_m,
+            hc.enabled, hc.distance_m, hc.width_m,
             hc.brightness, hc.textureRelativePath));
 
         return hc;

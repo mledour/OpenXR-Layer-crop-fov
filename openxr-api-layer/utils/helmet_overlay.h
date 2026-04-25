@@ -51,7 +51,6 @@ namespace openxr_api_layer {
         std::string textureRelativePath = "helmet_visor.png";
         float distance_m = 0.5f;
         float width_m = 0.6f;
-        float height_m = 0.4f;
         // RGB multiplier applied to the texture at upload time. 1.0 =
         // pristine, 0.5 = half brightness, 0.0 = pure black. Useful when
         // the PNG has highlights that look natural in studio lighting
@@ -103,19 +102,20 @@ namespace openxr_api_layer {
         // Apply a live-edit reload of settings.json. Only fields safe to
         // change without rebuilding swapchain/textures are honoured:
         //   - distance_m  (re-poses the quad in view space)
-        //   - width_m     (resizes the quad; height follows PNG aspect
-        //                  if a PNG is in use, else height_m from config)
-        // Toggling enabled or replacing the PNG still requires a session
-        // restart — those would need swapchain reallocation and a fresh
-        // initialize() call. No-op if the overlay is not armed.
+        //   - width_m     (resizes the quad; height follows the PNG
+        //                  aspect ratio captured at init)
+        // Toggling enabled, replacing the PNG, or changing brightness
+        // still requires a session restart — those would need swapchain
+        // / staging-texture reallocation and a fresh initialize() call.
+        // No-op if the overlay is not armed.
         void updateLiveTunables(const HelmetOverlayConfig& newConfig);
 
         bool isArmed() const;
 
     private:
         // PNG pixels are decoded once in initialize() and handed down
-        // as an RGBA8 buffer + dims; a null pointer selects the
-        // procedural elliptical mask. Common D3D11 / format / space
+        // as an RGBA8 buffer + dims. The PNG is mandatory — overlays
+        // without a PNG asset don't arm. Common D3D11 / format / space
         // setup is done by initialize() before this is called.
         bool tryInitQuad(const uint8_t* pngPixels, int pngWidth, int pngHeight);
 
