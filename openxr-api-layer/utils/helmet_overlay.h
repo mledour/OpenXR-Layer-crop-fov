@@ -49,8 +49,28 @@ namespace openxr_api_layer {
     struct HelmetOverlayConfig {
         bool enabled = false;
         std::string textureRelativePath = "helmet_visor.png";
+
+        // distance_m has two interpretations depending on the
+        // backend the runtime can support:
+        //   - Quad (flat, fallback)     : distance from eye to the
+        //                                 quad's plane in meters.
+        //   - Cylinder (curved arc)     : radius from cylinder axis
+        //                                 (= eye position) to the
+        //                                 cylinder surface in meters.
+        // Both are "how close the helmet sits to your face". Live-tunable.
         float distance_m = 0.5f;
+
+        // Quad-mode only: width of the flat quad in meters. Height is
+        // derived from the PNG aspect ratio. Live-tunable.
         float width_m = 0.6f;
+
+        // Cylinder-mode only: total horizontal angular extent of the
+        // arc, in degrees. ~130° gives a moderate wraparound; 180°
+        // wraps from ear to ear; up to ~270° wraps further behind.
+        // Vertical extent is derived from this and the PNG aspect.
+        // Live-tunable.
+        float central_angle_deg = 130.0f;
+
         // RGB multiplier applied to the texture at upload time. 1.0 =
         // pristine, 0.5 = half brightness, 0.0 = pure black. Useful when
         // the PNG has highlights that look natural in studio lighting
@@ -115,9 +135,13 @@ namespace openxr_api_layer {
     private:
         // PNG pixels are decoded once in initialize() and handed down
         // as an RGBA8 buffer + dims. The PNG is mandatory — overlays
-        // without a PNG asset don't arm. Common D3D11 / format / space
-        // setup is done by initialize() before this is called.
-        bool tryInitQuad(const uint8_t* pngPixels, int pngWidth, int pngHeight);
+        // without a PNG asset don't arm. Both backends share the
+        // swapchain / staging texture, set up by createSwapchainFromPng();
+        // they only differ in the composition-layer struct they
+        // build (XrCompositionLayerCylinderKHR vs XrCompositionLayerQuad).
+        bool createSwapchainFromPng(const uint8_t* pngPixels, int pngWidth, int pngHeight);
+        bool tryInitCylinder(int pngWidth, int pngHeight);
+        bool tryInitQuad(int pngWidth, int pngHeight);
 
         struct Impl;
         std::unique_ptr<Impl> m_impl;
