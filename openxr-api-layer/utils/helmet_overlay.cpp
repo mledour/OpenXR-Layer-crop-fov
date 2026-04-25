@@ -49,6 +49,14 @@
 // eye; width_m is the quad's physical width; height follows the PNG
 // aspect ratio so the image is never stretched.
 //
+// The swapchain is created with XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT
+// — content is uploaded once at session start (acquire / wait /
+// CopyResource(staging→swapchain) / release, then we drop the
+// staging texture). The runtime composites that single image every
+// frame on its own; appendLayer() just hands back the cached layer
+// pointer with no per-frame texture work, which is the entire point
+// of the static-image flag.
+//
 // Earlier revisions tried a XrCompositionLayerCylinderKHR backend
 // for natural edge curvature, but neither runtime we test
 // against (Pimax OpenXR official, PimaxXR) grants the extension.
@@ -120,22 +128,20 @@ namespace openxr_api_layer {
 
     struct HelmetOverlay::Impl {
         HelmetOverlayMode mode = HelmetOverlayMode::Disabled;
-        bool loggedBypass = false;
         HelmetOverlayConfig config;
 
         OpenXrApi* api = nullptr;
         XrSession session = XR_NULL_HANDLE;
+        // Static-image swapchain — written once in createSwapchainFromPng,
+        // composited every frame by the runtime without our help. Only
+        // the handle is kept alive for the session lifetime; the
+        // staging texture and the swapchain image pointer are released
+        // at the end of the init function.
         XrSwapchain swapchain = XR_NULL_HANDLE;
         XrSpace viewSpace = XR_NULL_HANDLE;
 
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
-
-        // Per-frame copy source. Filled at init from the PNG (with
-        // optional brightness multiplier), unchanged for the session
-        // lifetime.
-        ComPtr<ID3D11Texture2D> stagingTexture;
-        std::vector<ComPtr<ID3D11Texture2D>> swapchainImages;
 
         // Composition layer kept stable between appendLayer() calls so
         // the pointer we hand back to layer.cpp remains valid through
@@ -147,10 +153,10 @@ namespace openxr_api_layer {
         // re-decoding the PNG.
         float pngAspectRatio = 1.0f;  // height / width
 
-        // DXGI format selected at init, used for both the staging
-        // texture and the XR swapchain. SRGB when the runtime exposes
-        // it, UNORM otherwise. Storing it on Impl avoids re-querying
-        // the format list during tryInitQuad().
+        // DXGI format selected at init, used for both the (transient)
+        // staging texture and the XR swapchain. SRGB when the runtime
+        // exposes it, UNORM otherwise. Storing it on Impl avoids
+        // re-querying the format list during the init helpers.
         int64_t swapchainFormat = kFormatUNORM;
         DXGI_FORMAT d3dFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     };
@@ -304,10 +310,15 @@ namespace openxr_api_layer {
     // controls width_m, the height follows automatically.
 
     // Shared swapchain + staging-texture setup used by both backends.
-    // Creates the XrSwapchain at PNG dimensions, enumerates its
-    // ID3D11Texture2D images, then builds the staging texture we
-    // CopyResource from each frame (with brightness applied). Captures
-    // the PNG aspect ratio in m_impl->pngAspectRatio for live-edit.
+    // Creates the XrSwapchain (single static image — see
+    // XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) at PNG dimensions and
+    // uploads the PNG bytes (with brightness multiplier applied) into
+    // it ONCE. After this, the runtime composites that one image every
+    // frame on its own — the layer never touches the swapchain again,
+    // so the per-frame hot path drops the acquire/wait/copy/release
+    // dance entirely. Both staging and the swapchain image pointer
+    // are released at the end of the function; only the XrSwapchain
+    // handle survives, used by m_impl->quadLayer.subImage.swapchain.
     bool HelmetOverlay::createSwapchainFromPng(const uint8_t* pngPixels, int pngWidth, int pngHeight) {
         if (!pngPixels || pngWidth <= 0 || pngHeight <= 0) {
             Log("HelmetOverlay: createSwapchainFromPng called with invalid PNG\n");
@@ -317,6 +328,10 @@ namespace openxr_api_layer {
         const uint32_t texH = static_cast<uint32_t>(pngHeight);
 
         XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        // STATIC_IMAGE_BIT: runtime allocates a single image, we acquire
+        // it once below, write it, and release it. Subsequent frames
+        // never re-acquire — the runtime keeps using the same image.
+        sci.createFlags = XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
         sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
         sci.format = m_impl->swapchainFormat;
         sci.sampleCount = 1;
@@ -330,6 +345,7 @@ namespace openxr_api_layer {
             return false;
         }
 
+        // STATIC_IMAGE_BIT guarantees imageCount == 1.
         uint32_t imageCount = 0;
         if (XR_FAILED(m_impl->api->xrEnumerateSwapchainImages(m_impl->swapchain, 0, &imageCount, nullptr)) ||
             imageCount == 0) {
@@ -343,23 +359,19 @@ namespace openxr_api_layer {
             Log("HelmetOverlay: xrEnumerateSwapchainImages (second call) failed\n");
             return false;
         }
-        m_impl->swapchainImages.resize(imageCount);
-        for (uint32_t i = 0; i < imageCount; ++i) {
-            m_impl->swapchainImages[i] = images[i].texture;
-        }
+        ID3D11Texture2D* swapchainImage = images[0].texture; // not AddRef'd, runtime owns it
 
         // Build the source pixel buffer we own and can mutate (so the
-        // brightness multiplier below can run without touching stb_image's
-        // internal allocation). Either way we end up with an immutable
-        // staging texture of size texW × texH.
+        // brightness multiplier below can run without touching
+        // stb_image's internal allocation).
         const size_t pixelBytes = static_cast<size_t>(texW) * texH * 4u;
         std::vector<uint8_t> uploadBytes(pixelBytes);
         std::memcpy(uploadBytes.data(), pngPixels, pixelBytes);
 
-        // Apply brightness multiplier on the RGB channels before upload.
-        // Alpha is left untouched so the visor cutout stays transparent
-        // even at brightness=0. Skipped when the multiplier is ~1.0
-        // (no perceptible change, saves ~50 ms on a 6K image).
+        // Apply brightness multiplier on RGB before upload. Alpha is
+        // left untouched so the visor cutout stays transparent even at
+        // brightness=0. Skipped when the multiplier is ~1.0 (saves
+        // ~50 ms on a 6K image).
         const float bright = m_impl->config.brightness;
         if (bright < 0.999f) {
             for (size_t i = 0; i + 3 < uploadBytes.size(); i += 4) {
@@ -375,8 +387,8 @@ namespace openxr_api_layer {
         td.Height = texH;
         td.MipLevels = 1;
         td.ArraySize = 1;
-        // Match the swapchain's format family so CopyResource stays a
-        // pure byte-level copy. SRGB and UNORM share the same
+        // Match the swapchain's format family so CopyResource stays
+        // a pure byte-level copy. SRGB and UNORM share the same
         // R8G8B8A8_TYPELESS family.
         td.Format = m_impl->d3dFormat;
         td.SampleDesc.Count = 1;
@@ -390,12 +402,42 @@ namespace openxr_api_layer {
         sd.SysMemPitch = texW * 4u;
         sd.SysMemSlicePitch = 0;
 
-        const HRESULT hr = m_impl->device->CreateTexture2D(&td, &sd, &m_impl->stagingTexture);
+        ComPtr<ID3D11Texture2D> staging;
+        const HRESULT hr = m_impl->device->CreateTexture2D(&td, &sd, &staging);
         if (FAILED(hr)) {
             Log(fmt::format("HelmetOverlay: CreateTexture2D(staging) failed, hr=0x{:08X}\n",
                             static_cast<uint32_t>(hr)));
             return false;
         }
+
+        // ---- One-shot fill: acquire → wait → copy → release ----------
+        // Per spec, a STATIC_IMAGE swapchain image must be acquired
+        // exactly once. We do it here and never again.
+        XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        uint32_t imageIndex = 0;
+        if (XR_FAILED(m_impl->api->xrAcquireSwapchainImage(m_impl->swapchain, &ai, &imageIndex))) {
+            Log("HelmetOverlay: one-shot xrAcquireSwapchainImage failed\n");
+            return false;
+        }
+        XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        wi.timeout = XR_INFINITE_DURATION;
+        if (XR_FAILED(m_impl->api->xrWaitSwapchainImage(m_impl->swapchain, &wi))) {
+            // Try to release what we acquired so the runtime doesn't
+            // wedge on a phantom in-flight image.
+            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            m_impl->api->xrReleaseSwapchainImage(m_impl->swapchain, &ri);
+            Log("HelmetOverlay: one-shot xrWaitSwapchainImage failed\n");
+            return false;
+        }
+        m_impl->context->CopyResource(swapchainImage, staging.Get());
+        XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        if (XR_FAILED(m_impl->api->xrReleaseSwapchainImage(m_impl->swapchain, &ri))) {
+            Log("HelmetOverlay: one-shot xrReleaseSwapchainImage failed\n");
+            return false;
+        }
+        // staging goes out of scope here → ComPtr releases the GPU
+        // texture. We never need it again because the runtime now
+        // owns the only copy we care about (the static swapchain image).
 
         // PNG aspect ratio recorded so live-edit can recompute the
         // quad height when the user changes width_m.
@@ -431,42 +473,12 @@ namespace openxr_api_layer {
                                     const XrCompositionLayerBaseHeader** outLayer) {
         if (!m_impl || !outLayer) return false;
         if (m_impl->mode == HelmetOverlayMode::Disabled) return false;
-        if (!m_impl->api || m_impl->swapchain == XR_NULL_HANDLE) return false;
+        if (m_impl->swapchain == XR_NULL_HANDLE) return false;
 
-        // Per-frame CopyResource sandwiched between acquire/wait and
-        // release.
-        uint32_t imageIndex = 0;
-        XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-        if (XR_FAILED(m_impl->api->xrAcquireSwapchainImage(m_impl->swapchain, &ai, &imageIndex))) {
-            if (!m_impl->loggedBypass) {
-                ErrorLog("HelmetOverlay: xrAcquireSwapchainImage failed, disarming overlay\n");
-                m_impl->loggedBypass = true;
-            }
-            m_impl->mode = HelmetOverlayMode::Disabled;
-            return false;
-        }
-
-        XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-        wi.timeout = XR_INFINITE_DURATION;
-        if (XR_FAILED(m_impl->api->xrWaitSwapchainImage(m_impl->swapchain, &wi))) {
-            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            m_impl->api->xrReleaseSwapchainImage(m_impl->swapchain, &ri);
-            return false;
-        }
-
-        if (imageIndex < m_impl->swapchainImages.size() &&
-            m_impl->swapchainImages[imageIndex] &&
-            m_impl->stagingTexture &&
-            m_impl->context) {
-            m_impl->context->CopyResource(m_impl->swapchainImages[imageIndex].Get(),
-                                          m_impl->stagingTexture.Get());
-        }
-
-        XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        if (XR_FAILED(m_impl->api->xrReleaseSwapchainImage(m_impl->swapchain, &ri))) {
-            return false;
-        }
-
+        // The static-image swapchain was filled once at init (see
+        // createSwapchainFromPng). The runtime composites that single
+        // image every frame on its own — we just hand back the layer
+        // pointer. No acquire / wait / release / CopyResource here.
         *outLayer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&m_impl->quadLayer);
         return true;
     }
@@ -506,8 +518,6 @@ namespace openxr_api_layer {
                 m_impl->swapchain = XR_NULL_HANDLE;
             }
         }
-        m_impl->swapchainImages.clear();
-        m_impl->stagingTexture.Reset();
         m_impl->context.Reset();
         m_impl->device.Reset();
         m_impl->session = XR_NULL_HANDLE;
