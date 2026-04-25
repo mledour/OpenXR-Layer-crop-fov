@@ -1,10 +1,18 @@
 # XR_APILAYER_MLEDOUR_fov_crop
 
-An OpenXR API layer for Windows that reduces GPU load by narrowing the
-effective field of view and swapchain resolution. Your game renders
-fewer pixels per frame, so every frame is cheaper and the headroom goes
-into higher FPS — at the cost of slightly narrower peripheral vision,
-visible as black edges in the headset.
+An OpenXR API layer for Windows with two opt-in features:
+
+1. **FOV crop** — narrows the effective field of view and swapchain
+   resolution. Your game renders fewer pixels per frame, every frame
+   is cheaper and the headroom goes into higher FPS — at the cost of
+   slightly narrower peripheral vision, visible as black edges in
+   the headset.
+2. **Helmet overlay** — composites a head-locked PNG (motorcycle /
+   karting / racing helmet interior, your choice) on top of the
+   game's image, with a transparent visor cutout so the user looks
+   "out" through it. Adds immersion to sims that don't model a full
+   helmet themselves. Optimised to ~+1 % GPU cost when enabled,
+   strictly 0 cost when disabled.
 
 Works transparently with any OpenXR application and runtime. No game or
 headset modification required.
@@ -94,18 +102,26 @@ have their own file.
   "crop_right_percent": 10,
   "crop_top_percent": 15,
   "crop_bottom_percent": 20,
-  "live_edit": false
+  "live_edit": false,
+  "helmet_overlay": {
+    "enabled": false,
+    "texture": "helmet_visor.png",
+    "distance_m": 0.5,
+    "width_m": 0.6,
+    "brightness": 1.0
+  }
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | Master switch — the layer is **opt-in** and a no-op until you flip this to `true`. |
+| `enabled` | bool | `false` | Master switch for the FOV crop — the crop is **opt-in** and a no-op until you flip this to `true`. The helmet overlay below has its own `enabled` flag and runs independently. |
 | `crop_left_percent` | float | `10` | Percentage of the image covered by the black bar on the left edge (0-50). |
 | `crop_right_percent` | float | `10` | Percentage of the image covered by the black bar on the right edge (0-50). |
 | `crop_top_percent` | float | `15` | Percentage of the image covered by the black bar on the top edge (0-50). |
 | `crop_bottom_percent` | float | `20` | Percentage of the image covered by the black bar on the bottom edge (0-50). |
-| `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Set back to false once you're happy. |
+| `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Picks up changes to crop percentages and to `helmet_overlay.distance_m` / `helmet_overlay.width_m`. Set back to false once you're happy. |
+| `helmet_overlay` | object | (see below) | Helmet overlay configuration. See [Helmet overlay](#helmet-overlay). |
 
 ### How the percentages are interpreted
 
@@ -128,10 +144,120 @@ The layer does the math in tan-space (the pixel ↔ angle mapping of
 perspective projection), so the bar lands at the configured percentage
 to the pixel — regardless of the HMD's native FOV or eye offset.
 
-**To activate the layer**, flip `"enabled": false` to `"enabled": true`
+**To activate the FOV crop**, flip `"enabled": false` to `"enabled": true`
 either:
 - in `settings.json` — applies to every **future** game you launch, or
 - in a specific `<app>_settings.json` — applies to that game only.
+
+The helmet overlay is independent and follows the same rule with
+`helmet_overlay.enabled`.
+
+## Helmet overlay
+
+Composites a head-locked PNG of a helmet interior on top of the
+game's image. The PNG's alpha channel decides what the player sees
+through and what they don't — the typical content is "opaque foam
+all around, transparent rectangle in front of the eyes for the
+visor", which gives the perception of being inside a real helmet.
+
+A starter `helmet_visor.png` (4:3, 2048×1536) ships with the
+installer next to the DLL. Replace it with your own image to use a
+different helmet skin (Stilo, Arai, karting, etc.) — the layer
+picks up whichever PNG is at the path on next session start.
+
+### Parameters
+
+```json
+"helmet_overlay": {
+  "enabled": false,
+  "texture": "helmet_visor.png",
+  "distance_m": 0.5,
+  "width_m": 0.6,
+  "brightness": 1.0
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Master switch for the helmet overlay. |
+| `texture` | string | `helmet_visor.png` | Filename of the PNG to load, resolved relative to the DLL's install directory. Change this only if you want to switch between several PNGs you keep side by side. |
+| `distance_m` | float | `0.5` | Distance from the eye to the quad's plane, in meters. Live-tunable. Try `0.15` for "right against the face" (real helmet feel), `0.3` for "close but not claustrophobic", `0.5` for "TV-in-front-of-you". |
+| `width_m` | float | `0.6` | Physical width of the quad in meters. Height is derived from the PNG's aspect so the image is never stretched. Live-tunable. With `distance_m=0.15`, `width_m=0.6` covers ~127° horizontal — fits any HMD. With `distance_m=0.5`, you'll need `width_m=1.5` to get the same coverage. |
+| `brightness` | float | `1.0` | RGB multiplier applied at load time, clamped to `[0.0, 1.0]`. `1.0` = pristine PNG, `0.5` = half luminance, `0.0` = pure black. Useful when studio-lit photos look cramée on a bright VR HMD in a dim cockpit. Alpha is never multiplied so the visor cutout stays transparent at any value. **Not** live-tunable — changing it requires a session restart (the texture is uploaded once at session start). |
+
+### Custom PNG: requirements
+
+A drop-in replacement for `helmet_visor.png` must be:
+
+- **PNG with an alpha channel (RGBA)**. JPG won't work — no alpha.
+  Indexed-color PNGs are converted on load but it's safer to stay in
+  full RGBA.
+- **Visor opening at `alpha = 0`** (fully transparent). Anywhere else
+  the player will see the texture instead of the game world.
+- **Foam / structure at `alpha = 255`** (fully opaque) so the
+  periphery occludes the game.
+- **Aspect ratio that matches your `width_m`** preference. The layer
+  derives the quad's height from the PNG aspect, so a 3:2 PNG
+  (e.g. 2048×1365) at `width_m=0.6` gives a quad of `0.6×0.4 m`. A
+  2:1 PNG would give `0.6×0.3 m`.
+- **Resolution sweet spot is ~2K wide.** 1024 wide → visible
+  pixelation on dense HMDs (Crystal / Quest 3). 2048-3072 wide →
+  optimal. 4K+ → measurable VRAM and GPU bandwidth cost without
+  visible benefit (we benched a 13× regression at 8K vs 2K with the
+  same PNG content).
+
+### Custom PNG: GIMP procedure
+
+The fastest way to produce a working PNG from any helmet photo /
+render:
+
+1. **Open** the source in GIMP. `File → Open`.
+2. **Add an alpha channel**: `Layer → Transparency → Add Alpha
+   Channel`. (If the menu entry is greyed out, the image already
+   has alpha — proceed.) Confirm `Image → Mode → RGB`.
+3. **Cut the visor**:
+   - **Quick path**: `Tools → Selection Tools → By Color` (Shift+O).
+     Click in the visor. Adjust `Threshold` until the marching ants
+     hug the visor edge cleanly.
+   - **Precise path**: `Tools → Paths` (B). Click 8-12 anchor points
+     around the visor boundary, drag at each click to shape Bézier
+     handles for the curves. Close the path with Ctrl+click on the
+     first anchor. In the Paths tab on the right, click the "Path to
+     Selection" button.
+4. **Soften the edge**: `Select → Feather → 6 px → OK`. (Adjust to
+   3 px for a sharper cut, 10 px for a softer one.)
+5. **Cut**: `Edit → Clear` (or just hit Delete). The visor area
+   becomes a checkerboard.
+6. **Deselect**: `Select → None` (`Shift+Ctrl+A`).
+7. **Export** (not Save, which produces a `.xcf`): `File → Export As
+   → helmet_visor.png`. Default PNG settings are fine.
+
+Drop the resulting `helmet_visor.png` into the layer's install
+directory (overwriting the starter one) and restart the game.
+
+### Optional: apparent curvature via `tools/cylinder_warp.py`
+
+A real helmet's foam shell wraps around your face — flat-quad
+rendering is geometrically wrong at the edges of the texture. The
+"right" fix is `XR_KHR_composition_layer_cylinder`, but Pimax
+OpenXR (official) and PimaxXR (mbucchia) both don't expose it, so
+the layer always renders a flat quad.
+
+The work-around is to bake the cylinder projection into the asset
+itself. The repo ships [`tools/cylinder_warp.py`](./tools/README.md)
+for that:
+
+```bash
+pip install pillow
+python tools/cylinder_warp.py source.png helmet_visor.png --angle 130
+```
+
+The output drops in at the layer's install path the same way as a
+hand-cut PNG. Try `--angle 90` for subtle curvature, `130` for
+moderate (default), `180` for strong wraparound. The DLL renders
+the result on a flat quad and the user's eye reconstructs the
+apparent cylindrical mapping. Works on every OpenXR runtime since
+no extension is needed.
 
 ## License
 
