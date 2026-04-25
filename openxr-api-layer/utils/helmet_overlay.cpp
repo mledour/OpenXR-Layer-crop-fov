@@ -77,10 +77,21 @@ namespace openxr_api_layer {
         constexpr uint32_t kQuadSwapchainWidth = 512;
         constexpr uint32_t kQuadSwapchainHeight = 512;
 
-        // DXGI_FORMAT_R8G8B8A8_UNORM = 28. We ship straight alpha, so
-        // using an sRGB target would double-apply gamma to the black
-        // mask. Both paths use this format.
-        constexpr int64_t kPreferredFormat = 28;
+        // DXGI format constants. Avoid pulling <dxgiformat.h> just for
+        // these two values — the underlying types are stable.
+        //   - 28: DXGI_FORMAT_R8G8B8A8_UNORM       (linear interpretation)
+        //   - 29: DXGI_FORMAT_R8G8B8A8_UNORM_SRGB  (sRGB-decoded on sample)
+        //
+        // We prefer SRGB because PNG photo content is stored in sRGB
+        // space, and the OpenXR compositor blends in linear space. Using
+        // UNORM would skip the sRGB decode and the compositor would
+        // treat midtones / highlights as already-linear, blowing them
+        // out. Fallback to UNORM is kept for runtimes that don't expose
+        // SRGB (rare, but possible) — in that case the procedural mask
+        // still looks correct (pure 0/0/0 RGB) but PNG photo content
+        // will look slightly over-bright.
+        constexpr int64_t kFormatSRGB  = 29;
+        constexpr int64_t kFormatUNORM = 28;
 
         // Procedural mask for the quad fallback: kQuadSwapchainWidth *
         // kQuadSwapchainHeight RGBA8 bytes. Alpha ramps from 0 inside an
@@ -168,6 +179,13 @@ namespace openxr_api_layer {
         // false means height = config.height_m verbatim.
         bool usePngAspect = false;
         float pngAspectRatio = 1.0f;  // height / width
+
+        // DXGI format selected at init, used for both the staging
+        // texture and the XR swapchain. SRGB when the runtime exposes
+        // it, UNORM otherwise. Storing it on Impl avoids re-querying
+        // the format list during tryInitQuad().
+        int64_t swapchainFormat = kFormatUNORM;
+        DXGI_FORMAT d3dFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     };
 
     HelmetOverlay::HelmetOverlay() : m_impl(std::make_unique<Impl>()) {}
@@ -248,9 +266,21 @@ namespace openxr_api_layer {
             Log("HelmetOverlay: xrEnumerateSwapchainFormats failed on second call\n");
             return false;
         }
-        if (!listHasFormat(formats, kPreferredFormat)) {
-            Log(fmt::format("HelmetOverlay: runtime does not expose preferred format ({}), bypassing\n",
-                            kPreferredFormat));
+
+        // Prefer SRGB so PNG sRGB content gamma-decodes correctly in the
+        // compositor. UNORM is the fallback for runtimes that only
+        // expose linear formats.
+        if (listHasFormat(formats, kFormatSRGB)) {
+            m_impl->swapchainFormat = kFormatSRGB;
+            m_impl->d3dFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            Log("HelmetOverlay: using R8G8B8A8_UNORM_SRGB swapchain (correct gamma for PNG content)\n");
+        } else if (listHasFormat(formats, kFormatUNORM)) {
+            m_impl->swapchainFormat = kFormatUNORM;
+            m_impl->d3dFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            Log("HelmetOverlay: SRGB unavailable, falling back to R8G8B8A8_UNORM "
+                "(PNG photo content may appear slightly over-bright)\n");
+        } else {
+            Log("HelmetOverlay: runtime exposes neither RGBA8 UNORM nor SRGB, bypassing\n");
             return false;
         }
 
@@ -315,7 +345,7 @@ namespace openxr_api_layer {
 
         XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-        sci.format = kPreferredFormat;
+        sci.format = m_impl->swapchainFormat;
         sci.sampleCount = 1;
         sci.width = texW;
         sci.height = texH;
@@ -361,7 +391,10 @@ namespace openxr_api_layer {
         td.Height = texH;
         td.MipLevels = 1;
         td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        // Match the swapchain's format family so CopyResource stays a
+        // pure byte-level copy. SRGB and UNORM share the same
+        // R8G8B8A8_TYPELESS family.
+        td.Format = m_impl->d3dFormat;
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_IMMUTABLE;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
