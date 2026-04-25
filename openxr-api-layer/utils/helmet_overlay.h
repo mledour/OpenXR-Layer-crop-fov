@@ -50,20 +50,16 @@ namespace openxr_api_layer {
         bool enabled = false;
         std::string textureRelativePath = "helmet_visor.png";
 
-        // distance_m: how close the helmet sits to the user's face.
-        //   - Quad (flat, the path Pimax actually uses) : distance
-        //     from eye to the quad's plane, in meters.
-        //   - Cylinder (curved, only on runtimes that grant the KHR
-        //     extension)                              : radius from
-        //     the cylinder axis (= eye position) to the surface.
-        // Live-tunable in both modes.
+        // distance_m: distance from the eye to the quad's plane, in
+        // meters. Live-tunable.
         float distance_m = 0.5f;
 
-        // Quad-mode only: width of the flat quad in meters. Height
-        // is derived from the PNG aspect ratio. Live-tunable.
-        // (Cylinder mode hardcodes a 130° horizontal span, since the
-        // user-facing knob would be dead on every runtime we test —
-        // see tools/cylinder_warp.py for offline curvature instead.)
+        // width_m: physical width of the quad in meters. Height is
+        // derived from the PNG aspect ratio so the image is never
+        // stretched. Live-tunable.
+        // For an apparent helmet curvature, pre-warp the PNG offline
+        // with tools/cylinder_warp.py — the layer renders a flat
+        // quad either way.
         float width_m = 0.6f;
 
         // RGB multiplier applied to the texture at upload time. 1.0 =
@@ -114,8 +110,8 @@ namespace openxr_api_layer {
         bool appendLayer(XrTime displayTime,
                          const XrCompositionLayerBaseHeader** outLayer);
 
-        // Apply a live-edit reload of settings.json. Only fields safe to
-        // change without rebuilding swapchain/textures are honoured:
+        // Apply a live-edit reload of settings.json. Only fields safe
+        // to change without rebuilding swapchain/textures are honoured:
         //   - distance_m  (re-poses the quad in view space)
         //   - width_m     (resizes the quad; height follows the PNG
         //                  aspect ratio captured at init)
@@ -130,12 +126,11 @@ namespace openxr_api_layer {
     private:
         // PNG pixels are decoded once in initialize() and handed down
         // as an RGBA8 buffer + dims. The PNG is mandatory — overlays
-        // without a PNG asset don't arm. Both backends share the
-        // swapchain / staging texture, set up by createSwapchainFromPng();
-        // they only differ in the composition-layer struct they
-        // build (XrCompositionLayerCylinderKHR vs XrCompositionLayerQuad).
+        // without a PNG asset don't arm. createSwapchainFromPng()
+        // sets up the XrSwapchain + the staging texture (with the
+        // brightness multiplier baked in); tryInitQuad() then builds
+        // the XrCompositionLayerQuad on top of those.
         bool createSwapchainFromPng(const uint8_t* pngPixels, int pngWidth, int pngHeight);
-        bool tryInitCylinder(int pngWidth, int pngHeight);
         bool tryInitQuad(int pngWidth, int pngHeight);
 
         struct Impl;

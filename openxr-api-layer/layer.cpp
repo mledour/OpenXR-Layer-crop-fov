@@ -44,14 +44,7 @@ namespace openxr_api_layer {
 
     // Initialize these vectors with arrays of extensions to block and implicitly request for the instance.
     const std::vector<std::string> blockedExtensions = {};
-    // Implicit request for the cylinder composition extension. If the
-    // runtime exposes it, the helmet overlay arms in cylinder mode
-    // (curved-arc projection — better edge naturalness than a flat
-    // quad). If not, the framework logs "Cannot satisfy implicit
-    // extension request" and the overlay falls back to quad mode.
-    const std::vector<std::string> implicitExtensions = {
-        XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME
-    };
+    const std::vector<std::string> implicitExtensions = {};
 
     // CropConfig, clampFactor, scaleSwapchainExtents, and narrowFov live in
     // <utils/crop_math.h> so they can be unit-tested from a standalone binary

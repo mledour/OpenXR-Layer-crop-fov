@@ -7,11 +7,11 @@ DLL and the layer's settings.json don't depend on them.
 ## `cylinder_warp.py`
 
 Pre-warps a flat helmet PNG so a flat `XrCompositionLayerQuad` shows
-it with the apparent geometry of a cylindrical layer. Useful because
-the OpenXR runtimes we test against (Pimax OpenXR, mbucchia's
-PimaxXR) don't expose `XR_KHR_composition_layer_cylinder`, but the
-visual effect of curvature can be baked into the asset itself with
-zero changes on the DLL side.
+it with the apparent geometry of a cylindrical layer. The layer DLL
+only ever renders a flat quad — runtime cylinder support was removed
+because the runtimes we target (Pimax OpenXR, mbucchia's PimaxXR)
+don't expose `XR_KHR_composition_layer_cylinder` anyway. Instead,
+the curvature is baked into the asset offline with this script.
 
 ```bash
 pip install pillow

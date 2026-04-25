@@ -44,28 +44,18 @@
 
 // D3D11 helmet-interior overlay.
 //
-// Renders the user's helmet_visor.png as a head-locked composition
-// layer. Two backends, picked at session init:
+// Renders the user's helmet_visor.png as a head-locked
+// XrCompositionLayerQuad. distance_m is the plane distance from the
+// eye; width_m is the quad's physical width; height follows the PNG
+// aspect ratio so the image is never stretched.
 //
-//   1. Cylinder. Requires XR_KHR_composition_layer_cylinder. The
-//      texture is mapped onto an arc of a cylinder centered on the
-//      viewer's eye, giving real perspective curvature in hardware.
-//      distance_m is the cylinder radius; the horizontal arc is
-//      hardcoded at 130° (Pimax OpenXR / PimaxXR don't grant the
-//      extension, so a user-tunable knob would sit unused on the
-//      runtimes we test against).
-//
-//   2. Quad (fallback). Plain XrCompositionLayerQuad, flat plane in
-//      front of the viewer. distance_m is the plane distance; width_m
-//      is the quad's physical width. Height in both modes follows
-//      the PNG aspect ratio.
-//
-// When the runtime can only give us a flat quad and the user wants
-// the visual feel of curvature anyway, the answer is offline: pre-
-// warp the PNG with tools/cylinder_warp.py before dropping it next
-// to the DLL. The math (atan-based 1-D horizontal warp) reconstructs
-// the cylinder projection in the asset itself, the DLL stays a flat
-// quad, and it works on every runtime.
+// Earlier revisions tried a XrCompositionLayerCylinderKHR backend
+// for natural edge curvature, but neither runtime we test
+// against (Pimax OpenXR official, PimaxXR) grants the extension.
+// The kept-simple answer is to pre-warp the PNG offline with
+// tools/cylinder_warp.py — the atan-based 1-D horizontal warp
+// reconstructs the cylinder projection in the asset itself, the
+// DLL stays a flat quad, and the result works on every runtime.
 //
 // The PNG is mandatory: if no helmet_visor.png is found at
 // dllHome / config.textureRelativePath, the overlay does not arm.
@@ -121,23 +111,11 @@ namespace openxr_api_layer {
             return false;
         }
 
-        // True iff XR_KHR_composition_layer_cylinder is in the list of
-        // extensions the framework actually granted us. Used to choose
-        // between cylinder (preferred) and quad (fallback) at session
-        // init.
-        bool isCylinderGranted(const std::vector<std::string>& granted) {
-            for (const auto& e : granted) {
-                if (e == XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME) return true;
-            }
-            return false;
-        }
-
     } // namespace
 
     enum class HelmetOverlayMode {
         Disabled,
         Quad,
-        Cylinder,
     };
 
     struct HelmetOverlay::Impl {
@@ -159,12 +137,10 @@ namespace openxr_api_layer {
         ComPtr<ID3D11Texture2D> stagingTexture;
         std::vector<ComPtr<ID3D11Texture2D>> swapchainImages;
 
-        // Composition layers kept stable between appendLayer() calls
-        // so the pointer we hand back to layer.cpp remains valid
-        // through xrEndFrame. Exactly one is used per session,
-        // depending on mode.
+        // Composition layer kept stable between appendLayer() calls so
+        // the pointer we hand back to layer.cpp remains valid through
+        // xrEndFrame.
         XrCompositionLayerQuad quadLayer{};
-        XrCompositionLayerCylinderKHR cylinderLayer{};
 
         // PNG aspect ratio captured at init so live-edit can recompute
         // the quad height when the user changes width_m, without
@@ -308,41 +284,18 @@ namespace openxr_api_layer {
         }
         PixelGuard guard{pngPixels};
 
-        // Common: build the swapchain + staging texture from the PNG.
-        // Done once whether we end up in cylinder or quad mode.
-        if (!createSwapchainFromPng(pngPixels, pngW, pngH)) {
-            Log("HelmetOverlay: shared swapchain init failed, staying inert\n");
+        if (!createSwapchainFromPng(pngPixels, pngW, pngH) ||
+            !tryInitQuad(pngW, pngH)) {
+            Log("HelmetOverlay: quad init failed, staying inert\n");
             return false;
         }
 
-        // Cylinder is the preferred backend — projects the texture
-        // onto an arc, giving naturally curving helmet edges in the
-        // user's peripheral vision. Quad is the flat fallback.
-        const bool cylinderGranted = isCylinderGranted(api->GetGrantedExtensions());
-        if (cylinderGranted && tryInitCylinder(pngW, pngH)) {
-            m_impl->mode = HelmetOverlayMode::Cylinder;
-            Log(fmt::format(
-                "HelmetOverlay: armed (cylinder). radius={:.2f}m, aspect={:.3f}\n",
-                m_impl->cylinderLayer.radius,
-                m_impl->cylinderLayer.aspectRatio));
-            return true;
-        }
-        if (!cylinderGranted) {
-            Log("HelmetOverlay: runtime does not support XR_KHR_composition_layer_cylinder, "
-                "falling back to quad\n");
-        }
-
-        if (tryInitQuad(pngW, pngH)) {
-            m_impl->mode = HelmetOverlayMode::Quad;
-            Log(fmt::format("HelmetOverlay: armed (quad). distance={:.2f}m, size={:.2f}x{:.2f}m\n",
-                            config.distance_m,
-                            m_impl->quadLayer.size.width,
-                            m_impl->quadLayer.size.height));
-            return true;
-        }
-
-        Log("HelmetOverlay: both quad and cylinder init failed, staying inert\n");
-        return false;
+        m_impl->mode = HelmetOverlayMode::Quad;
+        Log(fmt::format("HelmetOverlay: armed. distance={:.2f}m, size={:.2f}x{:.2f}m\n",
+                        config.distance_m,
+                        m_impl->quadLayer.size.width,
+                        m_impl->quadLayer.size.height));
+        return true;
     }
 
     // --- Quad init. The PNG is mandatory: swapchain + staging are
@@ -444,8 +397,8 @@ namespace openxr_api_layer {
             return false;
         }
 
-        // Aspect ratio recorded for live-edit / cylinder vertical
-        // extent derivation.
+        // PNG aspect ratio recorded so live-edit can recompute the
+        // quad height when the user changes width_m.
         m_impl->pngAspectRatio = static_cast<float>(pngHeight) / static_cast<float>(pngWidth);
         return true;
     }
@@ -468,45 +421,6 @@ namespace openxr_api_layer {
         m_impl->quadLayer.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
         m_impl->quadLayer.pose.position = {0.0f, 0.0f, -m_impl->config.distance_m};
         m_impl->quadLayer.size = {quadW, quadH};
-
-        return true;
-    }
-
-    // --- Cylinder backend. Curved arc head-locked, radius = distance_m.
-    // Horizontal arc is hardcoded to 130° (a moderate wraparound that
-    // looks like a real helmet); we deliberately don't expose it as a
-    // user-facing knob because Pimax OpenXR + PimaxXR don't grant the
-    // KHR_composition_layer_cylinder extension at all, so any user
-    // tuning would sit unused. Runtimes that *do* grant the extension
-    // (SteamVR / Quest / WMR / Varjo) get a fixed 130° arc; rebuild
-    // with kCylinderArcDeg below changed if you need to override.
-    // Per the KHR spec: visible vertical extent of the surface is
-    //   height_world = (radius * centralAngle) / aspectRatio
-    // where aspectRatio = pngWidth / pngHeight.
-    bool HelmetOverlay::tryInitCylinder(int pngWidth, int pngHeight) {
-        constexpr float kPi = 3.14159265358979323846f;
-        constexpr float kCylinderArcDeg = 130.0f;
-        const float radius = m_impl->config.distance_m;
-        const float centralAngle = kCylinderArcDeg * kPi / 180.0f;
-        const float aspectRatio = static_cast<float>(pngWidth) / static_cast<float>(pngHeight);
-
-        m_impl->cylinderLayer.type = XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR;
-        m_impl->cylinderLayer.next = nullptr;
-        m_impl->cylinderLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
-                                           XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
-        m_impl->cylinderLayer.space = m_impl->viewSpace;
-        m_impl->cylinderLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-        m_impl->cylinderLayer.subImage.swapchain = m_impl->swapchain;
-        m_impl->cylinderLayer.subImage.imageRect.offset = {0, 0};
-        m_impl->cylinderLayer.subImage.imageRect.extent = {pngWidth, pngHeight};
-        m_impl->cylinderLayer.subImage.imageArrayIndex = 0;
-        // pose.position = origin: the cylinder axis passes through the
-        // viewer's eye, so the texture wraps around their head.
-        m_impl->cylinderLayer.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
-        m_impl->cylinderLayer.pose.position = {0.0f, 0.0f, 0.0f};
-        m_impl->cylinderLayer.radius = radius;
-        m_impl->cylinderLayer.centralAngle = centralAngle;
-        m_impl->cylinderLayer.aspectRatio = aspectRatio;
 
         return true;
     }
@@ -553,20 +467,12 @@ namespace openxr_api_layer {
             return false;
         }
 
-        // Hand back whichever composition-layer struct matches the
-        // backend selected at init. Both are reinterpretable to
-        // XrCompositionLayerBaseHeader because the spec mandates the
-        // first two fields be {type, next}.
-        if (m_impl->mode == HelmetOverlayMode::Cylinder) {
-            *outLayer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&m_impl->cylinderLayer);
-        } else {
-            *outLayer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&m_impl->quadLayer);
-        }
+        *outLayer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&m_impl->quadLayer);
         return true;
     }
 
     void HelmetOverlay::updateLiveTunables(const HelmetOverlayConfig& newConfig) {
-        if (!m_impl) return;
+        if (!m_impl || m_impl->mode != HelmetOverlayMode::Quad) return;
 
         // Bail out cheaply if nothing changed (avoids spamming the log
         // when the file is touched but the helmet block is identical).
@@ -574,31 +480,18 @@ namespace openxr_api_layer {
             std::abs(m_impl->config.distance_m - newConfig.distance_m) < 1e-4f;
         const bool sameWidth =
             std::abs(m_impl->config.width_m - newConfig.width_m) < 1e-4f;
+        if (sameDistance && sameWidth) return;
 
-        if (m_impl->mode == HelmetOverlayMode::Quad) {
-            if (sameDistance && sameWidth) return;
+        m_impl->config.distance_m = newConfig.distance_m;
+        m_impl->config.width_m    = newConfig.width_m;
 
-            m_impl->config.distance_m = newConfig.distance_m;
-            m_impl->config.width_m    = newConfig.width_m;
+        const float quadW = newConfig.width_m;
+        const float quadH = quadW * m_impl->pngAspectRatio;
+        m_impl->quadLayer.pose.position.z = -newConfig.distance_m;
+        m_impl->quadLayer.size = {quadW, quadH};
 
-            const float quadW = newConfig.width_m;
-            const float quadH = quadW * m_impl->pngAspectRatio;
-            m_impl->quadLayer.pose.position.z = -newConfig.distance_m;
-            m_impl->quadLayer.size = {quadW, quadH};
-
-            Log(fmt::format("HelmetOverlay: live-tuned (quad) distance={:.2f}m, size={:.2f}x{:.2f}m\n",
-                            newConfig.distance_m, quadW, quadH));
-        } else if (m_impl->mode == HelmetOverlayMode::Cylinder) {
-            // Cylinder: only distance_m (radius) is live-tunable. The
-            // central angle is hardcoded at init (see tryInitCylinder).
-            if (sameDistance) return;
-
-            m_impl->config.distance_m = newConfig.distance_m;
-            m_impl->cylinderLayer.radius = newConfig.distance_m;
-
-            Log(fmt::format("HelmetOverlay: live-tuned (cylinder) radius={:.2f}m\n",
-                            newConfig.distance_m));
-        }
+        Log(fmt::format("HelmetOverlay: live-tuned distance={:.2f}m, size={:.2f}x{:.2f}m\n",
+                        newConfig.distance_m, quadW, quadH));
     }
 
     void HelmetOverlay::shutdown() {
