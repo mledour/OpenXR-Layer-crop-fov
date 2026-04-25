@@ -92,6 +92,16 @@ namespace openxr_api_layer {
         bool appendLayer(XrTime displayTime,
                          const XrCompositionLayerBaseHeader** outLayer);
 
+        // Apply a live-edit reload of settings.json. Only fields safe to
+        // change without rebuilding swapchain/textures are honoured:
+        //   - distance_m  (re-poses the quad in view space)
+        //   - width_m     (resizes the quad; height follows PNG aspect
+        //                  if a PNG is in use, else height_m from config)
+        // Toggling enabled or replacing the PNG still requires a session
+        // restart — those would need swapchain reallocation and a fresh
+        // initialize() call. No-op if the overlay is not armed.
+        void updateLiveTunables(const HelmetOverlayConfig& newConfig);
+
         bool isArmed() const;
 
     private:

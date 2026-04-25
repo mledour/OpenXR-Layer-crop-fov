@@ -161,6 +161,13 @@ namespace openxr_api_layer {
         // the pointer we hand back to layer.cpp remains valid through
         // xrEndFrame.
         XrCompositionLayerQuad quadLayer{};
+
+        // Sizing strategy used at init, recorded so live-edit can
+        // recompute the quad height the same way without re-checking
+        // the PNG. usePngAspect=true means height = width * aspect;
+        // false means height = config.height_m verbatim.
+        bool usePngAspect = false;
+        float pngAspectRatio = 1.0f;  // height / width
     };
 
     HelmetOverlay::HelmetOverlay() : m_impl(std::make_unique<Impl>()) {}
@@ -376,10 +383,17 @@ namespace openxr_api_layer {
         // Aspect-preserving quad sizing when a PNG is used. width_m is
         // honoured as the user's input; height_m becomes width_m * H/W.
         // Without a PNG (procedural 1:1 mask), height_m from config is
-        // used as-is.
+        // used as-is. The strategy is recorded for live-edit (see
+        // updateLiveTunables) so a width_m change recomputes height
+        // the same way without re-touching the PNG.
+        m_impl->usePngAspect = havePng;
+        m_impl->pngAspectRatio = havePng
+            ? static_cast<float>(pngHeight) / static_cast<float>(pngWidth)
+            : 1.0f;
+
         const float quadW = m_impl->config.width_m;
         const float quadH = havePng
-            ? m_impl->config.width_m * (static_cast<float>(pngHeight) / static_cast<float>(pngWidth))
+            ? quadW * m_impl->pngAspectRatio
             : m_impl->config.height_m;
 
         m_impl->quadLayer.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
@@ -444,6 +458,35 @@ namespace openxr_api_layer {
 
         *outLayer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&m_impl->quadLayer);
         return true;
+    }
+
+    void HelmetOverlay::updateLiveTunables(const HelmetOverlayConfig& newConfig) {
+        if (!m_impl || m_impl->mode != HelmetOverlayMode::Quad) return;
+
+        // Bail out cheaply if nothing changed (avoids spamming the log
+        // when the file is touched but the helmet block is identical).
+        const bool sameDistance =
+            std::abs(m_impl->config.distance_m - newConfig.distance_m) < 1e-4f;
+        const bool sameWidth =
+            std::abs(m_impl->config.width_m - newConfig.width_m) < 1e-4f;
+        const bool sameHeight =
+            std::abs(m_impl->config.height_m - newConfig.height_m) < 1e-4f;
+        if (sameDistance && sameWidth && (m_impl->usePngAspect || sameHeight)) return;
+
+        m_impl->config.distance_m = newConfig.distance_m;
+        m_impl->config.width_m    = newConfig.width_m;
+        m_impl->config.height_m   = newConfig.height_m;
+
+        const float quadW = newConfig.width_m;
+        const float quadH = m_impl->usePngAspect
+            ? quadW * m_impl->pngAspectRatio
+            : newConfig.height_m;
+
+        m_impl->quadLayer.pose.position.z = -newConfig.distance_m;
+        m_impl->quadLayer.size = {quadW, quadH};
+
+        Log(fmt::format("HelmetOverlay: live-tuned distance={:.2f}m, size={:.2f}x{:.2f}m\n",
+                        newConfig.distance_m, quadW, quadH));
     }
 
     void HelmetOverlay::shutdown() {

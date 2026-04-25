@@ -544,14 +544,14 @@ namespace openxr_api_layer {
                     if (mtime != m_configLastWriteTime) {
                         m_configLastWriteTime = mtime;
                         m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
-                        // NB: live-edit refresh of the helmet block updates
-                        // the cached config, but swapchain/space resources
-                        // already created in xrCreateSession are NOT
-                        // rebuilt. Toggling enabled, distance, or size will
-                        // only fully apply after a session restart. The
-                        // stub honours this: it doesn't own runtime
-                        // resources yet, so the refresh is cheap here.
                         m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
+                        // Push the new helmet tunables into the live
+                        // overlay so distance_m / width_m changes are
+                        // visible without a session restart. Toggling
+                        // enabled or replacing the PNG still requires a
+                        // restart — those would need swapchain
+                        // reallocation (see HelmetOverlay::updateLiveTunables).
+                        m_helmetOverlay.updateLiveTunables(m_helmetConfig);
                         ++m_configGen;
                     }
                 } catch (...) {
