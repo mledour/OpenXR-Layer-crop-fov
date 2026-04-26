@@ -100,11 +100,11 @@ namespace openxr_api_layer {
             << "  \"crop_bottom_percent\": 20,\n"
             << "  \"live_edit\": false,\n"
             << "  \"helmet_overlay\": {\n"
-            << "    \"_comment\": \"Draws a head-locked helmet interior on top of the game. Requires helmet_visor.png next to the DLL. distance_m is the quad's distance from the eye in meters; width_m is its physical width (height follows the PNG aspect). brightness multiplies RGB at load time (0.0 = black, 1.0 = pristine PNG) — useful when studio-lit photos look cramée on a bright VR HMD. For an apparent cylindrical curvature, pre-warp the PNG offline with tools/cylinder_warp.py — the layer renders a flat quad either way.\",\n"
+            << "    \"_comment\": \"Draws a head-locked helmet interior on top of the game. Requires helmet_visor.png next to the DLL. distance_m is the depth-feel knob (close to face vs far away); horizontal_fov_deg is the coverage knob (how much of your view the helmet fills). The two are orthogonal — change one without touching the other. brightness multiplies RGB at load time (0.0 = black, 1.0 = pristine PNG) — useful when studio-lit photos look cramée on a bright VR HMD. For an apparent cylindrical curvature, pre-warp the PNG offline with tools/cylinder_warp.py — the layer renders a flat quad either way.\",\n"
             << "    \"enabled\": false,\n"
             << "    \"texture\": \"helmet_visor.png\",\n"
             << "    \"distance_m\": 0.5,\n"
-            << "    \"width_m\": 0.6,\n"
+            << "    \"horizontal_fov_deg\": 130,\n"
             << "    \"brightness\": 1.0\n"
             << "  }\n"
             << "}\n";
@@ -232,7 +232,11 @@ namespace openxr_api_layer {
         const auto& ho = doc["helmet_overlay"];
         hc.enabled = readJsonBool(ho, "enabled", false);
         hc.distance_m = readJsonFloat(ho, "distance_m", 0.5f);
-        hc.width_m = readJsonFloat(ho, "width_m", 0.6f);
+        // Clamp the angular FOV to a sane range. Below ~10° the quad
+        // is a thin vertical strip; above ~270° tan() blows up and
+        // the quad would extend past the user's actual visual field.
+        hc.horizontal_fov_deg = std::max(10.0f, std::min(270.0f,
+            readJsonFloat(ho, "horizontal_fov_deg", 130.0f)));
         // Clamp to [0.0, 1.0]. Above 1.0 would amplify highlights past
         // the original PNG values — never useful, only blows things out.
         hc.brightness = std::max(0.0f, std::min(1.0f,
@@ -242,9 +246,9 @@ namespace openxr_api_layer {
         }
 
         Log(fmt::format(
-            "Helmet overlay config: enabled={}, distance={:.2f}m, width={:.2f}m, "
+            "Helmet overlay config: enabled={}, distance={:.2f}m, fov={:.0f}°, "
             "brightness={:.2f}, texture={}\n",
-            hc.enabled, hc.distance_m, hc.width_m,
+            hc.enabled, hc.distance_m, hc.horizontal_fov_deg,
             hc.brightness, hc.textureRelativePath));
 
         return hc;
@@ -552,10 +556,11 @@ namespace openxr_api_layer {
                         m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
                         m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
                         // Push the new helmet tunables into the live
-                        // overlay so distance_m / width_m changes are
-                        // visible without a session restart. Toggling
-                        // enabled or replacing the PNG still requires a
-                        // restart — those would need swapchain
+                        // overlay so distance_m / horizontal_fov_deg
+                        // changes are visible without a session restart.
+                        // Toggling enabled, replacing the PNG, or
+                        // changing brightness still requires a restart —
+                        // those would need swapchain / staging-texture
                         // reallocation (see HelmetOverlay::updateLiveTunables).
                         m_helmetOverlay.updateLiveTunables(m_helmetConfig);
                         ++m_configGen;

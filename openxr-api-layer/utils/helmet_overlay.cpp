@@ -46,8 +46,9 @@
 //
 // Renders the user's helmet_visor.png as a head-locked
 // XrCompositionLayerQuad. distance_m is the plane distance from the
-// eye; width_m is the quad's physical width; height follows the PNG
-// aspect ratio so the image is never stretched.
+// eye; horizontal_fov_deg is the quad's apparent horizontal FOV in
+// degrees (physical width = 2 × distance × tan(fov/2)); height
+// follows the PNG aspect ratio so the image is never stretched.
 //
 // The swapchain is created with XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT
 // — content is uploaded once at session start (acquire / wait /
@@ -149,8 +150,8 @@ namespace openxr_api_layer {
         XrCompositionLayerQuad quadLayer{};
 
         // PNG aspect ratio captured at init so live-edit can recompute
-        // the quad height when the user changes width_m, without
-        // re-decoding the PNG.
+        // the quad height when the user changes horizontal_fov_deg or
+        // distance_m, without re-decoding the PNG.
         float pngAspectRatio = 1.0f;  // height / width
 
         // DXGI format selected at init, used for both the (transient)
@@ -307,7 +308,8 @@ namespace openxr_api_layer {
     // --- Quad init. The PNG is mandatory: swapchain + staging are
     // sized to it, and the quad height in meters is derived from the
     // PNG aspect ratio so the image is never stretched — the user
-    // controls width_m, the height follows automatically.
+    // controls horizontal_fov_deg + distance_m, both width and height
+    // follow automatically.
 
     // Shared swapchain + staging-texture setup used by both backends.
     // Creates the XrSwapchain (single static image — see
@@ -440,14 +442,21 @@ namespace openxr_api_layer {
         // owns the only copy we care about (the static swapchain image).
 
         // PNG aspect ratio recorded so live-edit can recompute the
-        // quad height when the user changes width_m.
+        // quad dimensions when the user changes horizontal_fov_deg
+        // or distance_m.
         m_impl->pngAspectRatio = static_cast<float>(pngHeight) / static_cast<float>(pngWidth);
         return true;
     }
 
     // --- Quad backend. Flat plane head-locked at distance_m. -----------
+    // Physical quad width is derived from the angular FOV the user
+    // wants and the distance: quadW = 2 * distance_m * tan(fov/2).
+    // That decouples coverage (set by horizontal_fov_deg) from depth
+    // feel (set by distance_m).
     bool HelmetOverlay::tryInitQuad(int pngWidth, int pngHeight) {
-        const float quadW = m_impl->config.width_m;
+        constexpr float kPi = 3.14159265358979323846f;
+        const float halfFov = m_impl->config.horizontal_fov_deg * 0.5f * kPi / 180.0f;
+        const float quadW = 2.0f * m_impl->config.distance_m * std::tan(halfFov);
         const float quadH = quadW * m_impl->pngAspectRatio;
 
         m_impl->quadLayer.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
@@ -490,20 +499,22 @@ namespace openxr_api_layer {
         // when the file is touched but the helmet block is identical).
         const bool sameDistance =
             std::abs(m_impl->config.distance_m - newConfig.distance_m) < 1e-4f;
-        const bool sameWidth =
-            std::abs(m_impl->config.width_m - newConfig.width_m) < 1e-4f;
-        if (sameDistance && sameWidth) return;
+        const bool sameFov =
+            std::abs(m_impl->config.horizontal_fov_deg - newConfig.horizontal_fov_deg) < 1e-3f;
+        if (sameDistance && sameFov) return;
 
-        m_impl->config.distance_m = newConfig.distance_m;
-        m_impl->config.width_m    = newConfig.width_m;
+        m_impl->config.distance_m          = newConfig.distance_m;
+        m_impl->config.horizontal_fov_deg  = newConfig.horizontal_fov_deg;
 
-        const float quadW = newConfig.width_m;
+        constexpr float kPi = 3.14159265358979323846f;
+        const float halfFov = newConfig.horizontal_fov_deg * 0.5f * kPi / 180.0f;
+        const float quadW = 2.0f * newConfig.distance_m * std::tan(halfFov);
         const float quadH = quadW * m_impl->pngAspectRatio;
         m_impl->quadLayer.pose.position.z = -newConfig.distance_m;
         m_impl->quadLayer.size = {quadW, quadH};
 
-        Log(fmt::format("HelmetOverlay: live-tuned distance={:.2f}m, size={:.2f}x{:.2f}m\n",
-                        newConfig.distance_m, quadW, quadH));
+        Log(fmt::format("HelmetOverlay: live-tuned distance={:.2f}m, fov={:.0f}°, size={:.2f}x{:.2f}m\n",
+                        newConfig.distance_m, newConfig.horizontal_fov_deg, quadW, quadH));
     }
 
     void HelmetOverlay::shutdown() {

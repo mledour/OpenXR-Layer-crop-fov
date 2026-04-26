@@ -51,16 +51,21 @@ namespace openxr_api_layer {
         std::string textureRelativePath = "helmet_visor.png";
 
         // distance_m: distance from the eye to the quad's plane, in
-        // meters. Live-tunable.
+        // meters. Controls the depth-feel (stereo disparity) — at
+        // 0.15 m the helmet feels glued to your face, at 0.5 m it
+        // feels like a TV in front of you. Live-tunable.
         float distance_m = 0.5f;
 
-        // width_m: physical width of the quad in meters. Height is
-        // derived from the PNG aspect ratio so the image is never
-        // stretched. Live-tunable.
+        // horizontal_fov_deg: angular width of the quad in the user's
+        // view, in degrees. The physical quad width in meters is
+        // derived as 2 * distance_m * tan(horizontal_fov_deg / 2),
+        // so changing distance_m no longer also changes coverage —
+        // the two parameters are orthogonal. Height follows the PNG
+        // aspect so the image is never stretched. Live-tunable.
         // For an apparent helmet curvature, pre-warp the PNG offline
         // with tools/cylinder_warp.py — the layer renders a flat
         // quad either way.
-        float width_m = 0.6f;
+        float horizontal_fov_deg = 130.0f;
 
         // RGB multiplier applied to the texture at upload time. 1.0 =
         // pristine, 0.5 = half brightness, 0.0 = pure black. Useful when
@@ -112,9 +117,10 @@ namespace openxr_api_layer {
 
         // Apply a live-edit reload of settings.json. Only fields safe
         // to change without rebuilding swapchain/textures are honoured:
-        //   - distance_m  (re-poses the quad in view space)
-        //   - width_m     (resizes the quad; height follows the PNG
-        //                  aspect ratio captured at init)
+        //   - distance_m            (re-poses the quad in view space)
+        //   - horizontal_fov_deg    (resizes the quad's apparent FOV;
+        //                            physical width is recomputed from
+        //                            distance_m × tan(fov/2))
         // Toggling enabled, replacing the PNG, or changing brightness
         // still requires a session restart — those would need swapchain
         // / staging-texture reallocation and a fresh initialize() call.

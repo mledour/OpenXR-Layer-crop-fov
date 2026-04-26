@@ -107,7 +107,7 @@ have their own file.
     "enabled": false,
     "texture": "helmet_visor.png",
     "distance_m": 0.5,
-    "width_m": 0.6,
+    "horizontal_fov_deg": 130,
     "brightness": 1.0
   }
 }
@@ -120,7 +120,7 @@ have their own file.
 | `crop_right_percent` | float | `10` | Percentage of the image covered by the black bar on the right edge (0-50). |
 | `crop_top_percent` | float | `15` | Percentage of the image covered by the black bar on the top edge (0-50). |
 | `crop_bottom_percent` | float | `20` | Percentage of the image covered by the black bar on the bottom edge (0-50). |
-| `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Picks up changes to crop percentages and to `helmet_overlay.distance_m` / `helmet_overlay.width_m`. Set back to false once you're happy. |
+| `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Picks up changes to crop percentages and to `helmet_overlay.distance_m` / `helmet_overlay.horizontal_fov_deg`. Set back to false once you're happy. |
 | `helmet_overlay` | object | (see below) | Helmet overlay configuration. See [Helmet overlay](#helmet-overlay). |
 
 ### How the percentages are interpreted
@@ -172,7 +172,7 @@ picks up whichever PNG is at the path on next session start.
   "enabled": false,
   "texture": "helmet_visor.png",
   "distance_m": 0.5,
-  "width_m": 0.6,
+  "horizontal_fov_deg": 130,
   "brightness": 1.0
 }
 ```
@@ -181,8 +181,8 @@ picks up whichever PNG is at the path on next session start.
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Master switch for the helmet overlay. |
 | `texture` | string | `helmet_visor.png` | Filename of the PNG to load, resolved relative to the DLL's install directory. Change this only if you want to switch between several PNGs you keep side by side. |
-| `distance_m` | float | `0.5` | Distance from the eye to the quad's plane, in meters. Live-tunable. Try `0.15` for "right against the face" (real helmet feel), `0.3` for "close but not claustrophobic", `0.5` for "TV-in-front-of-you". |
-| `width_m` | float | `0.6` | Physical width of the quad in meters. Height is derived from the PNG's aspect so the image is never stretched. Live-tunable. With `distance_m=0.15`, `width_m=0.6` covers ~127° horizontal — fits any HMD. With `distance_m=0.5`, you'll need `width_m=1.5` to get the same coverage. |
+| `distance_m` | float | `0.5` | **Depth-feel knob**: distance from the eye to the quad's plane, in meters. Controls the stereo disparity, i.e. how "close to your face" the helmet feels. Try `0.15` for "right against the face" (real helmet feel), `0.3` for "close but not claustrophobic", `0.5` for "TV-in-front-of-you". Live-tunable. |
+| `horizontal_fov_deg` | float | `130` | **Coverage knob**: angular width of the quad in your view, in degrees. Clamped to `[10°, 270°]`. The physical quad width is derived as `2 × distance_m × tan(fov/2)`, so changing `distance_m` no longer also changes coverage — these two parameters are orthogonal and can be tuned independently. Try `90°` for "tight visor", `130°` for "moderate wraparound", `180°` for "ear-to-ear". Quad height follows the PNG aspect ratio so the image is never stretched. Live-tunable. |
 | `brightness` | float | `1.0` | RGB multiplier applied at load time, clamped to `[0.0, 1.0]`. `1.0` = pristine PNG, `0.5` = half luminance, `0.0` = pure black. Useful when studio-lit photos look cramée on a bright VR HMD in a dim cockpit. Alpha is never multiplied so the visor cutout stays transparent at any value. **Not** live-tunable — changing it requires a session restart (the texture is uploaded once at session start). |
 
 ### Custom PNG: requirements
@@ -196,10 +196,12 @@ A drop-in replacement for `helmet_visor.png` must be:
   the player will see the texture instead of the game world.
 - **Foam / structure at `alpha = 255`** (fully opaque) so the
   periphery occludes the game.
-- **Aspect ratio that matches your `width_m`** preference. The layer
-  derives the quad's height from the PNG aspect, so a 3:2 PNG
-  (e.g. 2048×1365) at `width_m=0.6` gives a quad of `0.6×0.4 m`. A
-  2:1 PNG would give `0.6×0.3 m`.
+- **Aspect ratio that matches your content goal.** The layer derives
+  the quad's height from the PNG aspect, so a 3:2 PNG keeps the
+  quad 1.5× wider than tall, a 2:1 PNG twice as wide as tall, etc.
+  3:2 / 4:3 fit a "natural helmet visor" shape; 2:1 to 3:1 fit
+  better when you want to use every visible pixel of an HMD with
+  aggressive top/bottom cropping.
 - **Resolution sweet spot is ~2K wide.** 1024 wide → visible
   pixelation on dense HMDs (Crystal / Quest 3). 2048-3072 wide →
   optimal. 4K+ → measurable VRAM and GPU bandwidth cost without
