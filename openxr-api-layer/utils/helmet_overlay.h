@@ -37,6 +37,12 @@
 #include <memory>
 #include <string>
 
+// Header is self-sufficient regarding OpenXR types: pulled in here so
+// translation units that include this without going through pch.h
+// (e.g. the standalone unit tests via helmet_config_parser.h) still
+// see XrSession, XrTime, XrCompositionLayerBaseHeader, etc.
+#include <openxr/openxr.h>
+
 namespace openxr_api_layer {
 
     // Forward declaration — full definition in <framework/dispatch.gen.h>,
