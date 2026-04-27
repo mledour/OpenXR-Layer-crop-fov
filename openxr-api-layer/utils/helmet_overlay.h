@@ -67,6 +67,13 @@ namespace openxr_api_layer {
         // quad either way.
         float horizontal_fov_deg = 130.0f;
 
+        // vertical_offset_m: shifts the quad up (+) or down (-) along
+        // the eye's local Y axis, in meters. Defaults to 0 (centered
+        // on the eye). Useful when the user's HMD lens position or
+        // their crop_top/crop_bottom asymmetry leaves the helmet
+        // feeling slightly above or below their gaze line. Live-tunable.
+        float vertical_offset_m = 0.0f;
+
         // RGB multiplier applied to the texture at upload time. 1.0 =
         // pristine, 0.5 = half brightness, 0.0 = pure black. Useful when
         // the PNG has highlights that look natural in studio lighting
@@ -121,6 +128,8 @@ namespace openxr_api_layer {
         //   - horizontal_fov_deg    (resizes the quad's apparent FOV;
         //                            physical width is recomputed from
         //                            distance_m × tan(fov/2))
+        //   - vertical_offset_m     (shifts the quad up/down along the
+        //                            eye's local Y axis)
         // Toggling enabled, replacing the PNG, or changing brightness
         // still requires a session restart — those would need swapchain
         // / staging-texture reallocation and a fresh initialize() call.
