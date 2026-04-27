@@ -108,7 +108,7 @@ have their own file.
     "texture": "helmet_visor.png",
     "distance_m": 0.5,
     "horizontal_fov_deg": 130,
-    "vertical_offset_m": 0.0,
+    "vertical_offset_deg": 0.0,
     "brightness": 1.0
   }
 }
@@ -121,7 +121,7 @@ have their own file.
 | `crop_right_percent` | float | `10` | Percentage of the image covered by the black bar on the right edge (0-50). |
 | `crop_top_percent` | float | `15` | Percentage of the image covered by the black bar on the top edge (0-50). |
 | `crop_bottom_percent` | float | `20` | Percentage of the image covered by the black bar on the bottom edge (0-50). |
-| `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Picks up changes to crop percentages and to `helmet_overlay.distance_m` / `helmet_overlay.horizontal_fov_deg` / `helmet_overlay.vertical_offset_m`. Set back to false once you're happy. |
+| `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Picks up changes to crop percentages and to `helmet_overlay.distance_m` / `helmet_overlay.horizontal_fov_deg` / `helmet_overlay.vertical_offset_deg`. Set back to false once you're happy. |
 | `helmet_overlay` | object | (see below) | Helmet overlay configuration. See [Helmet overlay](#helmet-overlay). |
 
 ### How the percentages are interpreted
@@ -174,7 +174,7 @@ picks up whichever PNG is at the path on next session start.
   "texture": "helmet_visor.png",
   "distance_m": 0.5,
   "horizontal_fov_deg": 130,
-  "vertical_offset_m": 0.0,
+  "vertical_offset_deg": 0.0,
   "brightness": 1.0
 }
 ```
@@ -185,7 +185,7 @@ picks up whichever PNG is at the path on next session start.
 | `texture` | string | `helmet_visor.png` | Filename of the PNG to load, resolved relative to the DLL's install directory. Change this only if you want to switch between several PNGs you keep side by side. |
 | `distance_m` | float | `0.5` | **Depth-feel knob**: distance from the eye to the quad's plane, in meters. Controls the stereo disparity, i.e. how "close to your face" the helmet feels. Try `0.15` for "right against the face" (real helmet feel), `0.3` for "close but not claustrophobic", `0.5` for "TV-in-front-of-you". Live-tunable. |
 | `horizontal_fov_deg` | float | `130` | **Coverage knob**: angular width of the quad in your view, in degrees. Clamped to `[10°, 270°]`. The physical quad width is derived as `2 × distance_m × tan(fov/2)`, so changing `distance_m` no longer also changes coverage — these two parameters are orthogonal and can be tuned independently. Try `90°` for "tight visor", `130°` for "moderate wraparound", `180°` for "ear-to-ear". Quad height follows the PNG aspect ratio so the image is never stretched. Live-tunable. |
-| `vertical_offset_m` | float | `0.0` | Shifts the quad up (`+`) or down (`-`) along the eye's local Y axis, in meters. Clamped to `[-0.5, +0.5]`. Useful when the helmet sits slightly above or below your gaze line because of HMD lens placement or asymmetric `crop_top` / `crop_bottom`. Try `+0.02` (~2 cm up) or `-0.02` (~2 cm down) and adjust to taste. Live-tunable. |
+| `vertical_offset_deg` | float | `0.0` | **Position knob**: shifts the quad up (`+`) or down (`-`) by an angle in your view, in degrees. Clamped to `[-30°, +30°]`. Decoupled from `distance_m` — at any distance, "+5°" always shifts the helmet up by 5° in your FOV. Useful when the helmet sits slightly above or below your gaze line because of HMD lens placement or asymmetric `crop_top` / `crop_bottom`. Try `+2°` (helmet up) or `-2°` (helmet down) and adjust to taste. Live-tunable. |
 | `brightness` | float | `1.0` | RGB multiplier applied at load time, clamped to `[0.0, 1.0]`. `1.0` = pristine PNG, `0.5` = half luminance, `0.0` = pure black. Useful when studio-lit photos look cramée on a bright VR HMD in a dim cockpit. Alpha is never multiplied so the visor cutout stays transparent at any value. **Not** live-tunable — changing it requires a session restart (the texture is uploaded once at session start). |
 
 ### Custom PNG: requirements

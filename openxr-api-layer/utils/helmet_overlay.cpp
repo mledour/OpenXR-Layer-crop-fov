@@ -469,9 +469,13 @@ namespace openxr_api_layer {
         m_impl->quadLayer.subImage.imageRect.offset = {0, 0};
         m_impl->quadLayer.subImage.imageRect.extent = {pngWidth, pngHeight};
         m_impl->quadLayer.subImage.imageArrayIndex = 0;
+        const float vOffsetY =
+            m_impl->config.distance_m *
+            std::tan(m_impl->config.vertical_offset_deg * kPi / 180.0f);
+
         m_impl->quadLayer.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
         m_impl->quadLayer.pose.position = {0.0f,
-                                           m_impl->config.vertical_offset_m,
+                                           vOffsetY,
                                            -m_impl->config.distance_m};
         m_impl->quadLayer.size = {quadW, quadH};
 
@@ -504,26 +508,28 @@ namespace openxr_api_layer {
         const bool sameFov =
             std::abs(m_impl->config.horizontal_fov_deg - newConfig.horizontal_fov_deg) < 1e-3f;
         const bool sameVOffset =
-            std::abs(m_impl->config.vertical_offset_m - newConfig.vertical_offset_m) < 1e-4f;
+            std::abs(m_impl->config.vertical_offset_deg - newConfig.vertical_offset_deg) < 1e-3f;
         if (sameDistance && sameFov && sameVOffset) return;
 
-        m_impl->config.distance_m          = newConfig.distance_m;
-        m_impl->config.horizontal_fov_deg  = newConfig.horizontal_fov_deg;
-        m_impl->config.vertical_offset_m   = newConfig.vertical_offset_m;
+        m_impl->config.distance_m            = newConfig.distance_m;
+        m_impl->config.horizontal_fov_deg    = newConfig.horizontal_fov_deg;
+        m_impl->config.vertical_offset_deg   = newConfig.vertical_offset_deg;
 
         constexpr float kPi = 3.14159265358979323846f;
         const float halfFov = newConfig.horizontal_fov_deg * 0.5f * kPi / 180.0f;
         const float quadW = 2.0f * newConfig.distance_m * std::tan(halfFov);
         const float quadH = quadW * m_impl->pngAspectRatio;
+        const float vOffsetY = newConfig.distance_m *
+                               std::tan(newConfig.vertical_offset_deg * kPi / 180.0f);
         m_impl->quadLayer.pose.position = {0.0f,
-                                           newConfig.vertical_offset_m,
+                                           vOffsetY,
                                            -newConfig.distance_m};
         m_impl->quadLayer.size = {quadW, quadH};
 
         Log(fmt::format("HelmetOverlay: live-tuned distance={:.2f}m, fov={:.0f}°, "
-                        "v_offset={:+.3f}m, size={:.2f}x{:.2f}m\n",
+                        "v_offset={:+.1f}°, size={:.2f}x{:.2f}m\n",
                         newConfig.distance_m, newConfig.horizontal_fov_deg,
-                        newConfig.vertical_offset_m, quadW, quadH));
+                        newConfig.vertical_offset_deg, quadW, quadH));
     }
 
     void HelmetOverlay::shutdown() {

@@ -100,12 +100,12 @@ namespace openxr_api_layer {
             << "  \"crop_bottom_percent\": 20,\n"
             << "  \"live_edit\": false,\n"
             << "  \"helmet_overlay\": {\n"
-            << "    \"_comment\": \"Draws a head-locked helmet interior on top of the game. Requires helmet_visor.png next to the DLL. distance_m is the depth-feel knob (close to face vs far away); horizontal_fov_deg is the coverage knob (how much of your view the helmet fills). The two are orthogonal — change one without touching the other. vertical_offset_m shifts the helmet up (+) or down (-) along the eye's local Y axis, in meters. brightness multiplies RGB at load time (0.0 = black, 1.0 = pristine PNG) — useful when studio-lit photos look cramée on a bright VR HMD. For an apparent cylindrical curvature, pre-warp the PNG offline with tools/cylinder_warp.py — the layer renders a flat quad either way.\",\n"
+            << "    \"_comment\": \"Draws a head-locked helmet interior on top of the game. Requires helmet_visor.png next to the DLL. The three geometry knobs are orthogonal: distance_m controls depth-feel (close to face vs far away); horizontal_fov_deg controls coverage (how much of your view the helmet fills); vertical_offset_deg shifts the helmet up (+) or down (-) by an angle in your view. brightness multiplies RGB at load time (0.0 = black, 1.0 = pristine PNG) — useful when studio-lit photos look cramée on a bright VR HMD. For an apparent cylindrical curvature, pre-warp the PNG offline with tools/cylinder_warp.py — the layer renders a flat quad either way.\",\n"
             << "    \"enabled\": false,\n"
             << "    \"texture\": \"helmet_visor.png\",\n"
             << "    \"distance_m\": 0.5,\n"
             << "    \"horizontal_fov_deg\": 130,\n"
-            << "    \"vertical_offset_m\": 0.0,\n"
+            << "    \"vertical_offset_deg\": 0.0,\n"
             << "    \"brightness\": 1.0\n"
             << "  }\n"
             << "}\n";
@@ -238,10 +238,10 @@ namespace openxr_api_layer {
         // the quad would extend past the user's actual visual field.
         hc.horizontal_fov_deg = std::max(10.0f, std::min(270.0f,
             readJsonFloat(ho, "horizontal_fov_deg", 130.0f)));
-        // Clamp the offset to ±0.5 m. Beyond that the quad escapes the
+        // Clamp the offset to ±30°. Beyond that the quad escapes the
         // user's FOV entirely and the overlay becomes invisible.
-        hc.vertical_offset_m = std::max(-0.5f, std::min(0.5f,
-            readJsonFloat(ho, "vertical_offset_m", 0.0f)));
+        hc.vertical_offset_deg = std::max(-30.0f, std::min(30.0f,
+            readJsonFloat(ho, "vertical_offset_deg", 0.0f)));
         // Clamp to [0.0, 1.0]. Above 1.0 would amplify highlights past
         // the original PNG values — never useful, only blows things out.
         hc.brightness = std::max(0.0f, std::min(1.0f,
@@ -252,9 +252,9 @@ namespace openxr_api_layer {
 
         Log(fmt::format(
             "Helmet overlay config: enabled={}, distance={:.2f}m, fov={:.0f}°, "
-            "v_offset={:+.3f}m, brightness={:.2f}, texture={}\n",
+            "v_offset={:+.1f}°, brightness={:.2f}, texture={}\n",
             hc.enabled, hc.distance_m, hc.horizontal_fov_deg,
-            hc.vertical_offset_m, hc.brightness, hc.textureRelativePath));
+            hc.vertical_offset_deg, hc.brightness, hc.textureRelativePath));
 
         return hc;
     }

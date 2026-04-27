@@ -67,12 +67,15 @@ namespace openxr_api_layer {
         // quad either way.
         float horizontal_fov_deg = 130.0f;
 
-        // vertical_offset_m: shifts the quad up (+) or down (-) along
-        // the eye's local Y axis, in meters. Defaults to 0 (centered
-        // on the eye). Useful when the user's HMD lens position or
-        // their crop_top/crop_bottom asymmetry leaves the helmet
-        // feeling slightly above or below their gaze line. Live-tunable.
-        float vertical_offset_m = 0.0f;
+        // vertical_offset_deg: shifts the quad up (+) or down (-) by a
+        // given angle in the user's view, in degrees. Decoupled from
+        // distance_m — at any distance, "+5°" always shifts the helmet
+        // up by 5° in the user's FOV. Internally converted to a
+        // world-space Y offset of distance_m × tan(deg). Useful when
+        // the user's HMD lens position or asymmetric crop_top/bottom
+        // leaves the helmet feeling slightly above or below their
+        // gaze line. Live-tunable.
+        float vertical_offset_deg = 0.0f;
 
         // RGB multiplier applied to the texture at upload time. 1.0 =
         // pristine, 0.5 = half brightness, 0.0 = pure black. Useful when
@@ -128,8 +131,10 @@ namespace openxr_api_layer {
         //   - horizontal_fov_deg    (resizes the quad's apparent FOV;
         //                            physical width is recomputed from
         //                            distance_m × tan(fov/2))
-        //   - vertical_offset_m     (shifts the quad up/down along the
-        //                            eye's local Y axis)
+        //   - vertical_offset_deg   (shifts the quad up/down by an
+        //                            angle in the user's view; world-
+        //                            space Y is recomputed from
+        //                            distance_m × tan(deg))
         // Toggling enabled, replacing the PNG, or changing brightness
         // still requires a session restart — those would need swapchain
         // / staging-texture reallocation and a fresh initialize() call.
