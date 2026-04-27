@@ -29,6 +29,7 @@
 #include <log.h>
 #include <util.h>
 #include <utils/crop_math.h>
+#include <utils/helmet_config_parser.h>
 #include <utils/helmet_overlay.h>
 #include <utils/name_utils.h>
 
@@ -207,48 +208,25 @@ namespace openxr_api_layer {
         return config;
     }
 
-    // Parses the "helmet_overlay" object from the same settings.json that
-    // loadConfig() reads. Kept as a standalone reader (rather than folded
-    // into CropConfig) so the crop and overlay subsystems stay loosely
-    // coupled — the overlay is opt-in, optional, and logically distinct
-    // from the FOV narrowing. Silently returns defaults (disabled) if the
-    // file, the block, or any field is missing or malformed.
+    // Loads the helmet_overlay block from the same settings.json that
+    // loadConfig() reads. Reads the file then delegates the actual
+    // JSON parsing + clamping to parseHelmetConfig (utils/
+    // helmet_config_parser.h), which is unit-tested in isolation.
+    // Silently returns defaults (disabled) if the file is missing or
+    // unreadable; parseHelmetConfig handles the rest of the
+    // robustness contract (malformed JSON, wrong types, missing
+    // fields, out-of-range values).
     static HelmetOverlayConfig loadHelmetConfig(const std::filesystem::path& configPath) {
-        HelmetOverlayConfig hc;
-
         std::string fileContent;
         {
             std::ifstream file(configPath.string());
-            if (!file.is_open()) return hc;
+            if (!file.is_open()) return HelmetOverlayConfig{};
             std::ostringstream ss;
             ss << file.rdbuf();
             fileContent = ss.str();
         }
 
-        rapidjson::Document doc;
-        doc.Parse(fileContent.c_str(), fileContent.size());
-        if (doc.HasParseError() || !doc.IsObject()) return hc;
-        if (!doc.HasMember("helmet_overlay") || !doc["helmet_overlay"].IsObject()) return hc;
-
-        const auto& ho = doc["helmet_overlay"];
-        hc.enabled = readJsonBool(ho, "enabled", false);
-        hc.distance_m = readJsonFloat(ho, "distance_m", 0.5f);
-        // Clamp the angular FOV to a sane range. Below ~10° the quad
-        // is a thin vertical strip; above ~270° tan() blows up and
-        // the quad would extend past the user's actual visual field.
-        hc.horizontal_fov_deg = std::max(10.0f, std::min(270.0f,
-            readJsonFloat(ho, "horizontal_fov_deg", 130.0f)));
-        // Clamp the offset to ±30°. Beyond that the quad escapes the
-        // user's FOV entirely and the overlay becomes invisible.
-        hc.vertical_offset_deg = std::max(-30.0f, std::min(30.0f,
-            readJsonFloat(ho, "vertical_offset_deg", 0.0f)));
-        // Clamp to [0.0, 1.0]. Above 1.0 would amplify highlights past
-        // the original PNG values — never useful, only blows things out.
-        hc.brightness = std::max(0.0f, std::min(1.0f,
-            readJsonFloat(ho, "brightness", 1.0f)));
-        if (ho.HasMember("texture") && ho["texture"].IsString()) {
-            hc.textureRelativePath = ho["texture"].GetString();
-        }
+        const HelmetOverlayConfig hc = openxr_api_layer::parseHelmetConfig(fileContent);
 
         Log(fmt::format(
             "Helmet overlay config: enabled={}, distance={:.2f}m, fov={:.0f}°, "

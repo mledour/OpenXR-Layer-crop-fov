@@ -111,6 +111,7 @@
     <!-- doctest driver + tests in this project. -->
     <ClCompile Include="main.cpp" />
     <ClCompile Include="test_crop_math.cpp" />
+    <ClCompile Include="test_helmet_config.cpp" />
     <ClCompile Include="test_integration.cpp" />
     <ClCompile Include="mock_runtime.cpp" />
     <ClCompile Include="test_stubs.cpp" />
