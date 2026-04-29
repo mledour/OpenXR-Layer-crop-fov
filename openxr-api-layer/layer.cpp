@@ -101,7 +101,7 @@ namespace openxr_api_layer {
             << "  \"crop_bottom_percent\": 20,\n"
             << "  \"live_edit\": false,\n"
             << "  \"helmet_overlay\": {\n"
-            << "    \"_comment\": \"Draws a head-locked helmet interior on top of the game. Requires helmet_visor.png next to the DLL. The three geometry knobs are orthogonal: distance_m controls depth-feel (close to face vs far away); horizontal_fov_deg controls coverage (how much of your view the helmet fills); vertical_offset_deg shifts the helmet up (+) or down (-) by an angle in your view. brightness multiplies RGB at load time (0.0 = black, 1.0 = pristine PNG) — useful when studio-lit photos look cramée on a bright VR HMD. For an apparent cylindrical curvature, pre-warp the PNG offline with tools/cylinder_warp.py — the layer renders a flat quad either way.\",\n"
+            << "    \"_comment\": \"Draws a head-locked helmet interior on top of the game. The 'texture' filename is resolved against %LOCALAPPDATA%\\\\XR_APILAYER_MLEDOUR_fov_crop\\\\helmets\\\\ — the bundled default PNGs are bootstrapped into that directory on first run, and any custom PNG you drop in there persists across reinstalls. The three geometry knobs are orthogonal: distance_m controls depth-feel (close to face vs far away); horizontal_fov_deg controls coverage (how much of your view the helmet fills); vertical_offset_deg shifts the helmet up (+) or down (-) by an angle in your view. brightness multiplies RGB at load time (0.0 = black, 1.0 = pristine PNG) — useful when studio-lit photos look cramée on a bright VR HMD. For an apparent cylindrical curvature, pre-warp the PNG offline with tools/cylinder_warp.py — the layer renders a flat quad either way.\",\n"
             << "    \"enabled\": false,\n"
             << "    \"texture\": \"helmet_visor.png\",\n"
             << "    \"distance_m\": 0.5,\n"
@@ -128,6 +128,52 @@ namespace openxr_api_layer {
         } catch (const std::exception& e) {
             Log(fmt::format("Could not create template {}: {}\n",
                              templatePath.string(), e.what()));
+        }
+    }
+
+    // Copies all *.png files from the build's bundled helmets directory
+    // (next to the DLL) to the user's helmets directory under
+    // localAppData. Existing files in the user dir are NEVER overwritten,
+    // so any custom PNG the user dropped in keeps priority on subsequent
+    // launches — same "bootstrap once, never touch user data" contract
+    // as ensureTemplateConfig and the per-app settings flow.
+    //
+    // Silent no-op if the build directory is missing or empty (e.g. on
+    // a manual install where the user only copied the DLL itself).
+    static void ensureHelmetsBootstrapped(const std::filesystem::path& userHelmetsDir,
+                                           const std::filesystem::path& bundledHelmetsDir) {
+        try {
+            std::filesystem::create_directories(userHelmetsDir);
+        } catch (const std::exception& e) {
+            Log(fmt::format("Could not create user helmets dir {}: {}\n",
+                             userHelmetsDir.string(), e.what()));
+            return;
+        }
+
+        std::error_code ec;
+        if (!std::filesystem::is_directory(bundledHelmetsDir, ec)) {
+            Log(fmt::format("Bundled helmets dir absent ({}), nothing to bootstrap\n",
+                             bundledHelmetsDir.string()));
+            return;
+        }
+
+        for (const auto& entry : std::filesystem::directory_iterator(bundledHelmetsDir, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file()) continue;
+            const auto& src = entry.path();
+            if (src.extension() != ".png") continue;
+
+            const auto dst = userHelmetsDir / src.filename();
+            if (std::filesystem::exists(dst)) continue;  // user file wins
+
+            try {
+                std::filesystem::copy_file(src, dst);
+                Log(fmt::format("Bootstrapped helmet asset {} → {}\n",
+                                 src.filename().string(), dst.string()));
+            } catch (const std::exception& e) {
+                Log(fmt::format("Failed to bootstrap helmet asset {}: {}\n",
+                                 src.filename().string(), e.what()));
+            }
         }
     }
 
@@ -292,6 +338,14 @@ namespace openxr_api_layer {
             // the defaults applied to future games.
             openxr_api_layer::ensureTemplateConfig(localAppData);
 
+            // Bootstrap the helmets/ directory under localAppData on first
+            // run. Copies the PNGs the build dropped next to the DLL into
+            // the user's writable settings dir; existing user files are
+            // never overwritten so custom PNGs stick around.
+            openxr_api_layer::ensureHelmetsBootstrapped(
+                localAppData / "helmets",
+                dllHome / "helmets");
+
             // Per-app configuration: each OpenXR application gets its own
             // settings file, keyed by a sanitized version of the application
             // name. The first time a given application is seen, the file is
@@ -415,7 +469,13 @@ namespace openxr_api_layer {
                 // the layer's own dispatch.
                 if (!m_bypassApiLayer) {
                     try {
-                        m_helmetOverlay.initialize(this, *session, createInfo->next, m_helmetConfig, dllHome);
+                        // The overlay resolves config.textureRelativePath against
+                        // the user-writable helmets/ folder under localAppData,
+                        // which the bootstrap step in xrCreateInstance keeps
+                        // populated with the build's bundled PNGs.
+                        m_helmetOverlay.initialize(this, *session, createInfo->next,
+                                                    m_helmetConfig,
+                                                    localAppData / "helmets");
                     } catch (const std::exception& exc) {
                         ErrorLog(fmt::format("HelmetOverlay::initialize threw: {}\n", exc.what()));
                     }

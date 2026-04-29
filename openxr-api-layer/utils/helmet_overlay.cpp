@@ -67,7 +67,7 @@
 // DLL stays a flat quad, and the result works on every runtime.
 //
 // The PNG is mandatory: if no helmet_visor.png is found at
-// dllHome / config.textureRelativePath, the overlay does not arm.
+// helmetsDir / config.textureRelativePath, the overlay does not arm.
 // Decoded once via stb_image at session init, optionally darkened by
 // config.brightness, then uploaded to a staging texture. Per-frame
 // work is one CopyResource of that staging into the acquired
@@ -198,7 +198,7 @@ namespace openxr_api_layer {
                                    XrSession session,
                                    const void* sessionCreateInfoNextChain,
                                    const HelmetOverlayConfig& config,
-                                   const std::filesystem::path& dllHome) {
+                                   const std::filesystem::path& helmetsDir) {
         m_impl->config = config;
         m_impl->api = api;
         m_impl->session = session;
@@ -273,7 +273,7 @@ namespace openxr_api_layer {
         // overlay does not arm. The build ships a default helmet_visor.png
         // alongside the DLL so this only fails when the user explicitly
         // deleted it.
-        const std::filesystem::path pngPath = dllHome / config.textureRelativePath;
+        const std::filesystem::path pngPath = helmetsDir / config.textureRelativePath;
         if (!std::filesystem::exists(pngPath)) {
             Log(fmt::format("HelmetOverlay: no PNG at '{}', overlay will not arm\n",
                             pngPath.string()));

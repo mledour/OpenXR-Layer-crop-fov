@@ -72,7 +72,7 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="assets\helmet_visor.png">
+    <None Include="assets\helmets\helmet_visor.png">
       <Filter>Assets</Filter>
     </None>
     <None Include="framework\dispatch_generator.py">

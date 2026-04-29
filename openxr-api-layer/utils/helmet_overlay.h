@@ -109,14 +109,17 @@ namespace openxr_api_layer {
         // binding it can use. `api` is kept by the overlay so it can
         // reach downstream xrCreateSwapchain / xrAcquire…Image / etc.
         // through the layer's own dispatch (same as every other part of
-        // the layer). Returns true if the overlay is armed and will
-        // contribute a layer in appendLayer(); false means "silently
-        // degrade to bypass" per best-practices.
+        // the layer). `helmetsDir` is the directory the texture path
+        // (config.textureRelativePath) is resolved against — typically
+        // %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets so users
+        // can drop PNGs without admin elevation. Returns true if the
+        // overlay is armed and will contribute a layer in appendLayer();
+        // false means "silently degrade to bypass" per best-practices.
         bool initialize(OpenXrApi* api,
                         XrSession session,
                         const void* sessionCreateInfoNextChain,
                         const HelmetOverlayConfig& config,
-                        const std::filesystem::path& dllHome);
+                        const std::filesystem::path& helmetsDir);
 
         // Called from xrDestroySession before the session handle becomes
         // invalid. Always safe to call, even if initialize() returned false.
