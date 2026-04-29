@@ -84,30 +84,37 @@ namespace openxr_api_layer {
     static bool writeDefaultConfig(const std::filesystem::path& outputPath, const std::string& appName) {
         std::ofstream out(outputPath);
         if (!out) return false;
+        // The output here MUST stay byte-for-byte aligned with
+        // installer/default_settings.json, which the Inno Setup script
+        // drops into %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\settings.json
+        // at install time. writeDefaultConfig() is the runtime fallback
+        // for ZIP / dev installs where the installer never ran. If the
+        // two ever drift, installer users and ZIP users get different
+        // out-of-the-box defaults.
         out << "{\n";
         if (appName.empty()) {
             out << "  \"_comment\": \"Default template. Each OpenXR application "
                 <<                "gets a copy of this file the first time it runs. "
                 <<                "Set \\\"enabled\\\" to true to activate the layer for that game "
-                <<                "(or flip the default here to affect every future game).\",\n";
+                <<                "(or change the default here to affect every future game). "
+                <<                "Edit crop percentages to taste.\",\n";
         } else {
             out << "  \"_comment\": \"Auto-generated per-app config for '" << appName
                 <<                "'. Set \\\"enabled\\\" to true to activate the layer for this game.\",\n";
         }
         out << "  \"enabled\": false,\n"
-            << "  \"crop_left_percent\": 10,\n"
-            << "  \"crop_right_percent\": 10,\n"
-            << "  \"crop_top_percent\": 15,\n"
-            << "  \"crop_bottom_percent\": 20,\n"
-            << "  \"live_edit\": false,\n"
+            << "  \"crop_left_percent\": 0,\n"
+            << "  \"crop_right_percent\": 0,\n"
+            << "  \"crop_top_percent\": 40,\n"
+            << "  \"crop_bottom_percent\": 30,\n"
+            << "  \"live_edit\": true,\n"
             << "  \"helmet_overlay\": {\n"
-            << "    \"_comment\": \"Draws a head-locked helmet interior on top of the game. The 'image' filename is resolved against %LOCALAPPDATA%\\\\XR_APILAYER_MLEDOUR_fov_crop\\\\helmets\\\\ — the bundled default PNGs are bootstrapped into that directory on first run, and any custom PNG you drop in there persists across reinstalls. The three geometry knobs are orthogonal: distance_m controls depth-feel (close to face vs far away); horizontal_fov_deg controls coverage (how much of your view the helmet fills); vertical_offset_deg shifts the helmet up (+) or down (-) by an angle in your view. brightness multiplies RGB at load time (0.0 = black, 1.0 = pristine PNG) — useful when studio-lit photos look cramée on a bright VR HMD. For an apparent cylindrical curvature, pre-warp the PNG offline with tools/cylinder_warp.py — the layer renders a flat quad either way.\",\n"
-            << "    \"enabled\": false,\n"
+            << "    \"enabled\": true,\n"
             << "    \"image\": \"helmet_visor.png\",\n"
-            << "    \"distance_m\": 0.5,\n"
-            << "    \"horizontal_fov_deg\": 130,\n"
-            << "    \"vertical_offset_deg\": 0.0,\n"
-            << "    \"brightness\": 1.0\n"
+            << "    \"distance_m\": 0.15,\n"
+            << "    \"brightness\": 0.25,\n"
+            << "    \"horizontal_fov_deg\": 120,\n"
+            << "    \"vertical_offset_deg\": -10\n"
             << "  }\n"
             << "}\n";
         return out.good();
