@@ -1,9 +1,17 @@
 {
   "_comment": "Default template. Each OpenXR application gets a copy of this file the first time it runs. Set \"enabled\" to true to activate the layer for that game (or change the default here to affect every future game). Edit crop percentages to taste.",
   "enabled": false,
-  "crop_left_percent": 10,
-  "crop_right_percent": 10,
-  "crop_top_percent": 15,
-  "crop_bottom_percent": 20,
-  "live_edit": false
+  "crop_left_percent": 0,
+  "crop_right_percent": 0,
+  "crop_top_percent": 40,
+  "crop_bottom_percent": 30,
+  "live_edit": true,
+  "helmet_overlay": {
+    "enabled": true,
+    "image": "helmet_visor.png",
+    "distance_m": 0.15,
+    "brightness": 0.25,
+    "horizontal_fov_deg": 120,
+    "vertical_offset_deg": -10
+  }
 }

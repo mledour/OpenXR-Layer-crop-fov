@@ -29,6 +29,8 @@
 #include <log.h>
 #include <util.h>
 #include <utils/crop_math.h>
+#include <utils/helmet_config_parser.h>
+#include <utils/helmet_overlay.h>
 #include <utils/name_utils.h>
 
 #include <rapidjson/document.h>
@@ -82,22 +84,38 @@ namespace openxr_api_layer {
     static bool writeDefaultConfig(const std::filesystem::path& outputPath, const std::string& appName) {
         std::ofstream out(outputPath);
         if (!out) return false;
+        // The output here MUST stay byte-for-byte aligned with
+        // installer/default_settings.json, which the Inno Setup script
+        // drops into %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\settings.json
+        // at install time. writeDefaultConfig() is the runtime fallback
+        // for ZIP / dev installs where the installer never ran. If the
+        // two ever drift, installer users and ZIP users get different
+        // out-of-the-box defaults.
         out << "{\n";
         if (appName.empty()) {
             out << "  \"_comment\": \"Default template. Each OpenXR application "
                 <<                "gets a copy of this file the first time it runs. "
                 <<                "Set \\\"enabled\\\" to true to activate the layer for that game "
-                <<                "(or flip the default here to affect every future game).\",\n";
+                <<                "(or change the default here to affect every future game). "
+                <<                "Edit crop percentages to taste.\",\n";
         } else {
             out << "  \"_comment\": \"Auto-generated per-app config for '" << appName
                 <<                "'. Set \\\"enabled\\\" to true to activate the layer for this game.\",\n";
         }
         out << "  \"enabled\": false,\n"
-            << "  \"crop_left_percent\": 10,\n"
-            << "  \"crop_right_percent\": 10,\n"
-            << "  \"crop_top_percent\": 15,\n"
-            << "  \"crop_bottom_percent\": 20,\n"
-            << "  \"live_edit\": false\n"
+            << "  \"crop_left_percent\": 0,\n"
+            << "  \"crop_right_percent\": 0,\n"
+            << "  \"crop_top_percent\": 40,\n"
+            << "  \"crop_bottom_percent\": 30,\n"
+            << "  \"live_edit\": true,\n"
+            << "  \"helmet_overlay\": {\n"
+            << "    \"enabled\": true,\n"
+            << "    \"image\": \"helmet_visor.png\",\n"
+            << "    \"distance_m\": 0.15,\n"
+            << "    \"brightness\": 0.25,\n"
+            << "    \"horizontal_fov_deg\": 120,\n"
+            << "    \"vertical_offset_deg\": -10\n"
+            << "  }\n"
             << "}\n";
         return out.good();
     }
@@ -117,6 +135,52 @@ namespace openxr_api_layer {
         } catch (const std::exception& e) {
             Log(fmt::format("Could not create template {}: {}\n",
                              templatePath.string(), e.what()));
+        }
+    }
+
+    // Copies all *.png files from the build's bundled helmets directory
+    // (next to the DLL) to the user's helmets directory under
+    // localAppData. Existing files in the user dir are NEVER overwritten,
+    // so any custom PNG the user dropped in keeps priority on subsequent
+    // launches — same "bootstrap once, never touch user data" contract
+    // as ensureTemplateConfig and the per-app settings flow.
+    //
+    // Silent no-op if the build directory is missing or empty (e.g. on
+    // a manual install where the user only copied the DLL itself).
+    static void ensureHelmetsBootstrapped(const std::filesystem::path& userHelmetsDir,
+                                           const std::filesystem::path& bundledHelmetsDir) {
+        try {
+            std::filesystem::create_directories(userHelmetsDir);
+        } catch (const std::exception& e) {
+            Log(fmt::format("Could not create user helmets dir {}: {}\n",
+                             userHelmetsDir.string(), e.what()));
+            return;
+        }
+
+        std::error_code ec;
+        if (!std::filesystem::is_directory(bundledHelmetsDir, ec)) {
+            Log(fmt::format("Bundled helmets dir absent ({}), nothing to bootstrap\n",
+                             bundledHelmetsDir.string()));
+            return;
+        }
+
+        for (const auto& entry : std::filesystem::directory_iterator(bundledHelmetsDir, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file()) continue;
+            const auto& src = entry.path();
+            if (src.extension() != ".png") continue;
+
+            const auto dst = userHelmetsDir / src.filename();
+            if (std::filesystem::exists(dst)) continue;  // user file wins
+
+            try {
+                std::filesystem::copy_file(src, dst);
+                Log(fmt::format("Bootstrapped helmet asset {} → {}\n",
+                                 src.filename().string(), dst.string()));
+            } catch (const std::exception& e) {
+                Log(fmt::format("Failed to bootstrap helmet asset {}: {}\n",
+                                 src.filename().string(), e.what()));
+            }
         }
     }
 
@@ -197,6 +261,35 @@ namespace openxr_api_layer {
         return config;
     }
 
+    // Loads the helmet_overlay block from the same settings.json that
+    // loadConfig() reads. Reads the file then delegates the actual
+    // JSON parsing + clamping to parseHelmetConfig (utils/
+    // helmet_config_parser.h), which is unit-tested in isolation.
+    // Silently returns defaults (disabled) if the file is missing or
+    // unreadable; parseHelmetConfig handles the rest of the
+    // robustness contract (malformed JSON, wrong types, missing
+    // fields, out-of-range values).
+    static HelmetOverlayConfig loadHelmetConfig(const std::filesystem::path& configPath) {
+        std::string fileContent;
+        {
+            std::ifstream file(configPath.string());
+            if (!file.is_open()) return HelmetOverlayConfig{};
+            std::ostringstream ss;
+            ss << file.rdbuf();
+            fileContent = ss.str();
+        }
+
+        const HelmetOverlayConfig hc = openxr_api_layer::parseHelmetConfig(fileContent);
+
+        Log(fmt::format(
+            "Helmet overlay config: enabled={}, distance={:.2f}m, fov={:.0f}°, "
+            "v_offset={:+.1f}°, brightness={:.2f}, image={}\n",
+            hc.enabled, hc.distance_m, hc.horizontal_fov_deg,
+            hc.vertical_offset_deg, hc.brightness, hc.imageRelativePath));
+
+        return hc;
+    }
+
     // This class implements our API layer.
     class OpenXrLayer : public openxr_api_layer::OpenXrApi {
       public:
@@ -252,6 +345,14 @@ namespace openxr_api_layer {
             // the defaults applied to future games.
             openxr_api_layer::ensureTemplateConfig(localAppData);
 
+            // Bootstrap the helmets/ directory under localAppData on first
+            // run. Copies the PNGs the build dropped next to the DLL into
+            // the user's writable settings dir; existing user files are
+            // never overwritten so custom PNGs stick around.
+            openxr_api_layer::ensureHelmetsBootstrapped(
+                localAppData / "helmets",
+                dllHome / "helmets");
+
             // Per-app configuration: each OpenXR application gets its own
             // settings file, keyed by a sanitized version of the application
             // name. The first time a given application is seen, the file is
@@ -272,6 +373,7 @@ namespace openxr_api_layer {
             Log(fmt::format("Log routed to per-app file: {}\n", perAppLogPath.string()));
 
             m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
+            m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
             ++m_configGen;
             if (!m_config.enabled) {
                 Log(fmt::format("{} is disabled in {}\n", LayerName, m_configFilePath.string()));
@@ -365,9 +467,80 @@ namespace openxr_api_layer {
                 }
 
                 TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
+
+                // Arm the helmet overlay. Best-practices: any failure
+                // here must NEVER crash the host; the overlay degrades
+                // to "not armed" and the rest of the layer keeps running.
+                // We pass `this` so the overlay can call downstream PFNs
+                // (xrCreateSwapchain, xrAcquireSwapchainImage, …) through
+                // the layer's own dispatch.
+                if (!m_bypassApiLayer) {
+                    try {
+                        // The overlay resolves config.imageRelativePath against
+                        // the user-writable helmets/ folder under localAppData,
+                        // which the bootstrap step in xrCreateInstance keeps
+                        // populated with the build's bundled PNGs.
+                        m_helmetOverlay.initialize(this, *session, createInfo->next,
+                                                    m_helmetConfig,
+                                                    localAppData / "helmets");
+                    } catch (const std::exception& exc) {
+                        ErrorLog(fmt::format("HelmetOverlay::initialize threw: {}\n", exc.what()));
+                    }
+                }
             }
 
             return result;
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrDestroySession
+        XrResult xrDestroySession(XrSession session) override {
+            TraceLoggingWrite(g_traceProvider, "xrDestroySession", TLXArg(session, "Session"));
+
+            // Release overlay resources BEFORE forwarding: once the runtime
+            // destroys the session, its XrSwapchain / XrSpace handles are
+            // invalid and calling the destroy PFNs on them would be UB.
+            try {
+                m_helmetOverlay.shutdown();
+            } catch (const std::exception& exc) {
+                ErrorLog(fmt::format("HelmetOverlay::shutdown threw: {}\n", exc.what()));
+            }
+
+            return OpenXrApi::xrDestroySession(session);
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEndFrame
+        XrResult xrEndFrame(XrSession session, const XrFrameEndInfo* frameEndInfo) override {
+            if (!frameEndInfo || frameEndInfo->type != XR_TYPE_FRAME_END_INFO) {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+
+            // Fast path: nothing to add — forward untouched so the original
+            // layer array (which may live in the app's stack) is not copied.
+            const XrCompositionLayerBaseHeader* helmetLayer = nullptr;
+            const bool haveHelmet =
+                !m_bypassApiLayer && m_helmetOverlay.isArmed() &&
+                m_helmetOverlay.appendLayer(frameEndInfo->displayTime, &helmetLayer) &&
+                helmetLayer != nullptr;
+
+            if (!haveHelmet) {
+                return OpenXrApi::xrEndFrame(session, frameEndInfo);
+            }
+
+            // Append the helmet visor on top of the app's layers. OpenXR
+            // composition is strictly back-to-front, so placing our layer
+            // last puts it in front of everything the game submitted.
+            std::vector<const XrCompositionLayerBaseHeader*> patched;
+            patched.reserve(frameEndInfo->layerCount + 1u);
+            for (uint32_t i = 0; i < frameEndInfo->layerCount; ++i) {
+                patched.push_back(frameEndInfo->layers[i]);
+            }
+            patched.push_back(helmetLayer);
+
+            XrFrameEndInfo patchedInfo = *frameEndInfo;
+            patchedInfo.layerCount = static_cast<uint32_t>(patched.size());
+            patchedInfo.layers = patched.data();
+
+            return OpenXrApi::xrEndFrame(session, &patchedInfo);
         }
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEnumerateViewConfigurationViews
@@ -431,6 +604,15 @@ namespace openxr_api_layer {
                     if (mtime != m_configLastWriteTime) {
                         m_configLastWriteTime = mtime;
                         m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
+                        m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
+                        // Push the new helmet tunables into the live
+                        // overlay so distance_m / horizontal_fov_deg
+                        // changes are visible without a session restart.
+                        // Toggling enabled, replacing the PNG, or
+                        // changing brightness still requires a restart —
+                        // those would need swapchain / staging-texture
+                        // reallocation (see HelmetOverlay::updateLiveTunables).
+                        m_helmetOverlay.updateLiveTunables(m_helmetConfig);
                         ++m_configGen;
                     }
                 } catch (...) {
@@ -532,6 +714,12 @@ namespace openxr_api_layer {
         // Bumped every time m_config is (re)loaded, so a live-edit reload
         // forces a full recompute on the next xrLocateViews.
         uint32_t m_configGen{0};
+
+        // Helmet overlay: default-constructed (disabled) until the
+        // settings.json loader writes into m_helmetConfig. Owning the
+        // overlay by value keeps its lifetime tied to the layer instance.
+        HelmetOverlayConfig m_helmetConfig{};
+        HelmetOverlay m_helmetOverlay{};
     };
 
     // This method is required by the framework to instantiate your OpenXrApi implementation.
