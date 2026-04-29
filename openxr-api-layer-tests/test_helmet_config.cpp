@@ -34,7 +34,7 @@ using openxr_api_layer::parseHelmetConfig;
 TEST_CASE("parseHelmetConfig: empty JSON object returns disabled defaults") {
     const auto hc = parseHelmetConfig("{}");
     CHECK(hc.enabled == false);
-    CHECK(hc.textureRelativePath == "helmet_visor.png");
+    CHECK(hc.imageRelativePath == "helmet_visor.png");
     CHECK(hc.distance_m == doctest::Approx(0.5f));
     CHECK(hc.horizontal_fov_deg == doctest::Approx(130.0f));
     CHECK(hc.vertical_offset_deg == doctest::Approx(0.0f));
@@ -63,7 +63,7 @@ TEST_CASE("parseHelmetConfig: full config is parsed verbatim within clamps") {
     const auto hc = parseHelmetConfig(R"({
         "helmet_overlay": {
             "enabled": true,
-            "texture": "stilo_full_face.png",
+            "image": "stilo_full_face.png",
             "distance_m": 0.30,
             "horizontal_fov_deg": 160,
             "vertical_offset_deg": 5.0,
@@ -71,7 +71,7 @@ TEST_CASE("parseHelmetConfig: full config is parsed verbatim within clamps") {
         }
     })");
     CHECK(hc.enabled == true);
-    CHECK(hc.textureRelativePath == "stilo_full_face.png");
+    CHECK(hc.imageRelativePath == "stilo_full_face.png");
     CHECK(hc.distance_m == doctest::Approx(0.30f));
     CHECK(hc.horizontal_fov_deg == doctest::Approx(160.0f));
     CHECK(hc.vertical_offset_deg == doctest::Approx(5.0f));
@@ -178,7 +178,7 @@ TEST_CASE("parseHelmetConfig: non-object helmet_overlay returns defaults") {
 
 TEST_CASE("parseHelmetConfig: wrong type on a field falls back per-field") {
     // The bad type on enabled / distance_m / horizontal_fov_deg should not
-    // poison the whole config — texture (which is the right type) should
+    // poison the whole config — image (which is the right type) should
     // still be picked up.
     const auto hc = parseHelmetConfig(R"({
         "helmet_overlay": {
@@ -187,7 +187,7 @@ TEST_CASE("parseHelmetConfig: wrong type on a field falls back per-field") {
             "horizontal_fov_deg": [130],
             "vertical_offset_deg": null,
             "brightness": {"value": 0.5},
-            "texture": "ok.png"
+            "image": "ok.png"
         }
     })");
     CHECK(hc.enabled == false);                     // default
@@ -195,14 +195,14 @@ TEST_CASE("parseHelmetConfig: wrong type on a field falls back per-field") {
     CHECK(hc.horizontal_fov_deg == doctest::Approx(130.0f));   // default
     CHECK(hc.vertical_offset_deg == doctest::Approx(0.0f));    // default
     CHECK(hc.brightness == doctest::Approx(1.0f));             // default
-    CHECK(hc.textureRelativePath == "ok.png");      // string → kept
+    CHECK(hc.imageRelativePath == "ok.png");      // string → kept
 }
 
-TEST_CASE("parseHelmetConfig: non-string texture leaves default name in place") {
+TEST_CASE("parseHelmetConfig: non-string image leaves default name in place") {
     const auto hc = parseHelmetConfig(R"({
-        "helmet_overlay": {"texture": 123}
+        "helmet_overlay": {"image": 123}
     })");
-    CHECK(hc.textureRelativePath == "helmet_visor.png");
+    CHECK(hc.imageRelativePath == "helmet_visor.png");
 }
 
 TEST_CASE("parseHelmetConfig: extra unknown fields are ignored gracefully") {

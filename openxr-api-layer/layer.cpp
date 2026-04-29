@@ -101,9 +101,9 @@ namespace openxr_api_layer {
             << "  \"crop_bottom_percent\": 20,\n"
             << "  \"live_edit\": false,\n"
             << "  \"helmet_overlay\": {\n"
-            << "    \"_comment\": \"Draws a head-locked helmet interior on top of the game. The 'texture' filename is resolved against %LOCALAPPDATA%\\\\XR_APILAYER_MLEDOUR_fov_crop\\\\helmets\\\\ — the bundled default PNGs are bootstrapped into that directory on first run, and any custom PNG you drop in there persists across reinstalls. The three geometry knobs are orthogonal: distance_m controls depth-feel (close to face vs far away); horizontal_fov_deg controls coverage (how much of your view the helmet fills); vertical_offset_deg shifts the helmet up (+) or down (-) by an angle in your view. brightness multiplies RGB at load time (0.0 = black, 1.0 = pristine PNG) — useful when studio-lit photos look cramée on a bright VR HMD. For an apparent cylindrical curvature, pre-warp the PNG offline with tools/cylinder_warp.py — the layer renders a flat quad either way.\",\n"
+            << "    \"_comment\": \"Draws a head-locked helmet interior on top of the game. The 'image' filename is resolved against %LOCALAPPDATA%\\\\XR_APILAYER_MLEDOUR_fov_crop\\\\helmets\\\\ — the bundled default PNGs are bootstrapped into that directory on first run, and any custom PNG you drop in there persists across reinstalls. The three geometry knobs are orthogonal: distance_m controls depth-feel (close to face vs far away); horizontal_fov_deg controls coverage (how much of your view the helmet fills); vertical_offset_deg shifts the helmet up (+) or down (-) by an angle in your view. brightness multiplies RGB at load time (0.0 = black, 1.0 = pristine PNG) — useful when studio-lit photos look cramée on a bright VR HMD. For an apparent cylindrical curvature, pre-warp the PNG offline with tools/cylinder_warp.py — the layer renders a flat quad either way.\",\n"
             << "    \"enabled\": false,\n"
-            << "    \"texture\": \"helmet_visor.png\",\n"
+            << "    \"image\": \"helmet_visor.png\",\n"
             << "    \"distance_m\": 0.5,\n"
             << "    \"horizontal_fov_deg\": 130,\n"
             << "    \"vertical_offset_deg\": 0.0,\n"
@@ -276,9 +276,9 @@ namespace openxr_api_layer {
 
         Log(fmt::format(
             "Helmet overlay config: enabled={}, distance={:.2f}m, fov={:.0f}°, "
-            "v_offset={:+.1f}°, brightness={:.2f}, texture={}\n",
+            "v_offset={:+.1f}°, brightness={:.2f}, image={}\n",
             hc.enabled, hc.distance_m, hc.horizontal_fov_deg,
-            hc.vertical_offset_deg, hc.brightness, hc.textureRelativePath));
+            hc.vertical_offset_deg, hc.brightness, hc.imageRelativePath));
 
         return hc;
     }
@@ -469,7 +469,7 @@ namespace openxr_api_layer {
                 // the layer's own dispatch.
                 if (!m_bypassApiLayer) {
                     try {
-                        // The overlay resolves config.textureRelativePath against
+                        // The overlay resolves config.imageRelativePath against
                         // the user-writable helmets/ folder under localAppData,
                         // which the bootstrap step in xrCreateInstance keeps
                         // populated with the build's bundled PNGs.

@@ -105,7 +105,7 @@ have their own file.
   "live_edit": false,
   "helmet_overlay": {
     "enabled": false,
-    "texture": "helmet_visor.png",
+    "image": "helmet_visor.png",
     "distance_m": 0.5,
     "horizontal_fov_deg": 130,
     "vertical_offset_deg": 0.0,
@@ -182,18 +182,18 @@ To use a different helmet skin (Stilo, Arai, karting, etc.):
 1. Drop your PNG in `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\` —
    e.g. `arai_full_face.png`.
 2. Edit the per-app `<app>_settings.json` and set
-   `"texture": "arai_full_face.png"` in the `helmet_overlay` block.
+   `"image": "arai_full_face.png"` in the `helmet_overlay` block.
 3. Restart the game.
 
 You can keep multiple PNGs side by side and switch between them
-just by changing the `texture` field.
+just by changing the `image` field.
 
 ### Parameters
 
 ```json
 "helmet_overlay": {
   "enabled": false,
-  "texture": "helmet_visor.png",
+  "image": "helmet_visor.png",
   "distance_m": 0.5,
   "horizontal_fov_deg": 130,
   "vertical_offset_deg": 0.0,
@@ -204,7 +204,7 @@ just by changing the `texture` field.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Master switch for the helmet overlay. |
-| `texture` | string | `helmet_visor.png` | Filename of the PNG to load, resolved relative to `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\`. Change this to switch between several PNGs you keep in that folder side by side. |
+| `image` | string | `helmet_visor.png` | Filename of the PNG to load, resolved relative to `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\`. Change this to switch between several PNGs you keep in that folder side by side. |
 | `distance_m` | float | `0.5` | **Depth-feel knob**: distance from the eye to the quad's plane, in meters. Controls the stereo disparity, i.e. how "close to your face" the helmet feels. Try `0.15` for "right against the face" (real helmet feel), `0.3` for "close but not claustrophobic", `0.5` for "TV-in-front-of-you". Live-tunable. |
 | `horizontal_fov_deg` | float | `130` | **Coverage knob**: angular width of the quad in your view, in degrees. Clamped to `[10°, 270°]`. The physical quad width is derived as `2 × distance_m × tan(fov/2)`, so changing `distance_m` no longer also changes coverage — these two parameters are orthogonal and can be tuned independently. Try `90°` for "tight visor", `130°` for "moderate wraparound", `180°` for "ear-to-ear". Quad height follows the PNG aspect ratio so the image is never stretched. Live-tunable. |
 | `vertical_offset_deg` | float | `0.0` | **Position knob**: shifts the quad up (`+`) or down (`-`) by an angle in your view, in degrees. Clamped to `[-30°, +30°]`. Decoupled from `distance_m` — at any distance, "+5°" always shifts the helmet up by 5° in your FOV. Useful when the helmet sits slightly above or below your gaze line because of HMD lens placement or asymmetric `crop_top` / `crop_bottom`. Try `+2°` (helmet up) or `-2°` (helmet down) and adjust to taste. Live-tunable. |
@@ -264,7 +264,7 @@ render:
 Drop the resulting PNG into
 `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\` (overwriting
 the bundled `helmet_visor.png` to replace the default, or saving
-under another name to add a new skin you select via the `texture`
+under another name to add a new skin you select via the `image`
 field) and restart the game.
 
 ### Optional: smoother alpha transition

@@ -54,7 +54,7 @@ namespace openxr_api_layer {
     // User-facing configuration, mirrored from settings.json.
     struct HelmetOverlayConfig {
         bool enabled = false;
-        std::string textureRelativePath = "helmet_visor.png";
+        std::string imageRelativePath = "helmet_visor.png";
 
         // distance_m: distance from the eye to the quad's plane, in
         // meters. Controls the depth-feel (stereo disparity) — at
@@ -110,7 +110,7 @@ namespace openxr_api_layer {
         // reach downstream xrCreateSwapchain / xrAcquire…Image / etc.
         // through the layer's own dispatch (same as every other part of
         // the layer). `helmetsDir` is the directory the texture path
-        // (config.textureRelativePath) is resolved against — typically
+        // (config.imageRelativePath) is resolved against — typically
         // %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets so users
         // can drop PNGs without admin elevation. Returns true if the
         // overlay is armed and will contribute a layer in appendLayer();
