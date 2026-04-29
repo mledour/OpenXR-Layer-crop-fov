@@ -162,25 +162,42 @@ all around, transparent rectangle in front of the eyes for the
 visor", which gives the perception of being inside a real helmet.
 
 A starter `helmet_visor.png` (3:2, 2048×1365) ships with the
-installer. On the first launch of any OpenXR application after
-install, the layer copies bundled PNGs from
-`<install dir>\helmets\` into the user-writable
+installer. The overlay loads PNGs from the user-writable directory
 
 ```
 %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\
 ```
 
-next to the per-app `*_settings.json` files. From then on, the
-overlay loads its texture from there — no admin elevation needed
-to swap helmets. Existing PNGs in that user directory are **never**
-overwritten on subsequent launches, so any custom asset you drop in
-sticks across reinstalls of the layer (same contract as
-`<app>_settings.json`).
+next to the per-app `*_settings.json` files — no admin elevation
+needed to add or swap helmets.
 
-To use a different helmet skin (Stilo, Arai, karting, etc.):
+### How that directory is populated
+
+| Install path | When the directory is created | What gets dropped in |
+|---|---|---|
+| **Installer (`Setup.exe`)** | At install time, before any game runs | All bundled PNGs from the build |
+| **Manual ZIP + `Install-Layer.ps1`** | First launch of any OpenXR application after install | All bundled PNGs found at `<unzip dir>\helmets\`, copied by the layer's first-run logic |
+
+### Upgrade policy
+
+- **Bundled filenames are canonical.** The installer **overwrites**
+  same-named PNGs on every upgrade, so a fix or refresh of
+  `helmet_visor.png` in the build propagates automatically. If you
+  edit `helmet_visor.png` in place, your changes will be wiped on
+  the next install.
+- **User-added PNGs (different filenames) are never touched.**
+  Drop `arai_full_face.png`, `kart_open.png`, anything you like —
+  installer upgrades and the runtime first-run logic both leave
+  them alone, same contract as `<app>_settings.json`.
+- **Uninstall leaves the entire helmets directory in place.**
+  Cleanup is the user's responsibility (the per-app config files
+  live alongside it and would be orphaned otherwise).
+
+### Switching helmet skin
 
 1. Drop your PNG in `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\` —
-   e.g. `arai_full_face.png`.
+   e.g. `arai_full_face.png`. Use a name **different** from any
+   bundled PNG so the installer never overwrites it on upgrade.
 2. Edit the per-app `<app>_settings.json` and set
    `"image": "arai_full_face.png"` in the `helmet_overlay` block.
 3. Restart the game.
