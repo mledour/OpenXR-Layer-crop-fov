@@ -121,7 +121,7 @@ have their own file.
 | `crop_right_percent` | float | `10` | Percentage of the image covered by the black bar on the right edge (0-50). |
 | `crop_top_percent` | float | `15` | Percentage of the image covered by the black bar on the top edge (0-50). |
 | `crop_bottom_percent` | float | `20` | Percentage of the image covered by the black bar on the bottom edge (0-50). |
-| `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Picks up changes to crop percentages and to `helmet_overlay.distance_m` / `helmet_overlay.horizontal_fov_deg` / `helmet_overlay.vertical_offset_deg`. Set back to false once you're happy. |
+| `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Picks up changes to crop percentages and to `helmet_overlay.distance_m` / `helmet_overlay.horizontal_fov_deg` / `helmet_overlay.vertical_offset_deg` / `helmet_overlay.debug_visibility_mask` / `helmet_overlay.use_visibility_mask`. Set back to false once you're happy. |
 | `helmet_overlay` | object | (see below) | Helmet overlay configuration. See [Helmet overlay](#helmet-overlay). |
 
 ### How the percentages are interpreted
@@ -214,7 +214,9 @@ just by changing the `image` field.
   "distance_m": 0.5,
   "horizontal_fov_deg": 130,
   "vertical_offset_deg": 0.0,
-  "brightness": 1.0
+  "brightness": 1.0,
+  "use_visibility_mask": true,
+  "debug_visibility_mask": false
 }
 ```
 
@@ -226,6 +228,8 @@ just by changing the `image` field.
 | `horizontal_fov_deg` | float | `130` | **Coverage knob**: angular width of the quad in your view, in degrees. Clamped to `[10°, 270°]`. The physical quad width is derived as `2 × distance_m × tan(fov/2)`, so changing `distance_m` no longer also changes coverage — these two parameters are orthogonal and can be tuned independently. Try `90°` for "tight visor", `130°` for "moderate wraparound", `180°` for "ear-to-ear". Quad height follows the PNG aspect ratio so the image is never stretched. Live-tunable. |
 | `vertical_offset_deg` | float | `0.0` | **Position knob**: shifts the quad up (`+`) or down (`-`) by an angle in your view, in degrees. Clamped to `[-30°, +30°]`. Decoupled from `distance_m` — at any distance, "+5°" always shifts the helmet up by 5° in your FOV. Useful when the helmet sits slightly above or below your gaze line because of HMD lens placement or asymmetric `crop_top` / `crop_bottom`. Try `+2°` (helmet up) or `-2°` (helmet down) and adjust to taste. Live-tunable. |
 | `brightness` | float | `1.0` | RGB multiplier applied at load time, clamped to `[0.0, 1.0]`. `1.0` = pristine PNG, `0.5` = half luminance, `0.0` = pure black. Useful when studio-lit photos look cramée on a bright VR HMD in a dim cockpit. Alpha is never multiplied so the visor cutout stays transparent at any value. **Not** live-tunable — changing it requires a session restart (the texture is uploaded once at session start). |
+| `use_visibility_mask` | bool | `true` | When the runtime grants `XR_KHR_visibility_mask`, the layer augments the runtime's hidden-triangle mesh with a bbox of the helmet's opaque foam region so apps can stencil-reject those pixels and skip shading. Set to `false` to keep the helmet quad rendering normally but disable the mask contribution — useful as an escape hatch for games whose stencil-setup doesn't tolerate non-trivial mask geometry. Live-tunable; toggling fires a `XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR` so apps that listen pick up the change mid-session. |
+| `debug_visibility_mask` | bool | `false` | Diagnostic-only: tints the helmet's foam region red on the staging texture so you can directly see in-headset which pixels the visibility mask is asking the app to skip. Turn on, observe the red halo around the visor cutout, then turn back off. The tint always shows the bbox the mask would cover, even if `use_visibility_mask` is `false` — handy for sanity-checking the bbox detection independent of whether the runtime is actually consuming the mask. **Live-tunable** (with `live_edit: true`): toggling tears down and recreates the static-image swapchain, costing a few ms once per toggle — fine for a single in-game flip, not for spamming. |
 
 ### Custom PNG: requirements
 

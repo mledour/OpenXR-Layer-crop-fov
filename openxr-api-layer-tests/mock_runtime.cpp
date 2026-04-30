@@ -216,6 +216,30 @@ namespace mock {
             return XR_SUCCESS;
         }
 
+        // Visibility-mask companion stubs. The runtime returns an
+        // empty mask (no hidden geometry) for both probe (capacity=0)
+        // and fetch (capacity>0) calls. The layer's override forwards
+        // to us, so this stays a no-op end-to-end until the helmet
+        // contribution lands in a later phase.
+        XrResult XRAPI_CALL m_xrGetVisibilityMaskKHR(XrSession /*session*/,
+                                                    XrViewConfigurationType /*viewConfigurationType*/,
+                                                    uint32_t /*viewIndex*/,
+                                                    XrVisibilityMaskTypeKHR /*visibilityMaskType*/,
+                                                    XrVisibilityMaskKHR* visibilityMask) {
+            if (!visibilityMask) return XR_ERROR_VALIDATION_FAILURE;
+            visibilityMask->vertexCountOutput = 0;
+            visibilityMask->indexCountOutput = 0;
+            return XR_SUCCESS;
+        }
+
+        // Pure pass-through-equivalent: nothing to deliver, return
+        // XR_EVENT_UNAVAILABLE so the app's polling loop terminates
+        // cleanly. Same contract as a runtime with no pending events.
+        XrResult XRAPI_CALL m_xrPollEvent(XrInstance /*instance*/,
+                                         XrEventDataBuffer* /*eventData*/) {
+            return XR_EVENT_UNAVAILABLE;
+        }
+
         XrResult XRAPI_CALL m_xrEndFrame(XrSession /*session*/, const XrFrameEndInfo* info) {
             g_state.endFrameCallCount++;
             g_state.lastEndFrameProjLayers.clear();
@@ -290,6 +314,10 @@ namespace mock {
             *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrReleaseSwapchainImage);
         else if (n == "xrEndFrame")
             *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrEndFrame);
+        else if (n == "xrGetVisibilityMaskKHR")
+            *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrGetVisibilityMaskKHR);
+        else if (n == "xrPollEvent")
+            *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrPollEvent);
         else {
             *function = nullptr;
             return XR_ERROR_FUNCTION_UNSUPPORTED;

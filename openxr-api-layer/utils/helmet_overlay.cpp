@@ -24,6 +24,8 @@
 
 #include "helmet_overlay.h"
 
+#include "helmet_visibility_mask.h"  // detectVisorBbox for debug tint
+
 #include <framework/dispatch.gen.h>
 #include <log.h>
 
@@ -160,6 +162,12 @@ namespace openxr_api_layer {
         // re-querying the format list during the init helpers.
         int64_t swapchainFormat = kFormatUNORM;
         DXGI_FORMAT d3dFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+        // Source directory the PNG was loaded from. Kept so live-edit
+        // can re-decode the image when debug_visibility_mask is
+        // toggled (the static-image swapchain has to be torn down and
+        // recreated to flip the tint on/off).
+        std::filesystem::path helmetsDir;
     };
 
     HelmetOverlay::HelmetOverlay() : m_impl(std::make_unique<Impl>()) {}
@@ -202,6 +210,7 @@ namespace openxr_api_layer {
         m_impl->config = config;
         m_impl->api = api;
         m_impl->session = session;
+        m_impl->helmetsDir = helmetsDir;
 
         if (!config.enabled) {
             Log("HelmetOverlay: disabled by config, staying inert\n");
@@ -384,6 +393,51 @@ namespace openxr_api_layer {
             Log(fmt::format("HelmetOverlay: applied brightness={:.2f} to texture\n", bright));
         }
 
+        // Debug aid: tint everything outside the detected visor bbox in
+        // red so the user can see in-headset which region the
+        // visibility mask covers. The bbox detection here uses the
+        // SAME helper helmet_visibility_mask.cpp uses, so the red zone
+        // matches the four NDC strips fed to xrGetVisibilityMaskKHR
+        // pixel-for-pixel. Diagnostic-only: ship with this off.
+        if (m_impl->config.debug_visibility_mask) {
+            float u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
+            if (detectVisorBbox(uploadBytes.data(),
+                                static_cast<int>(texW),
+                                static_cast<int>(texH),
+                                kVisorAlphaThreshold,
+                                u0, v0, u1, v1)) {
+                const int x0 = static_cast<int>(u0 * texW);
+                const int y0 = static_cast<int>(v0 * texH);
+                const int x1 = static_cast<int>(u1 * texW);
+                const int y1 = static_cast<int>(v1 * texH);
+                size_t tinted = 0;
+                for (uint32_t y = 0; y < texH; ++y) {
+                    const bool yInside = (static_cast<int>(y) >= y0 && static_cast<int>(y) < y1);
+                    for (uint32_t x = 0; x < texW; ++x) {
+                        const bool xInside = (static_cast<int>(x) >= x0 && static_cast<int>(x) < x1);
+                        if (xInside && yInside) continue;
+                        const size_t idx = (static_cast<size_t>(y) * texW + x) * 4u;
+                        // Push red up, dim green/blue. Keep alpha as-is
+                        // so foam pixels that were already opaque stay
+                        // opaque, and visor-side transparency outside
+                        // the bbox (rare in practice) is preserved.
+                        uploadBytes[idx + 0] = static_cast<uint8_t>(
+                            std::min(255, uploadBytes[idx + 0] + 128));
+                        uploadBytes[idx + 1] = static_cast<uint8_t>(uploadBytes[idx + 1] / 4);
+                        uploadBytes[idx + 2] = static_cast<uint8_t>(uploadBytes[idx + 2] / 4);
+                        ++tinted;
+                    }
+                }
+                Log(fmt::format(
+                    "HelmetOverlay: debug_visibility_mask ON — tinted {} foam pixels "
+                    "(visor bbox uv=[{:.3f}..{:.3f}, {:.3f}..{:.3f}])\n",
+                    tinted, u0, u1, v0, v1));
+            } else {
+                Log("HelmetOverlay: debug_visibility_mask ON but no visor bbox detected "
+                    "(PNG fully opaque?), skipping tint\n");
+            }
+        }
+
         D3D11_TEXTURE2D_DESC td{};
         td.Width = texW;
         td.Height = texH;
@@ -501,6 +555,55 @@ namespace openxr_api_layer {
     void HelmetOverlay::updateLiveTunables(const HelmetOverlayConfig& newConfig) {
         if (!m_impl || m_impl->mode != HelmetOverlayMode::Quad) return;
 
+        // ---- debug_visibility_mask toggle. ---------------------------
+        // Static-image swapchain → flipping the tint requires tearing
+        // it down and recreating it from a fresh PNG decode. Out-of-
+        // band from the geometric tunables below because the cost is
+        // very different (~ms here, ~µs there) and the failure modes
+        // are different too (here the overlay can go inert).
+        if (m_impl->config.debug_visibility_mask != newConfig.debug_visibility_mask) {
+            m_impl->config.debug_visibility_mask = newConfig.debug_visibility_mask;
+
+            // Drop the old swapchain first. The runtime has its own
+            // copy of the static image, but our handle is the only
+            // way back to it — destroying without a replacement is
+            // safe because appendLayer() bails when swapchain is null.
+            if (m_impl->swapchain != XR_NULL_HANDLE) {
+                m_impl->api->xrDestroySwapchain(m_impl->swapchain);
+                m_impl->swapchain = XR_NULL_HANDLE;
+            }
+
+            const std::filesystem::path pngPath =
+                m_impl->helmetsDir / m_impl->config.imageRelativePath;
+            uint8_t* pngPixels = nullptr;
+            int pngW = 0, pngH = 0;
+            struct PixelGuard {
+                uint8_t* p;
+                ~PixelGuard() { if (p) stbi_image_free(p); }
+            };
+            if (!loadPngRgba8(pngPath, &pngPixels, &pngW, &pngH)) {
+                Log("HelmetOverlay: live-edit debug toggle — re-decode failed, "
+                    "overlay disabled until next session\n");
+                m_impl->mode = HelmetOverlayMode::Disabled;
+                return;
+            }
+            PixelGuard guard{pngPixels};
+
+            if (!createSwapchainFromPng(pngPixels, pngW, pngH)) {
+                Log("HelmetOverlay: live-edit debug toggle — re-upload failed, "
+                    "overlay disabled until next session\n");
+                m_impl->mode = HelmetOverlayMode::Disabled;
+                return;
+            }
+
+            // Quad pose / size haven't changed — only the underlying
+            // texture. Repoint subImage at the new handle and we're done.
+            m_impl->quadLayer.subImage.swapchain = m_impl->swapchain;
+            Log(fmt::format("HelmetOverlay: live-tuned debug_visibility_mask={}\n",
+                            m_impl->config.debug_visibility_mask));
+        }
+
+        // ---- Geometric tunables (cheap, no swapchain churn). ---------
         // Bail out cheaply if nothing changed (avoids spamming the log
         // when the file is touched but the helmet block is identical).
         const bool sameDistance =
