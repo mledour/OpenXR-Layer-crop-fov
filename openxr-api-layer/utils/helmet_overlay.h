@@ -108,11 +108,11 @@ namespace openxr_api_layer {
         // Debug aid: tints the foam region (everything outside the
         // detected visor bbox) red on the staging texture so the user
         // can directly see which pixels the visibility mask covers.
-        // Off by default — turn on, restart the game, observe the red
-        // halo around the visor cutout, then turn back off. Only
-        // affects the helmet PNG upload at session start; not live-
-        // tunable. Useful when tuning the bbox or sanity-checking that
-        // the mask region matches the visor opening.
+        // Off by default — turn on, observe the red halo around the
+        // visor cutout, then turn back off. Live-tunable: toggling
+        // tears down and recreates the static-image swapchain (~few
+        // ms, one-shot per toggle), so the user can flip it in-game
+        // without restarting the session.
         bool debug_visibility_mask = false;
     };
 
@@ -157,8 +157,7 @@ namespace openxr_api_layer {
         bool appendLayer(XrTime displayTime,
                          const XrCompositionLayerBaseHeader** outLayer);
 
-        // Apply a live-edit reload of settings.json. Only fields safe
-        // to change without rebuilding swapchain/textures are honoured:
+        // Apply a live-edit reload of settings.json. Honoured fields:
         //   - distance_m            (re-poses the quad in view space)
         //   - horizontal_fov_deg    (resizes the quad's apparent FOV;
         //                            physical width is recomputed from
@@ -167,9 +166,15 @@ namespace openxr_api_layer {
         //                            angle in the user's view; world-
         //                            space Y is recomputed from
         //                            distance_m × tan(deg))
+        //   - debug_visibility_mask (rebuilds the static-image swapchain
+        //                            with or without the red bbox tint;
+        //                            costs a PNG re-decode + swapchain
+        //                            recreation, fine for toggling
+        //                            in-game but more expensive than
+        //                            the geometric tunables above)
         // Toggling enabled, replacing the PNG, or changing brightness
-        // still requires a session restart — those would need swapchain
-        // / staging-texture reallocation and a fresh initialize() call.
+        // still requires a session restart — those would need a fresh
+        // initialize() call.
         // No-op if the overlay is not armed.
         void updateLiveTunables(const HelmetOverlayConfig& newConfig);
 

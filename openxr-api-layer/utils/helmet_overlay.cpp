@@ -162,6 +162,12 @@ namespace openxr_api_layer {
         // re-querying the format list during the init helpers.
         int64_t swapchainFormat = kFormatUNORM;
         DXGI_FORMAT d3dFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+        // Source directory the PNG was loaded from. Kept so live-edit
+        // can re-decode the image when debug_visibility_mask is
+        // toggled (the static-image swapchain has to be torn down and
+        // recreated to flip the tint on/off).
+        std::filesystem::path helmetsDir;
     };
 
     HelmetOverlay::HelmetOverlay() : m_impl(std::make_unique<Impl>()) {}
@@ -204,6 +210,7 @@ namespace openxr_api_layer {
         m_impl->config = config;
         m_impl->api = api;
         m_impl->session = session;
+        m_impl->helmetsDir = helmetsDir;
 
         if (!config.enabled) {
             Log("HelmetOverlay: disabled by config, staying inert\n");
@@ -548,6 +555,55 @@ namespace openxr_api_layer {
     void HelmetOverlay::updateLiveTunables(const HelmetOverlayConfig& newConfig) {
         if (!m_impl || m_impl->mode != HelmetOverlayMode::Quad) return;
 
+        // ---- debug_visibility_mask toggle. ---------------------------
+        // Static-image swapchain → flipping the tint requires tearing
+        // it down and recreating it from a fresh PNG decode. Out-of-
+        // band from the geometric tunables below because the cost is
+        // very different (~ms here, ~µs there) and the failure modes
+        // are different too (here the overlay can go inert).
+        if (m_impl->config.debug_visibility_mask != newConfig.debug_visibility_mask) {
+            m_impl->config.debug_visibility_mask = newConfig.debug_visibility_mask;
+
+            // Drop the old swapchain first. The runtime has its own
+            // copy of the static image, but our handle is the only
+            // way back to it — destroying without a replacement is
+            // safe because appendLayer() bails when swapchain is null.
+            if (m_impl->swapchain != XR_NULL_HANDLE) {
+                m_impl->api->xrDestroySwapchain(m_impl->swapchain);
+                m_impl->swapchain = XR_NULL_HANDLE;
+            }
+
+            const std::filesystem::path pngPath =
+                m_impl->helmetsDir / m_impl->config.imageRelativePath;
+            uint8_t* pngPixels = nullptr;
+            int pngW = 0, pngH = 0;
+            struct PixelGuard {
+                uint8_t* p;
+                ~PixelGuard() { if (p) stbi_image_free(p); }
+            };
+            if (!loadPngRgba8(pngPath, &pngPixels, &pngW, &pngH)) {
+                Log("HelmetOverlay: live-edit debug toggle — re-decode failed, "
+                    "overlay disabled until next session\n");
+                m_impl->mode = HelmetOverlayMode::Disabled;
+                return;
+            }
+            PixelGuard guard{pngPixels};
+
+            if (!createSwapchainFromPng(pngPixels, pngW, pngH)) {
+                Log("HelmetOverlay: live-edit debug toggle — re-upload failed, "
+                    "overlay disabled until next session\n");
+                m_impl->mode = HelmetOverlayMode::Disabled;
+                return;
+            }
+
+            // Quad pose / size haven't changed — only the underlying
+            // texture. Repoint subImage at the new handle and we're done.
+            m_impl->quadLayer.subImage.swapchain = m_impl->swapchain;
+            Log(fmt::format("HelmetOverlay: live-tuned debug_visibility_mask={}\n",
+                            m_impl->config.debug_visibility_mask));
+        }
+
+        // ---- Geometric tunables (cheap, no swapchain churn). ---------
         // Bail out cheaply if nothing changed (avoids spamming the log
         // when the file is touched but the helmet block is identical).
         const bool sameDistance =
