@@ -40,6 +40,7 @@ TEST_CASE("parseHelmetConfig: empty JSON object returns disabled defaults") {
     CHECK(hc.vertical_offset_deg == doctest::Approx(0.0f));
     CHECK(hc.brightness == doctest::Approx(1.0f));
     CHECK(hc.use_visibility_mask == true);
+    CHECK(hc.invert_visibility_mask == false);
     CHECK(hc.debug_visibility_mask == false);
 }
 
@@ -96,6 +97,30 @@ TEST_CASE("parseHelmetConfig: use_visibility_mask wrong type falls back to defau
         "helmet_overlay": {"use_visibility_mask": "no"}
     })");
     CHECK(hc.use_visibility_mask == true);  // string ignored, default kept
+}
+
+TEST_CASE("parseHelmetConfig: invert_visibility_mask defaults to false") {
+    // Off by default — the spec-correct behaviour is to emit the
+    // foam strips around the visor as HIDDEN_TRIANGLE_MESH. Inverting
+    // is an opt-in workaround for apps that mis-interpret the spec.
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"enabled": true}
+    })");
+    CHECK(hc.invert_visibility_mask == false);
+}
+
+TEST_CASE("parseHelmetConfig: invert_visibility_mask true is honoured") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"invert_visibility_mask": true}
+    })");
+    CHECK(hc.invert_visibility_mask == true);
+}
+
+TEST_CASE("parseHelmetConfig: invert_visibility_mask wrong type falls back to default") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"invert_visibility_mask": "yes"}
+    })");
+    CHECK(hc.invert_visibility_mask == false);  // string ignored, default kept
 }
 
 TEST_CASE("parseHelmetConfig: debug_visibility_mask defaults to false") {

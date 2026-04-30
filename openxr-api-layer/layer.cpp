@@ -974,6 +974,7 @@ namespace openxr_api_layer {
                         const float oldFov      = m_helmetConfig.horizontal_fov_deg;
                         const float oldOffset   = m_helmetConfig.vertical_offset_deg;
                         const bool  oldUseMask  = m_helmetConfig.use_visibility_mask;
+                        const bool  oldInvert   = m_helmetConfig.invert_visibility_mask;
 
                         m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
                         // Push the new helmet tunables into the live
@@ -1001,7 +1002,9 @@ namespace openxr_api_layer {
                             std::abs(oldOffset - m_helmetConfig.vertical_offset_deg) > 1e-3f;
                         const bool useMaskChanged =
                             oldUseMask != m_helmetConfig.use_visibility_mask;
-                        if ((geomChanged || useMaskChanged) &&
+                        const bool invertChanged =
+                            oldInvert != m_helmetConfig.invert_visibility_mask;
+                        if ((geomChanged || useMaskChanged || invertChanged) &&
                             m_visibilityMaskExtensionGranted &&
                             m_visibilityMask.isInitialized() &&
                             m_session != XR_NULL_HANDLE) {
@@ -1024,10 +1027,11 @@ namespace openxr_api_layer {
                             }
                             Log(fmt::format(
                                 "VisibilityMask: live-edit invalidation "
-                                "(geom={}, useMaskToggle={}), queued mask-changed "
-                                "events for both eyes\n",
+                                "(geom={}, useMaskToggle={}, invertToggle={}), "
+                                "queued mask-changed events for both eyes\n",
                                 geomChanged ? "yes" : "no",
-                                useMaskChanged ? "yes" : "no"));
+                                useMaskChanged ? "yes" : "no",
+                                invertChanged ? "yes" : "no"));
                         }
                     }
                 } catch (...) {

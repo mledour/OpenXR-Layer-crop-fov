@@ -342,6 +342,22 @@ namespace openxr_api_layer {
         // there's nothing to mask.
         if (visorMinX >= visorMaxX || visorMinY >= visorMaxY) return;
 
+        if (config.invert_visibility_mask) {
+            // Inverted mode: emit a single rect that IS the visor
+            // bbox, instead of the 4 foam strips around it. The mesh
+            // is then "wrong by spec" (HIDDEN_TRIANGLE_MESH should be
+            // the not-visible area), but on apps that mis-interpret
+            // the spec — observed on DiRT Rally 2 + OpenComposite +
+            // PimaxXR, where the app renders the scene where the
+            // mesh IS instead of where it isn't — inverting here
+            // restores the correct visual result. Per-app opt-in.
+            mesh.vertices.reserve(4);
+            mesh.indices.reserve(6);
+            appendNdcRectAsTriangles(mesh, visorMinX, visorMinY,
+                                     visorMaxX, visorMaxY);
+            return;
+        }
+
         // Reserve enough room: up to 4 strips × 4 vertices = 16,
         // × 6 indices = 24. Some strips may be empty (degenerate)
         // when the visor reaches the helmet AABB on a given side.

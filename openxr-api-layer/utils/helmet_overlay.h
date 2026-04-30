@@ -105,6 +105,18 @@ namespace openxr_api_layer {
         // mid-session.
         bool use_visibility_mask = true;
 
+        // Inverts the visibility-mask geometry: instead of emitting 4
+        // strips around the visor bbox (the foam, the spec-correct
+        // "hidden" area), emits a single rect that IS the visor bbox.
+        // Use case: apps that interpret HIDDEN_TRIANGLE_MESH inversely
+        // (observed on DiRT Rally 2 + OpenComposite + PimaxXR — the
+        // app renders the scene where the mesh IS, skips elsewhere).
+        // For those apps, inverting our mesh restores the correct
+        // visual result. For spec-conforming apps the inverted mesh
+        // is wrong (visor opening becomes black). Per-app opt-in via
+        // settings.json. Live-tunable (fires a mask-changed event).
+        bool invert_visibility_mask = false;
+
         // Debug aid: when true, the helmet overlay quad is NOT
         // appended to the frame, while the visibility mask is still
         // emitted normally via xrGetVisibilityMaskKHR. The user sees
