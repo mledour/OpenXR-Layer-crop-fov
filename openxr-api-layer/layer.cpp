@@ -573,6 +573,18 @@ namespace openxr_api_layer {
             }
             m_eyePoseCacheValid = false;
             m_visibilityMaskBuilt.fill(false);
+            // Diagnostic: report whether the app actually queried
+            // xrGetVisibilityMaskKHR during the session. Zero means
+            // our mask contribution had no chance to show up in the
+            // app's stencil and any perf impact attributed to the
+            // visibility-mask path is environmental noise.
+            if (m_visibilityMaskExtensionGranted) {
+                Log(fmt::format(
+                    "VisibilityMask: app queried xrGetVisibilityMaskKHR — "
+                    "view 0: {} call(s), view 1: {} call(s) over the session\n",
+                    m_visibilityMaskQueryCount[0], m_visibilityMaskQueryCount[1]));
+            }
+            m_visibilityMaskQueryCount.fill(0);
             // Drop any queued visibility-mask events tied to this
             // session — they reference m_session which is about to
             // become invalid.
@@ -628,6 +640,15 @@ namespace openxr_api_layer {
                                         uint32_t viewIndex,
                                         XrVisibilityMaskTypeKHR visibilityMaskType,
                                         XrVisibilityMaskKHR* visibilityMask) override {
+            // Tally inbound calls. Counted before the early bail-outs
+            // below because the diagnostic is "did the app ask?",
+            // independent of whether we contribute. Both probe and
+            // fetch increment — a typical app shows a count of 2
+            // per eye over the session lifetime.
+            if (viewIndex < kMaxVisibilityViews) {
+                ++m_visibilityMaskQueryCount[viewIndex];
+            }
+
             // Always forward first — the runtime fills its own mesh
             // (lens occlusion / outside-FOV pixels) and crucially the
             // *Output count fields, which our append logic reads.
@@ -1013,6 +1034,16 @@ namespace openxr_api_layer {
         // when false, then flips to true. Reset to all-false on
         // live-edit geometry changes.
         std::array<bool, kMaxVisibilityViews> m_visibilityMaskBuilt{};
+        // Per-view tally of inbound xrGetVisibilityMaskKHR calls.
+        // Diagnostic only: lets us tell at session-end whether the
+        // app actually consumed our mask contribution. Typical apps
+        // call it twice per eye at startup (one probe + one fetch);
+        // some apps re-query on visibility-mask events. A zero count
+        // means the app never asked — our mask was effectively
+        // wallpaper, not stencil input — and the visibility-mask
+        // path produces no measurable perf delta on that runtime/app
+        // pair regardless of how good the mesh is.
+        std::array<uint32_t, kMaxVisibilityViews> m_visibilityMaskQueryCount{};
         // Events queued for the next xrPollEvent calls. Each entry
         // is a XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR ready
         // to be memcpy'd into the app's eventData buffer. Pushed
