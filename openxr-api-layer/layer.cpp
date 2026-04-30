@@ -628,7 +628,7 @@ namespace openxr_api_layer {
             if (!m_visibilityMaskExtensionGranted) return result;
             if (!m_visibilityMask.isInitialized()) return result;
             if (!m_eyePoseCacheValid) return result;
-            if (visibilityMaskType != XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH) return result;
+            if (visibilityMaskType != XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR) return result;
             if (viewIndex >= kMaxVisibilityViews) return result;
 
             // Build (or rebuild) the helmet NDC mesh for this eye. v1
