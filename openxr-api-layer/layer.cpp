@@ -609,9 +609,17 @@ namespace openxr_api_layer {
 
             // Fast path: nothing to add — forward untouched so the original
             // layer array (which may live in the app's stack) is not copied.
+            // debug_visibility_mask=true intentionally hides the helmet quad
+            // so the user can see exactly what the visibility mask removed
+            // from the rendered scene (the foam region appears as the app's
+            // clear color, the visor opening renders normally). The mask is
+            // still emitted via xrGetVisibilityMaskKHR — only the on-top
+            // composition layer is suppressed.
             const XrCompositionLayerBaseHeader* helmetLayer = nullptr;
             const bool haveHelmet =
-                !m_bypassApiLayer && m_helmetOverlay.isArmed() &&
+                !m_bypassApiLayer &&
+                !m_helmetConfig.debug_visibility_mask &&
+                m_helmetOverlay.isArmed() &&
                 m_helmetOverlay.appendLayer(frameEndInfo->displayTime, &helmetLayer) &&
                 helmetLayer != nullptr;
 

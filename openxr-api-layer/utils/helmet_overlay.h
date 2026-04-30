@@ -105,14 +105,19 @@ namespace openxr_api_layer {
         // mid-session.
         bool use_visibility_mask = true;
 
-        // Debug aid: tints the foam region (everything outside the
-        // detected visor bbox) red on the staging texture so the user
-        // can directly see which pixels the visibility mask covers.
-        // Off by default — turn on, observe the red halo around the
-        // visor cutout, then turn back off. Live-tunable: toggling
-        // tears down and recreates the static-image swapchain (~few
-        // ms, one-shot per toggle), so the user can flip it in-game
-        // without restarting the session.
+        // Debug aid: when true, the helmet overlay quad is NOT
+        // appended to the frame, while the visibility mask is still
+        // emitted normally via xrGetVisibilityMaskKHR. The user sees
+        // the rendered scene with the foam region replaced by the
+        // app's clear color (typically black or the sky) — i.e.,
+        // exactly what the app stencil-skipped after the full
+        // pipeline (this layer → OpenComposite → app's stencil mesh).
+        // Off by default. Live-tunable: takes effect on the next
+        // frame, no swapchain rebuild. Use this to verify visually
+        // that the mask geometry is correct end-to-end; an earlier
+        // version that tinted the helmet overlay red was misleading
+        // because it only validated the UV bbox detection, not the
+        // downstream NDC projection.
         bool debug_visibility_mask = false;
     };
 
@@ -166,12 +171,11 @@ namespace openxr_api_layer {
         //                            angle in the user's view; world-
         //                            space Y is recomputed from
         //                            distance_m × tan(deg))
-        //   - debug_visibility_mask (rebuilds the static-image swapchain
-        //                            with or without the red bbox tint;
-        //                            costs a PNG re-decode + swapchain
-        //                            recreation, fine for toggling
-        //                            in-game but more expensive than
-        //                            the geometric tunables above)
+        //   - debug_visibility_mask (just flips a flag; on next frame
+        //                            xrEndFrame either appends the
+        //                            helmet quad or doesn't, exposing
+        //                            the app's stencil output for a
+        //                            visual sanity-check)
         // Toggling enabled, replacing the PNG, or changing brightness
         // still requires a session restart — those would need a fresh
         // initialize() call.
