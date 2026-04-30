@@ -833,7 +833,13 @@ namespace openxr_api_layer {
                                 ev.session = m_session;
                                 ev.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
                                 ev.viewIndex = i;
-                                ev.visibilityMaskType = XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR;
+                                // Note: XrEventDataVisibilityMaskChangedKHR
+                                // does NOT carry a visibilityMaskType field —
+                                // the spec is "this view's mask changed, re-
+                                // query whichever types you care about". So
+                                // apps that built a HIDDEN_TRIANGLE_MESH
+                                // stencil will re-query that type on their
+                                // own.
                                 m_pendingVisibilityMaskEvents.push_back(ev);
                             }
                             Log("VisibilityMask: helmet geometry changed via live-edit, "
