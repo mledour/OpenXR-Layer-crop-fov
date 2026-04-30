@@ -45,7 +45,17 @@ namespace openxr_api_layer {
 
     // Initialize these vectors with arrays of extensions to block and implicitly request for the instance.
     const std::vector<std::string> blockedExtensions = {};
-    const std::vector<std::string> implicitExtensions = {};
+    // XR_KHR_visibility_mask: lets us augment the runtime's "hidden
+    // triangle mesh" with the helmet's opaque silhouette. Apps that
+    // consume xrGetVisibilityMaskKHR (e.g. for stencil rejection)
+    // then skip shading on the masked pixels. Requested implicitly
+    // so it works even on apps that don't enable the extension
+    // themselves; if the runtime doesn't expose it, the framework
+    // logs "Cannot satisfy implicit extension request" and our
+    // override falls through to "no contribution".
+    const std::vector<std::string> implicitExtensions = {
+        XR_KHR_VISIBILITY_MASK_EXTENSION_NAME
+    };
 
     // CropConfig, clampFactor, scaleSwapchainExtents, and narrowFov live in
     // <utils/crop_math.h> so they can be unit-tested from a standalone binary
@@ -541,6 +551,28 @@ namespace openxr_api_layer {
             patchedInfo.layers = patched.data();
 
             return OpenXrApi::xrEndFrame(session, &patchedInfo);
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrGetVisibilityMaskKHR
+        // Phase 1: pure pass-through. The helmet contribution lands in
+        // a later phase (compute helmet NDC mesh, merge with the
+        // runtime-supplied lens occlusion mesh).
+        XrResult xrGetVisibilityMaskKHR(XrSession session,
+                                        XrViewConfigurationType viewConfigurationType,
+                                        uint32_t viewIndex,
+                                        XrVisibilityMaskTypeKHR visibilityMaskType,
+                                        XrVisibilityMaskKHR* visibilityMask) override {
+            return OpenXrApi::xrGetVisibilityMaskKHR(
+                session, viewConfigurationType, viewIndex, visibilityMaskType, visibilityMask);
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrPollEvent
+        // Phase 1: pure pass-through. Later phases will inject
+        // XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR when live-edit
+        // changes the helmet geometry, before forwarding the runtime's
+        // own events.
+        XrResult xrPollEvent(XrInstance instance, XrEventDataBuffer* eventData) override {
+            return OpenXrApi::xrPollEvent(instance, eventData);
         }
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEnumerateViewConfigurationViews
