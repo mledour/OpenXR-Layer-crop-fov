@@ -124,6 +124,7 @@
          defines (dllHome, localAppData, log::logStream). -->
     <ClCompile Include="..\openxr-api-layer\layer.cpp" />
     <ClCompile Include="..\openxr-api-layer\utils\helmet_overlay.cpp" />
+    <ClCompile Include="..\openxr-api-layer\utils\helmet_visibility_mask.cpp" />
     <ClCompile Include="..\openxr-api-layer\framework\dispatch.gen.cpp" />
     <ClCompile Include="..\openxr-api-layer\framework\log.cpp" />
   </ItemGroup>
