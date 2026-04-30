@@ -573,6 +573,7 @@ namespace openxr_api_layer {
             }
             m_eyePoseCacheValid = false;
             m_visibilityMaskBuilt.fill(false);
+            m_visibilityMaskDumped.fill(false);  // re-arm one-shot mesh dump
             m_endFrameDiagLogged = false;       // re-arm one-shot for the next session
             m_strippedAppLayerLogged = false;   // ditto, layer-strip one-shot
             // Diagnostic: report whether the app actually queried
@@ -810,6 +811,29 @@ namespace openxr_api_layer {
             const auto& helmet = m_visibilityMask.meshForView(viewIndex);
             const uint32_t helmetVerts = static_cast<uint32_t>(helmet.vertices.size());
             const uint32_t helmetIdxs  = static_cast<uint32_t>(helmet.indices.size());
+
+            // One-shot dump of the freshly-built mesh so we can sanity
+            // check what we actually emit when an app reports visual
+            // weirdness. Logged once per (view, session) — m_visibility
+            // MaskBuilt re-arms us on session destroy via the existing
+            // .fill(false). Keeps the verbose path strictly diagnostic.
+            if (!m_visibilityMaskDumped[viewIndex]) {
+                m_visibilityMaskDumped[viewIndex] = true;
+                Log(fmt::format(
+                    "VisibilityMask[view {}]: helmet mesh {} verts, {} indices "
+                    "(triangles in NDC)\n",
+                    viewIndex, helmetVerts, helmetIdxs));
+                for (uint32_t v = 0; v < helmetVerts && v < 32; ++v) {
+                    Log(fmt::format("  v[{}] = ({:+.4f}, {:+.4f})\n",
+                                    v, helmet.vertices[v].x, helmet.vertices[v].y));
+                }
+                for (uint32_t t = 0; t + 2 < helmetIdxs && t < 24; t += 3) {
+                    Log(fmt::format("  tri[{}] = {} {} {}\n",
+                                    t / 3, helmet.indices[t], helmet.indices[t + 1],
+                                    helmet.indices[t + 2]));
+                }
+            }
+
             if (helmetVerts == 0 || helmetIdxs == 0) return result;
 
             const uint32_t runtimeVerts = visibilityMask->vertexCountOutput;
@@ -982,6 +1006,7 @@ namespace openxr_api_layer {
                             m_visibilityMask.isInitialized() &&
                             m_session != XR_NULL_HANDLE) {
                             m_visibilityMaskBuilt.fill(false);
+                            m_visibilityMaskDumped.fill(false);  // re-log new mesh
                             for (uint32_t i = 0; i < kMaxVisibilityViews; ++i) {
                                 XrEventDataVisibilityMaskChangedKHR ev{
                                     XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR};
@@ -1161,6 +1186,11 @@ namespace openxr_api_layer {
         // when false, then flips to true. Reset to all-false on
         // live-edit geometry changes.
         std::array<bool, kMaxVisibilityViews> m_visibilityMaskBuilt{};
+        // Companion flag: log the freshly-built mesh contents once
+        // per session per view (under the same reset semantics as
+        // m_visibilityMaskBuilt — invalidated on live-edit geometry
+        // changes and on session destroy). Pure diagnostic.
+        std::array<bool, kMaxVisibilityViews> m_visibilityMaskDumped{};
         // One-shot guard for the xrEndFrame layer-dump diagnostic.
         // Set true after the first xrEndFrame of each session, reset
         // to false in xrDestroySession so the next session also gets
