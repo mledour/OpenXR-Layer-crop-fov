@@ -29,12 +29,24 @@
 // path can ship independently and be unit-tested without D3D11
 // dependencies.
 //
-// v1 strategy: bbox-of-visor. Find the rectangular bounding box of
-// transparent pixels (alpha < threshold) in the helmet PNG; the four
-// strips around that bbox are the opaque foam region. Each strip is
-// a flat rectangle in the quad's local plane; perspective-projected
-// per eye, it stays roughly rectangular in NDC (no distortion since
-// all corners share the same view-space depth, modulo eye orientation).
+// v1 strategy: bbox-of-visor in clamped NDC.
+//
+// Detect the rectangular bounding box of transparent pixels in the
+// helmet PNG (the visor opening). Project both the helmet quad's
+// outer corners and the visor bbox corners through the eye's
+// perspective to NDC. Build two axis-aligned bboxes in NDC: the
+// outer (helmet quad) clamped to [-1, +1], and the inner (visor)
+// clamped to the outer. The four strips between the two bboxes are
+// the foam region visible on screen — exactly what the app should
+// stencil-skip.
+//
+// Working in clamped NDC is essential when the helmet's
+// `horizontal_fov_deg` exceeds the eye's actual FOV (typical: 110°
+// helmet on a Pimax Crystal Light eye whose raw FOV is ~95°, when
+// the user runs without vertical cropping). A naive UV-based mesh
+// lands strip vertices outside `[-1, +1]`, which DiRT Rally 2 (and
+// likely other apps) rasterize as garbage stencil — a vertical
+// black band through the middle of the view.
 //
 // Output meshes use OpenXR's XrVector2f (x, y in NDC, [-1, +1]) and
 // uint32_t indices, ready to be appended to whatever the runtime

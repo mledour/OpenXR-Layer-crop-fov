@@ -100,32 +100,34 @@ namespace openxr_api_layer {
             outY = (0.5f - v) * quadH;
         }
 
-        // Push a single rectangle (4 UV corners in CCW order) as 2
-        // triangles into the mesh. Eye projection is applied on the
-        // fly: each UV corner → quad-local → view-space → NDC.
-        void appendRectAsTriangles(VisibilityMaskMesh& mesh,
-                                   float u0, float v0, float u1, float v1,
-                                   float quadW, float quadH,
-                                   float vOffsetY, float distance,
-                                   const XrPosef& eyePoseInView,
-                                   const XrFovf& fov) {
+        // Push a single axis-aligned NDC rectangle as 2 triangles into
+        // the mesh. Inputs are already in NDC space (`x0, y0, x1, y1`
+        // with x0<x1, y0<y1). Vertices are emitted CCW for OpenXR's
+        // visibility-mask convention.
+        //
+        // Why NDC-direct (instead of going UV → quad-local → view → NDC
+        // per vertex like a previous revision did): when the helmet
+        // quad's `horizontal_fov_deg` exceeds the eye's actual FOV
+        // (e.g. 110° helmet on a 95° Pimax Crystal Light eye, with no
+        // crop narrowing the locate-views path), the projected helmet
+        // corners land at NDC values OUTSIDE `[-1, +1]`. Some apps
+        // (DiRT Rally 2 in race mode, observed) rasterize the resulting
+        // stencil mesh as garbage — visible as a vertical black band
+        // through the visor. Generating the mesh directly in clamped
+        // NDC keeps every vertex on-screen and avoids the issue.
+        void appendNdcRectAsTriangles(VisibilityMaskMesh& mesh,
+                                      float x0, float y0,
+                                      float x1, float y1) {
             // Reject degenerate (zero-area) rects so we don't emit
             // collinear triangles that the runtime might choke on.
-            if (u0 >= u1 || v0 >= v1) return;
-
-            const auto projectUv = [&](float u, float v) {
-                float xL, yL;
-                uvToQuadLocal(u, v, quadW, quadH, xL, yL);
-                const XrVector3f viewPt = quadLocalToView(xL, yL, vOffsetY, distance);
-                return projectViewPointToNdc(viewPt, eyePoseInView, fov);
-            };
+            if (x0 >= x1 || y0 >= y1) return;
 
             const uint32_t base = static_cast<uint32_t>(mesh.vertices.size());
-            // CCW: TL, BL, BR, TR
-            mesh.vertices.push_back(projectUv(u0, v0));
-            mesh.vertices.push_back(projectUv(u0, v1));
-            mesh.vertices.push_back(projectUv(u1, v1));
-            mesh.vertices.push_back(projectUv(u1, v0));
+            // CCW (Y up): TL, BL, BR, TR
+            mesh.vertices.push_back(XrVector2f{x0, y1}); // TL (max y)
+            mesh.vertices.push_back(XrVector2f{x0, y0}); // BL
+            mesh.vertices.push_back(XrVector2f{x1, y0}); // BR
+            mesh.vertices.push_back(XrVector2f{x1, y1}); // TR
 
             // Two triangles: (TL, BL, BR) and (TL, BR, TR)
             mesh.indices.push_back(base + 0);
@@ -284,27 +286,79 @@ namespace openxr_api_layer {
         const float v0 = std::max(0.0f, std::min(1.0f, m_bbox.v0));
         const float v1 = std::max(0.0f, std::min(1.0f, m_bbox.v1));
 
-        // Reserve enough room: 4 strips × 4 vertices = 16, × 6 indices = 24
+        // Project a UV point through the helmet quad to NDC.
+        const auto projectUv = [&](float u, float v) -> XrVector2f {
+            float xL, yL;
+            uvToQuadLocal(u, v, quadW, quadH, xL, yL);
+            const XrVector3f viewPt =
+                quadLocalToView(xL, yL, vOffsetY, config.distance_m);
+            return projectViewPointToNdc(viewPt, eyePoseInView, fov);
+        };
+
+        // Compute the helmet quad's projected AABB in NDC, then clamp
+        // to the visible screen frame [-1, +1]. The clamp is critical:
+        // when `config.horizontal_fov_deg` exceeds the eye's actual
+        // FOV (e.g. a 110° helmet on a Pimax Crystal Light eye whose
+        // raw FOV is ~95°, with `crop_top/bottom_percent = 0` so we
+        // don't narrow the locate-views), the raw projected helmet
+        // corners land at NDC values like (-1.4, +0.7). Out-of-range
+        // vertices in the visibility mask cause some apps (observed:
+        // DiRT Rally 2 in race mode via OpenComposite) to rasterize
+        // the stencil mesh as garbage — typically a vertical black
+        // band through the middle of the view because clipped triangle
+        // remainders form weird shapes.
+        const XrVector2f q0 = projectUv(0.0f, 0.0f);
+        const XrVector2f q1 = projectUv(1.0f, 0.0f);
+        const XrVector2f q2 = projectUv(0.0f, 1.0f);
+        const XrVector2f q3 = projectUv(1.0f, 1.0f);
+        float quadMinX = std::min({q0.x, q1.x, q2.x, q3.x});
+        float quadMaxX = std::max({q0.x, q1.x, q2.x, q3.x});
+        float quadMinY = std::min({q0.y, q1.y, q2.y, q3.y});
+        float quadMaxY = std::max({q0.y, q1.y, q2.y, q3.y});
+        quadMinX = std::max(quadMinX, -1.0f);
+        quadMaxX = std::min(quadMaxX, +1.0f);
+        quadMinY = std::max(quadMinY, -1.0f);
+        quadMaxY = std::min(quadMaxY, +1.0f);
+
+        // Compute the visor bbox's projected AABB in NDC. Clamp it to
+        // the helmet quad's AABB — under perspective the visor stays
+        // strictly inside the quad, but a tiny epsilon-overshoot is
+        // possible (and the clamp covers degenerate orientations too).
+        const XrVector2f b0 = projectUv(u0, v0);
+        const XrVector2f b1 = projectUv(u1, v0);
+        const XrVector2f b2 = projectUv(u0, v1);
+        const XrVector2f b3 = projectUv(u1, v1);
+        float visorMinX = std::min({b0.x, b1.x, b2.x, b3.x});
+        float visorMaxX = std::max({b0.x, b1.x, b2.x, b3.x});
+        float visorMinY = std::min({b0.y, b1.y, b2.y, b3.y});
+        float visorMaxY = std::max({b0.y, b1.y, b2.y, b3.y});
+        visorMinX = std::max(visorMinX, quadMinX);
+        visorMaxX = std::min(visorMaxX, quadMaxX);
+        visorMinY = std::max(visorMinY, quadMinY);
+        visorMaxY = std::min(visorMaxY, quadMaxY);
+
+        // If clamping degenerated the visor (e.g. helmet quad fully
+        // off-screen, or visor entirely outside the visible area),
+        // there's nothing to mask.
+        if (visorMinX >= visorMaxX || visorMinY >= visorMaxY) return;
+
+        // Reserve enough room: up to 4 strips × 4 vertices = 16,
+        // × 6 indices = 24. Some strips may be empty (degenerate)
+        // when the visor reaches the helmet AABB on a given side.
         mesh.vertices.reserve(16);
         mesh.indices.reserve(24);
 
-        // 4 opaque strips around the visor bbox, in UV space.
-        // Top   : u ∈ [0, 1],  v ∈ [0,  v0]
-        // Bottom: u ∈ [0, 1],  v ∈ [v1, 1 ]
-        // Left  : u ∈ [0, u0], v ∈ [v0, v1]
-        // Right : u ∈ [u1, 1], v ∈ [v0, v1]
-        appendRectAsTriangles(mesh, 0.0f, 0.0f, 1.0f, v0,
-                              quadW, quadH, vOffsetY, config.distance_m,
-                              eyePoseInView, fov);
-        appendRectAsTriangles(mesh, 0.0f, v1, 1.0f, 1.0f,
-                              quadW, quadH, vOffsetY, config.distance_m,
-                              eyePoseInView, fov);
-        appendRectAsTriangles(mesh, 0.0f, v0, u0, v1,
-                              quadW, quadH, vOffsetY, config.distance_m,
-                              eyePoseInView, fov);
-        appendRectAsTriangles(mesh, u1, v0, 1.0f, v1,
-                              quadW, quadH, vOffsetY, config.distance_m,
-                              eyePoseInView, fov);
+        // 4 NDC strips between the visor AABB (inner) and the clamped
+        // helmet quad AABB (outer). Every vertex is guaranteed to lie
+        // in NDC [-1, +1] because the outer AABB itself is clamped.
+        // Top   : y ∈ [visorMaxY, quadMaxY], full quad width
+        // Bottom: y ∈ [quadMinY, visorMinY], full quad width
+        // Left  : x ∈ [quadMinX, visorMinX], visor height
+        // Right : x ∈ [visorMaxX, quadMaxX], visor height
+        appendNdcRectAsTriangles(mesh, quadMinX, visorMaxY, quadMaxX, quadMaxY);
+        appendNdcRectAsTriangles(mesh, quadMinX, quadMinY, quadMaxX, visorMinY);
+        appendNdcRectAsTriangles(mesh, quadMinX, visorMinY, visorMinX, visorMaxY);
+        appendNdcRectAsTriangles(mesh, visorMaxX, visorMinY, quadMaxX, visorMaxY);
     }
 
     const VisibilityMaskMesh& HelmetVisibilityMask::meshForView(uint32_t viewIndex) const {
