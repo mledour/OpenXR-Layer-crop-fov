@@ -24,6 +24,8 @@
 
 #include "helmet_overlay.h"
 
+#include "helmet_visibility_mask.h"  // detectVisorBbox for debug tint
+
 #include <framework/dispatch.gen.h>
 #include <log.h>
 
@@ -382,6 +384,51 @@ namespace openxr_api_layer {
                 uploadBytes[i + 2] = static_cast<uint8_t>(uploadBytes[i + 2] * bright);
             }
             Log(fmt::format("HelmetOverlay: applied brightness={:.2f} to texture\n", bright));
+        }
+
+        // Debug aid: tint everything outside the detected visor bbox in
+        // red so the user can see in-headset which region the
+        // visibility mask covers. The bbox detection here uses the
+        // SAME helper helmet_visibility_mask.cpp uses, so the red zone
+        // matches the four NDC strips fed to xrGetVisibilityMaskKHR
+        // pixel-for-pixel. Diagnostic-only: ship with this off.
+        if (m_impl->config.debug_visibility_mask) {
+            float u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
+            if (detectVisorBbox(uploadBytes.data(),
+                                static_cast<int>(texW),
+                                static_cast<int>(texH),
+                                /*alphaThreshold=*/16,
+                                u0, v0, u1, v1)) {
+                const int x0 = static_cast<int>(u0 * texW);
+                const int y0 = static_cast<int>(v0 * texH);
+                const int x1 = static_cast<int>(u1 * texW);
+                const int y1 = static_cast<int>(v1 * texH);
+                size_t tinted = 0;
+                for (uint32_t y = 0; y < texH; ++y) {
+                    const bool yInside = (static_cast<int>(y) >= y0 && static_cast<int>(y) < y1);
+                    for (uint32_t x = 0; x < texW; ++x) {
+                        const bool xInside = (static_cast<int>(x) >= x0 && static_cast<int>(x) < x1);
+                        if (xInside && yInside) continue;
+                        const size_t idx = (static_cast<size_t>(y) * texW + x) * 4u;
+                        // Push red up, dim green/blue. Keep alpha as-is
+                        // so foam pixels that were already opaque stay
+                        // opaque, and visor-side transparency outside
+                        // the bbox (rare in practice) is preserved.
+                        uploadBytes[idx + 0] = static_cast<uint8_t>(
+                            std::min(255, uploadBytes[idx + 0] + 128));
+                        uploadBytes[idx + 1] = static_cast<uint8_t>(uploadBytes[idx + 1] / 4);
+                        uploadBytes[idx + 2] = static_cast<uint8_t>(uploadBytes[idx + 2] / 4);
+                        ++tinted;
+                    }
+                }
+                Log(fmt::format(
+                    "HelmetOverlay: debug_visibility_mask ON — tinted {} foam pixels "
+                    "(visor bbox uv=[{:.3f}..{:.3f}, {:.3f}..{:.3f}])\n",
+                    tinted, u0, u1, v0, v1));
+            } else {
+                Log("HelmetOverlay: debug_visibility_mask ON but no visor bbox detected "
+                    "(PNG fully opaque?), skipping tint\n");
+            }
         }
 
         D3D11_TEXTURE2D_DESC td{};

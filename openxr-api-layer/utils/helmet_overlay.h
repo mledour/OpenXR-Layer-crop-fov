@@ -104,6 +104,16 @@ namespace openxr_api_layer {
         // MASK_CHANGED_KHR so apps that listen pick up the change
         // mid-session.
         bool use_visibility_mask = true;
+
+        // Debug aid: tints the foam region (everything outside the
+        // detected visor bbox) red on the staging texture so the user
+        // can directly see which pixels the visibility mask covers.
+        // Off by default — turn on, restart the game, observe the red
+        // halo around the visor cutout, then turn back off. Only
+        // affects the helmet PNG upload at session start; not live-
+        // tunable. Useful when tuning the bbox or sanity-checking that
+        // the mask region matches the visor opening.
+        bool debug_visibility_mask = false;
     };
 
     // Opaque backend — hides D3D types from every TU that only needs to

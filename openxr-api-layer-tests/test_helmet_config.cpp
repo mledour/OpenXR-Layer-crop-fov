@@ -40,6 +40,7 @@ TEST_CASE("parseHelmetConfig: empty JSON object returns disabled defaults") {
     CHECK(hc.vertical_offset_deg == doctest::Approx(0.0f));
     CHECK(hc.brightness == doctest::Approx(1.0f));
     CHECK(hc.use_visibility_mask == true);
+    CHECK(hc.debug_visibility_mask == false);
 }
 
 TEST_CASE("parseHelmetConfig: missing helmet_overlay block returns defaults") {
@@ -95,6 +96,30 @@ TEST_CASE("parseHelmetConfig: use_visibility_mask wrong type falls back to defau
         "helmet_overlay": {"use_visibility_mask": "no"}
     })");
     CHECK(hc.use_visibility_mask == true);  // string ignored, default kept
+}
+
+TEST_CASE("parseHelmetConfig: debug_visibility_mask defaults to false") {
+    // Diagnostic-only knob: must be off by default so a forgotten
+    // `true` in default_settings.json doesn't ship a red-tinted helmet
+    // to every user.
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"enabled": true}
+    })");
+    CHECK(hc.debug_visibility_mask == false);
+}
+
+TEST_CASE("parseHelmetConfig: debug_visibility_mask true is honoured") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"debug_visibility_mask": true}
+    })");
+    CHECK(hc.debug_visibility_mask == true);
+}
+
+TEST_CASE("parseHelmetConfig: debug_visibility_mask wrong type falls back to default") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"debug_visibility_mask": 1}
+    })");
+    CHECK(hc.debug_visibility_mask == false);  // int ignored, default kept
 }
 
 TEST_CASE("parseHelmetConfig: integer values for float fields are accepted") {

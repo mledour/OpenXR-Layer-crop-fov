@@ -45,6 +45,7 @@ namespace openxr_api_layer {
     //   enabled              = false
     //   image                = "helmet_visor.png"
     //   use_visibility_mask  = true
+    //   debug_visibility_mask = false
     //   distance_m           = 0.5
     //   horizontal_fov_deg   = 130   (clamped to [10, 270])
     //   vertical_offset_deg  = 0     (clamped to [-30, +30])
@@ -83,6 +84,7 @@ namespace openxr_api_layer {
 
         hc.enabled = readBool("enabled", false);
         hc.use_visibility_mask = readBool("use_visibility_mask", true);
+        hc.debug_visibility_mask = readBool("debug_visibility_mask", false);
         hc.distance_m = readFloat("distance_m", 0.5f);
 
         // Clamp the angular FOV to a sane range. Below ~10° the quad
