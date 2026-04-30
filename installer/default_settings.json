@@ -12,6 +12,7 @@
     "distance_m": 0.15,
     "brightness": 0.25,
     "horizontal_fov_deg": 120,
-    "vertical_offset_deg": -10
+    "vertical_offset_deg": -10,
+    "use_visibility_mask": true
   }
 }

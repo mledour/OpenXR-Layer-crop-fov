@@ -39,6 +39,7 @@ TEST_CASE("parseHelmetConfig: empty JSON object returns disabled defaults") {
     CHECK(hc.horizontal_fov_deg == doctest::Approx(130.0f));
     CHECK(hc.vertical_offset_deg == doctest::Approx(0.0f));
     CHECK(hc.brightness == doctest::Approx(1.0f));
+    CHECK(hc.use_visibility_mask == true);
 }
 
 TEST_CASE("parseHelmetConfig: missing helmet_overlay block returns defaults") {
@@ -67,7 +68,8 @@ TEST_CASE("parseHelmetConfig: full config is parsed verbatim within clamps") {
             "distance_m": 0.30,
             "horizontal_fov_deg": 160,
             "vertical_offset_deg": 5.0,
-            "brightness": 0.5
+            "brightness": 0.5,
+            "use_visibility_mask": false
         }
     })");
     CHECK(hc.enabled == true);
@@ -76,6 +78,23 @@ TEST_CASE("parseHelmetConfig: full config is parsed verbatim within clamps") {
     CHECK(hc.horizontal_fov_deg == doctest::Approx(160.0f));
     CHECK(hc.vertical_offset_deg == doctest::Approx(5.0f));
     CHECK(hc.brightness == doctest::Approx(0.5f));
+    CHECK(hc.use_visibility_mask == false);
+}
+
+TEST_CASE("parseHelmetConfig: use_visibility_mask defaults to true when absent") {
+    // Backwards-compat: settings.json files written before this knob
+    // existed should keep the default-true behaviour without surprise.
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"enabled": true, "distance_m": 0.3}
+    })");
+    CHECK(hc.use_visibility_mask == true);
+}
+
+TEST_CASE("parseHelmetConfig: use_visibility_mask wrong type falls back to default") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"use_visibility_mask": "no"}
+    })");
+    CHECK(hc.use_visibility_mask == true);  // string ignored, default kept
 }
 
 TEST_CASE("parseHelmetConfig: integer values for float fields are accepted") {

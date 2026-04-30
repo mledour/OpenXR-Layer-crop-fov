@@ -91,6 +91,19 @@ namespace openxr_api_layer {
         // Applied once at session start; needs a session restart to
         // re-apply (no live-edit yet).
         float brightness = 1.0f;
+
+        // Opt-in for the helmet's contribution to xrGetVisibilityMaskKHR.
+        // Default true: when the runtime grants XR_KHR_visibility_mask,
+        // the layer augments the runtime's hidden-triangle mesh with a
+        // bbox of the helmet's opaque foam region so apps can stencil-
+        // reject those pixels and skip shading. Disabling this knob
+        // keeps the helmet quad rendering normally but stops the mask
+        // contribution — useful as an escape hatch for games whose
+        // stencil-setup doesn't tolerate non-trivial mask geometry.
+        // Live-tunable; toggling fires a XR_TYPE_EVENT_DATA_VISIBILITY_
+        // MASK_CHANGED_KHR so apps that listen pick up the change
+        // mid-session.
+        bool use_visibility_mask = true;
     };
 
     // Opaque backend — hides D3D types from every TU that only needs to

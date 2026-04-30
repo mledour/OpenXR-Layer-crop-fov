@@ -125,7 +125,8 @@ namespace openxr_api_layer {
             << "    \"distance_m\": 0.15,\n"
             << "    \"brightness\": 0.25,\n"
             << "    \"horizontal_fov_deg\": 120,\n"
-            << "    \"vertical_offset_deg\": -10\n"
+            << "    \"vertical_offset_deg\": -10,\n"
+            << "    \"use_visibility_mask\": true\n"
             << "  }\n"
             << "}\n";
         return out.good();
@@ -638,6 +639,7 @@ namespace openxr_api_layer {
             // contribution to make. Each branch returns the runtime's
             // result unchanged.
             if (!m_visibilityMaskExtensionGranted) return result;
+            if (!m_helmetConfig.use_visibility_mask) return result;
             if (!m_visibilityMask.isInitialized()) return result;
             if (!m_eyePoseCacheValid) return result;
             if (visibilityMaskType != XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR) return result;
@@ -792,12 +794,14 @@ namespace openxr_api_layer {
                         m_configLastWriteTime = mtime;
                         m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
 
-                        // Snapshot the helmet geometry before reload so
-                        // we can decide whether the visibility-mask
-                        // cache needs to be invalidated.
+                        // Snapshot the helmet geometry + the
+                        // use_visibility_mask flag before reload so we
+                        // can decide whether the visibility-mask cache
+                        // needs to be invalidated.
                         const float oldDistance = m_helmetConfig.distance_m;
                         const float oldFov      = m_helmetConfig.horizontal_fov_deg;
                         const float oldOffset   = m_helmetConfig.vertical_offset_deg;
+                        const bool  oldUseMask  = m_helmetConfig.use_visibility_mask;
 
                         m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
                         // Push the new helmet tunables into the live
@@ -811,18 +815,21 @@ namespace openxr_api_layer {
                         ++m_configGen;
 
                         // Visibility-mask cache invalidation: any of the
-                        // three geometry knobs changing makes the
-                        // previously-built per-view meshes stale. Clear
-                        // the built flags so the next xrGetVisibilityMaskKHR
-                        // recomputes; queue per-view CHANGED events so
-                        // apps that listen on xrPollEvent know to re-query.
-                        // Brightness / image / enabled don't affect mask
-                        // geometry, so they don't trigger this.
+                        // three geometry knobs changing OR a toggle of
+                        // use_visibility_mask makes the app's stencil
+                        // out-of-date. Clear the built flags so the
+                        // next xrGetVisibilityMaskKHR recomputes;
+                        // queue per-view CHANGED events so apps that
+                        // listen on xrPollEvent know to re-query.
+                        // Brightness / image / enabled don't affect
+                        // mask geometry, so they don't trigger this.
                         const bool geomChanged =
                             std::abs(oldDistance - m_helmetConfig.distance_m) > 1e-4f ||
                             std::abs(oldFov - m_helmetConfig.horizontal_fov_deg) > 1e-3f ||
                             std::abs(oldOffset - m_helmetConfig.vertical_offset_deg) > 1e-3f;
-                        if (geomChanged &&
+                        const bool useMaskChanged =
+                            oldUseMask != m_helmetConfig.use_visibility_mask;
+                        if ((geomChanged || useMaskChanged) &&
                             m_visibilityMaskExtensionGranted &&
                             m_visibilityMask.isInitialized() &&
                             m_session != XR_NULL_HANDLE) {
@@ -842,8 +849,12 @@ namespace openxr_api_layer {
                                 // own.
                                 m_pendingVisibilityMaskEvents.push_back(ev);
                             }
-                            Log("VisibilityMask: helmet geometry changed via live-edit, "
-                                "queued mask-changed events for both eyes\n");
+                            Log(fmt::format(
+                                "VisibilityMask: live-edit invalidation "
+                                "(geom={}, useMaskToggle={}), queued mask-changed "
+                                "events for both eyes\n",
+                                geomChanged ? "yes" : "no",
+                                useMaskChanged ? "yes" : "no"));
                         }
                     }
                 } catch (...) {
