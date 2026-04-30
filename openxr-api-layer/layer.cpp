@@ -493,6 +493,12 @@ namespace openxr_api_layer {
 
                 TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
 
+                // Capture the session handle for the visibility-mask
+                // event injection (xrPollEvent needs to attach the
+                // session to each XR_TYPE_EVENT_DATA_VISIBILITY_MASK_
+                // CHANGED_KHR it emits).
+                m_session = *session;
+
                 // Arm the helmet overlay. Best-practices: any failure
                 // here must NEVER crash the host; the overlay degrades
                 // to "not armed" and the rest of the layer keeps running.
@@ -565,6 +571,12 @@ namespace openxr_api_layer {
                 m_maskViewSpace = XR_NULL_HANDLE;
             }
             m_eyePoseCacheValid = false;
+            m_visibilityMaskBuilt.fill(false);
+            // Drop any queued visibility-mask events tied to this
+            // session — they reference m_session which is about to
+            // become invalid.
+            m_pendingVisibilityMaskEvents.clear();
+            m_session = XR_NULL_HANDLE;
             try {
                 m_helmetOverlay.shutdown();
             } catch (const std::exception& exc) {
@@ -631,15 +643,20 @@ namespace openxr_api_layer {
             if (visibilityMaskType != XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR) return result;
             if (viewIndex >= kMaxVisibilityViews) return result;
 
-            // Build (or rebuild) the helmet NDC mesh for this eye. v1
-            // rebuilds on every call — cheap (one bbox + 16 vertex
-            // projections), and apps typically only call this 2-4
-            // times per session anyway. A cache could go in later if
-            // we measure it costing anything.
-            m_visibilityMask.rebuildForView(viewIndex,
-                                            m_eyeInViewPoses[viewIndex],
-                                            m_eyeFovs[viewIndex],
-                                            m_helmetConfig);
+            // Build the helmet NDC mesh for this eye if it hasn't
+            // been built yet (or was invalidated by live-edit). The
+            // built flag survives across xrGetVisibilityMaskKHR
+            // calls until either xrDestroySession or a live-edit
+            // geometry change clears it. Rebuild itself is cheap
+            // (16 vertex projections) but going through it 2-4 times
+            // per session for nothing was wasteful.
+            if (!m_visibilityMaskBuilt[viewIndex]) {
+                m_visibilityMask.rebuildForView(viewIndex,
+                                                m_eyeInViewPoses[viewIndex],
+                                                m_eyeFovs[viewIndex],
+                                                m_helmetConfig);
+                m_visibilityMaskBuilt[viewIndex] = true;
+            }
             const auto& helmet = m_visibilityMask.meshForView(viewIndex);
             const uint32_t helmetVerts = static_cast<uint32_t>(helmet.vertices.size());
             const uint32_t helmetIdxs  = static_cast<uint32_t>(helmet.indices.size());
@@ -690,11 +707,26 @@ namespace openxr_api_layer {
         }
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrPollEvent
-        // Phase 1: pure pass-through. Later phases will inject
-        // XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR when live-edit
-        // changes the helmet geometry, before forwarding the runtime's
-        // own events.
         XrResult xrPollEvent(XrInstance instance, XrEventDataBuffer* eventData) override {
+            // If we have a pending visibility-mask-changed event,
+            // deliver it before forwarding to the runtime. xrPollEvent
+            // returns one event per call — apps poll in a loop until
+            // XR_EVENT_UNAVAILABLE, so they will pick up our event and
+            // then go on to drain runtime events on subsequent calls.
+            // Order between our events and runtime events doesn't carry
+            // semantic meaning, only "every event eventually surfaces"
+            // does, so always-front is fine.
+            if (eventData && !m_pendingVisibilityMaskEvents.empty()) {
+                const XrEventDataVisibilityMaskChangedKHR ev =
+                    m_pendingVisibilityMaskEvents.front();
+                m_pendingVisibilityMaskEvents.erase(m_pendingVisibilityMaskEvents.begin());
+                // XrEventDataBuffer is the spec's polymorphic carrier
+                // (256 bytes); writing our smaller struct via memcpy
+                // is safe and matches how runtimes typically populate
+                // it.
+                std::memcpy(eventData, &ev, sizeof(ev));
+                return XR_SUCCESS;
+            }
             return OpenXrApi::xrPollEvent(instance, eventData);
         }
 
@@ -759,6 +791,14 @@ namespace openxr_api_layer {
                     if (mtime != m_configLastWriteTime) {
                         m_configLastWriteTime = mtime;
                         m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
+
+                        // Snapshot the helmet geometry before reload so
+                        // we can decide whether the visibility-mask
+                        // cache needs to be invalidated.
+                        const float oldDistance = m_helmetConfig.distance_m;
+                        const float oldFov      = m_helmetConfig.horizontal_fov_deg;
+                        const float oldOffset   = m_helmetConfig.vertical_offset_deg;
+
                         m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
                         // Push the new helmet tunables into the live
                         // overlay so distance_m / horizontal_fov_deg
@@ -769,6 +809,36 @@ namespace openxr_api_layer {
                         // reallocation (see HelmetOverlay::updateLiveTunables).
                         m_helmetOverlay.updateLiveTunables(m_helmetConfig);
                         ++m_configGen;
+
+                        // Visibility-mask cache invalidation: any of the
+                        // three geometry knobs changing makes the
+                        // previously-built per-view meshes stale. Clear
+                        // the built flags so the next xrGetVisibilityMaskKHR
+                        // recomputes; queue per-view CHANGED events so
+                        // apps that listen on xrPollEvent know to re-query.
+                        // Brightness / image / enabled don't affect mask
+                        // geometry, so they don't trigger this.
+                        const bool geomChanged =
+                            std::abs(oldDistance - m_helmetConfig.distance_m) > 1e-4f ||
+                            std::abs(oldFov - m_helmetConfig.horizontal_fov_deg) > 1e-3f ||
+                            std::abs(oldOffset - m_helmetConfig.vertical_offset_deg) > 1e-3f;
+                        if (geomChanged &&
+                            m_visibilityMaskExtensionGranted &&
+                            m_visibilityMask.isInitialized() &&
+                            m_session != XR_NULL_HANDLE) {
+                            m_visibilityMaskBuilt.fill(false);
+                            for (uint32_t i = 0; i < kMaxVisibilityViews; ++i) {
+                                XrEventDataVisibilityMaskChangedKHR ev{
+                                    XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR};
+                                ev.session = m_session;
+                                ev.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+                                ev.viewIndex = i;
+                                ev.visibilityMaskType = XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR;
+                                m_pendingVisibilityMaskEvents.push_back(ev);
+                            }
+                            Log("VisibilityMask: helmet geometry changed via live-edit, "
+                                "queued mask-changed events for both eyes\n");
+                        }
                     }
                 } catch (...) {
                     // File mid-write, locked, or deleted. Skip, try next interval.
@@ -915,11 +985,23 @@ namespace openxr_api_layer {
         // need a frame time, which we don't have at session creation).
         HelmetVisibilityMask m_visibilityMask{};
         bool m_visibilityMaskExtensionGranted{false};
+        XrSession m_session{XR_NULL_HANDLE};
         XrSpace m_maskViewSpace{XR_NULL_HANDLE};
         static constexpr uint32_t kMaxVisibilityViews = 2;  // stereo
         std::array<XrPosef, kMaxVisibilityViews> m_eyeInViewPoses{};
         std::array<XrFovf, kMaxVisibilityViews> m_eyeFovs{};
         bool m_eyePoseCacheValid{false};
+        // Per-view "helmet mesh has been built since last
+        // invalidation" flag. xrGetVisibilityMaskKHR rebuilds only
+        // when false, then flips to true. Reset to all-false on
+        // live-edit geometry changes.
+        std::array<bool, kMaxVisibilityViews> m_visibilityMaskBuilt{};
+        // Events queued for the next xrPollEvent calls. Each entry
+        // is a XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR ready
+        // to be memcpy'd into the app's eventData buffer. Pushed
+        // when live-edit invalidates the mask geometry; popped one
+        // per xrPollEvent call until empty.
+        std::vector<XrEventDataVisibilityMaskChangedKHR> m_pendingVisibilityMaskEvents;
     };
 
     // This method is required by the framework to instantiate your OpenXrApi implementation.
