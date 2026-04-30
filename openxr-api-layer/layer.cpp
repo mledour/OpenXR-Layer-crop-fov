@@ -573,6 +573,7 @@ namespace openxr_api_layer {
             }
             m_eyePoseCacheValid = false;
             m_visibilityMaskBuilt.fill(false);
+            m_endFrameDiagLogged = false;  // re-arm one-shot for the next session
             // Diagnostic: report whether the app actually queried
             // xrGetVisibilityMaskKHR during the session. Zero means
             // our mask contribution had no chance to show up in the
@@ -612,6 +613,74 @@ namespace openxr_api_layer {
                 !m_bypassApiLayer && m_helmetOverlay.isArmed() &&
                 m_helmetOverlay.appendLayer(frameEndInfo->displayTime, &helmetLayer) &&
                 helmetLayer != nullptr;
+
+            // One-shot diagnostic: dump every composition layer being
+            // submitted on the first frame of the session. Catches
+            // XR_ERROR_SWAPCHAIN_RECT_INVALID and similar by showing
+            // exactly which layer (the app's projection, the app's
+            // own quads, or our helmet) has a suspect imageRect /
+            // swapchain handle. Reset to false in xrDestroySession so
+            // the next session also gets one snapshot.
+            if (!m_endFrameDiagLogged) {
+                m_endFrameDiagLogged = true;
+                Log(fmt::format(
+                    "xrEndFrame[first frame of session]: appLayerCount={}, helmetAppended={}\n",
+                    frameEndInfo->layerCount, haveHelmet ? "yes" : "no"));
+                for (uint32_t i = 0; i < frameEndInfo->layerCount; ++i) {
+                    const auto* layer = frameEndInfo->layers ? frameEndInfo->layers[i] : nullptr;
+                    if (!layer) {
+                        Log(fmt::format("  appLayer[{}] = NULL\n", i));
+                        continue;
+                    }
+                    if (layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                        const auto* p =
+                            reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+                        Log(fmt::format(
+                            "  appLayer[{}] type=PROJECTION viewCount={} flags=0x{:x}\n",
+                            i, p->viewCount, p->layerFlags));
+                        for (uint32_t v = 0; v < p->viewCount && p->views; ++v) {
+                            const auto& view = p->views[v];
+                            Log(fmt::format(
+                                "    view[{}] swap={:p} rect=offset({},{}) extent({}x{}) "
+                                "arrayIdx={}\n",
+                                v, (void*)view.subImage.swapchain,
+                                view.subImage.imageRect.offset.x,
+                                view.subImage.imageRect.offset.y,
+                                view.subImage.imageRect.extent.width,
+                                view.subImage.imageRect.extent.height,
+                                view.subImage.imageArrayIndex));
+                        }
+                    } else if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                        const auto* q =
+                            reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+                        Log(fmt::format(
+                            "  appLayer[{}] type=QUAD swap={:p} rect=offset({},{}) "
+                            "extent({}x{}) arrayIdx={} flags=0x{:x}\n",
+                            i, (void*)q->subImage.swapchain,
+                            q->subImage.imageRect.offset.x,
+                            q->subImage.imageRect.offset.y,
+                            q->subImage.imageRect.extent.width,
+                            q->subImage.imageRect.extent.height,
+                            q->subImage.imageArrayIndex, q->layerFlags));
+                    } else {
+                        Log(fmt::format("  appLayer[{}] type={} (other, not inspected)\n",
+                                        i, static_cast<int>(layer->type)));
+                    }
+                }
+                if (haveHelmet) {
+                    const auto* q =
+                        reinterpret_cast<const XrCompositionLayerQuad*>(helmetLayer);
+                    Log(fmt::format(
+                        "  helmetLayer       type=QUAD swap={:p} rect=offset({},{}) "
+                        "extent({}x{}) arrayIdx={} flags=0x{:x}\n",
+                        (void*)q->subImage.swapchain,
+                        q->subImage.imageRect.offset.x,
+                        q->subImage.imageRect.offset.y,
+                        q->subImage.imageRect.extent.width,
+                        q->subImage.imageRect.extent.height,
+                        q->subImage.imageArrayIndex, q->layerFlags));
+                }
+            }
 
             if (!haveHelmet) {
                 return OpenXrApi::xrEndFrame(session, frameEndInfo);
@@ -1034,6 +1103,13 @@ namespace openxr_api_layer {
         // when false, then flips to true. Reset to all-false on
         // live-edit geometry changes.
         std::array<bool, kMaxVisibilityViews> m_visibilityMaskBuilt{};
+        // One-shot guard for the xrEndFrame layer-dump diagnostic.
+        // Set true after the first xrEndFrame of each session, reset
+        // to false in xrDestroySession so the next session also gets
+        // a single snapshot. Cheap to keep on permanently — the only
+        // per-frame cost after the first frame is one bool check.
+        bool m_endFrameDiagLogged{false};
+
         // Per-view tally of inbound xrGetVisibilityMaskKHR calls.
         // Diagnostic only: lets us tell at session-end whether the
         // app actually consumed our mask contribution. Typical apps
