@@ -258,11 +258,12 @@ TEST_CASE("projectViewPointToNdc: yaw-only eye rotation preserves on-axis points
     const XrPosef yawedEye = makePose({0.0f, 0.0f, 0.0f}, yawQuat(yawRadians));
     const XrFovf fov = fovSymmetric45();
 
-    // Eye looks along its rotated -Z. Yaw rotates around Y, so the
-    // eye's forward in world coords is (sin(yaw), 0, -cos(yaw)) — the
-    // standard quaternion-rotated -Z. A point at distance 1 along
-    // that direction lands at NDC center.
-    const float fx = std::sin(yawRadians);
+    // Eye looks along its rotated -Z. The standard yaw rotation
+    // matrix around Y applied to the forward (0, 0, -1) yields
+    // (-sin(yaw), 0, -cos(yaw)) — the X component is *negative* for
+    // a positive yaw with this quaternion convention. A point at
+    // distance 1 along that direction lands at NDC center.
+    const float fx = -std::sin(yawRadians);
     const float fz = -std::cos(yawRadians);
     const auto ndc = projectViewPointToNdc({fx, 0.0f, fz}, yawedEye, fov);
     CHECK(ndc.x == doctest::Approx(0.0f).epsilon(1e-4));
