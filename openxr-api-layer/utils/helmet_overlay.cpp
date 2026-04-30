@@ -397,7 +397,7 @@ namespace openxr_api_layer {
             if (detectVisorBbox(uploadBytes.data(),
                                 static_cast<int>(texW),
                                 static_cast<int>(texH),
-                                /*alphaThreshold=*/16,
+                                kVisorAlphaThreshold,
                                 u0, v0, u1, v1)) {
                 const int x0 = static_cast<int>(u0 * texW);
                 const int y0 = static_cast<int>(v0 * texH);

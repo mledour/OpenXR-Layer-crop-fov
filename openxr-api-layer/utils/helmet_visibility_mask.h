@@ -49,6 +49,22 @@
 
 namespace openxr_api_layer {
 
+    // Default cutoff used by the visor-bbox detector and the
+    // debug-tint pass. Pixels with alpha < kVisorAlphaThreshold are
+    // counted as "visor opening" (transparent enough that the user
+    // sees the game through them); anything else is "foam" the
+    // mask wants the app to stencil-skip.
+    //
+    // 64 (~25% opaque) is generous on purpose: PNGs typically have a
+    // soft alpha gradient at the visor/foam boundary because creators
+    // soften the edge in GIMP with a fuzzy eraser. A stricter
+    // threshold (e.g. 16) clips the bbox above that gradient, which
+    // makes the debug tint bleed into the lower edge of the visor and
+    // makes the mask leave a thin shaded band around the opening.
+    // 64 catches most of the gradient without ever including pixels
+    // that are visually opaque foam.
+    inline constexpr uint8_t kVisorAlphaThreshold = 64;
+
     // A flat triangle mesh in NDC ([-1, +1] both axes). Pure data,
     // no GPU resources — ready to be copied into the
     // XrVisibilityMaskKHR buffers.
@@ -86,7 +102,7 @@ namespace openxr_api_layer {
         // produced and the layer should fall back to pure pass-through.
         bool initialize(const std::filesystem::path& helmetsDir,
                         const HelmetOverlayConfig& config,
-                        uint8_t alphaThreshold = 16);
+                        uint8_t alphaThreshold = kVisorAlphaThreshold);
 
         // Rebuilds the cached NDC mesh for one eye. eyePoseInView is
         // the eye's pose relative to the viewer's head — typically
