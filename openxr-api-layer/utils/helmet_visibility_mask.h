@@ -55,15 +55,16 @@ namespace openxr_api_layer {
     // sees the game through them); anything else is "foam" the
     // mask wants the app to stencil-skip.
     //
-    // 64 (~25% opaque) is generous on purpose: PNGs typically have a
-    // soft alpha gradient at the visor/foam boundary because creators
-    // soften the edge in GIMP with a fuzzy eraser. A stricter
-    // threshold (e.g. 16) clips the bbox above that gradient, which
-    // makes the debug tint bleed into the lower edge of the visor and
-    // makes the mask leave a thin shaded band around the opening.
-    // 64 catches most of the gradient without ever including pixels
-    // that are visually opaque foam.
-    inline constexpr uint8_t kVisorAlphaThreshold = 64;
+    // 128 = midpoint of an 8-bit alpha. PNGs typically have a soft
+    // alpha gradient at the visor/foam boundary because creators
+    // soften the edge in GIMP with a fuzzy eraser; the gradient runs
+    // ~5px wide with values from ~10 (visor side) to ~250 (foam side).
+    // We bias the cutoff towards the foam side: any pixel still more
+    // transparent than 50% reads as "the user mostly sees the game
+    // through this", so the bbox should swallow it. Stricter values
+    // (16, 64) clip the bbox above the gradient and the debug tint
+    // bleeds into the lower edge of the visor.
+    inline constexpr uint8_t kVisorAlphaThreshold = 128;
 
     // A flat triangle mesh in NDC ([-1, +1] both axes). Pure data,
     // no GPU resources — ready to be copied into the
