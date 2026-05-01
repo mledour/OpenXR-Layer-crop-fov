@@ -468,6 +468,8 @@ namespace openxr_api_layer {
 
                 TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
 
+                m_strippedAppLayerLogged = false;  // re-arm one-shot for the new session
+
                 // Arm the helmet overlay. Best-practices: any failure
                 // here must NEVER crash the host; the overlay degrades
                 // to "not armed" and the rest of the layer keeps running.
@@ -514,27 +516,73 @@ namespace openxr_api_layer {
                 return XR_ERROR_VALIDATION_FAILURE;
             }
 
-            // Fast path: nothing to add — forward untouched so the original
-            // layer array (which may live in the app's stack) is not copied.
             const XrCompositionLayerBaseHeader* helmetLayer = nullptr;
             const bool haveHelmet =
                 !m_bypassApiLayer && m_helmetOverlay.isArmed() &&
                 m_helmetOverlay.appendLayer(frameEndInfo->displayTime, &helmetLayer) &&
                 helmetLayer != nullptr;
 
-            if (!haveHelmet) {
+            // Detect upstream-corrupt layers that would otherwise force the
+            // runtime to fail the WHOLE submission with
+            // XR_ERROR_SWAPCHAIN_RECT_INVALID, taking our helmet down with
+            // it. Seen on LMU + OpenComposite + PimaxXR: a QUAD with
+            // extent(WxH) where H is negative — looks like an OpenVR→OpenXR
+            // translation forgetting to absolute-value a flipped-Y texture
+            // bound. We only flag QUADs because that's the only failure
+            // mode observed in the wild; PROJECTION views with bad rects
+            // would need per-view surgery (clone the views array) which we
+            // keep out for now.
+            const auto isQuadRectInvalid = [](const XrCompositionLayerBaseHeader* layer) {
+                if (!layer || layer->type != XR_TYPE_COMPOSITION_LAYER_QUAD) return false;
+                const auto* q = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+                return q->subImage.imageRect.extent.width <= 0 ||
+                       q->subImage.imageRect.extent.height <= 0;
+            };
+
+            bool anyStrippable = false;
+            if (frameEndInfo->layers) {
+                for (uint32_t i = 0; i < frameEndInfo->layerCount; ++i) {
+                    if (isQuadRectInvalid(frameEndInfo->layers[i])) {
+                        anyStrippable = true;
+                        break;
+                    }
+                }
+            }
+
+            // Fast path: nothing to strip and nothing to add — forward
+            // untouched so the original layer array (which may live on
+            // the app's stack) is not copied.
+            if (!haveHelmet && !anyStrippable) {
                 return OpenXrApi::xrEndFrame(session, frameEndInfo);
             }
 
-            // Append the helmet visor on top of the app's layers. OpenXR
-            // composition is strictly back-to-front, so placing our layer
-            // last puts it in front of everything the game submitted.
+            // Slow path: copy the app's layer pointers into our own array,
+            // drop the invalid ones, append the helmet if armed. OpenXR
+            // composition is back-to-front, so the helmet last puts it in
+            // front of everything the game submitted.
             std::vector<const XrCompositionLayerBaseHeader*> patched;
             patched.reserve(frameEndInfo->layerCount + 1u);
             for (uint32_t i = 0; i < frameEndInfo->layerCount; ++i) {
-                patched.push_back(frameEndInfo->layers[i]);
+                const auto* layer = frameEndInfo->layers ? frameEndInfo->layers[i] : nullptr;
+                if (isQuadRectInvalid(layer)) {
+                    if (!m_strippedAppLayerLogged) {
+                        m_strippedAppLayerLogged = true;
+                        const auto* q =
+                            reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+                        Log(fmt::format(
+                            "xrEndFrame: stripped appLayer[{}] (QUAD) — invalid rect "
+                            "extent({}x{}). Likely upstream submitter bug (e.g. "
+                            "OpenComposite translating an OpenVR flipped-Y bound to "
+                            "a negative XrExtent). The rest of the frame composites "
+                            "normally.\n",
+                            i, q->subImage.imageRect.extent.width,
+                            q->subImage.imageRect.extent.height));
+                    }
+                    continue;
+                }
+                patched.push_back(layer);
             }
-            patched.push_back(helmetLayer);
+            if (haveHelmet) patched.push_back(helmetLayer);
 
             XrFrameEndInfo patchedInfo = *frameEndInfo;
             patchedInfo.layerCount = static_cast<uint32_t>(patched.size());
@@ -720,6 +768,11 @@ namespace openxr_api_layer {
         // overlay by value keeps its lifetime tied to the layer instance.
         HelmetOverlayConfig m_helmetConfig{};
         HelmetOverlay m_helmetOverlay{};
+
+        // Once-per-session guard so xrEndFrame doesn't flood the log when a
+        // buggy upstream submitter sends an invalid QUAD rect every frame.
+        // Reset on session creation.
+        bool m_strippedAppLayerLogged{false};
     };
 
     // This method is required by the framework to instantiate your OpenXrApi implementation.
