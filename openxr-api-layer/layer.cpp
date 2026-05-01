@@ -31,6 +31,7 @@
 #include <utils/crop_math.h>
 #include <utils/helmet_config_parser.h>
 #include <utils/helmet_overlay.h>
+#include <utils/helmet_visibility_mask.h>
 #include <utils/name_utils.h>
 
 #include <rapidjson/document.h>
@@ -45,7 +46,23 @@ namespace openxr_api_layer {
 
     // Initialize these vectors with arrays of extensions to block and implicitly request for the instance.
     const std::vector<std::string> blockedExtensions = {};
-    const std::vector<std::string> implicitExtensions = {};
+    // XR_KHR_visibility_mask: lets us augment the runtime's "hidden
+    // triangle mesh" with the helmet's opaque silhouette. Apps that
+    // consume xrGetVisibilityMaskKHR (e.g. for stencil rejection)
+    // then skip shading on the masked pixels. Requested implicitly
+    // so it works even on apps that don't enable the extension
+    // themselves; if the runtime doesn't expose it, the framework
+    // logs "Cannot satisfy implicit extension request" and our
+    // override falls through to "no contribution".
+    const std::vector<std::string> implicitExtensions = {
+        XR_KHR_VISIBILITY_MASK_EXTENSION_NAME,
+        // QPC → XrTime conversion. Used by the visibility-mask path to
+        // synthesize a valid display time when xrLocateViews needs to
+        // run before the app has issued its first xrWaitFrame (apps
+        // that query GetHiddenAreaMesh during init, e.g. LMU and DiRT,
+        // hit this path).
+        XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME
+    };
 
     // CropConfig, clampFactor, scaleSwapchainExtents, and narrowFov live in
     // <utils/crop_math.h> so they can be unit-tested from a standalone binary
@@ -114,7 +131,8 @@ namespace openxr_api_layer {
             << "    \"distance_m\": 0.15,\n"
             << "    \"brightness\": 0.25,\n"
             << "    \"horizontal_fov_deg\": 120,\n"
-            << "    \"vertical_offset_deg\": -10\n"
+            << "    \"vertical_offset_deg\": -10,\n"
+            << "    \"use_visibility_mask\": true\n"
             << "  }\n"
             << "}\n";
         return out.good();
@@ -415,6 +433,24 @@ namespace openxr_api_layer {
             TraceLoggingWrite(g_traceProvider, "xrCreateInstance", TLArg(runtimeName.c_str(), "RuntimeName"));
             Log(fmt::format("Using OpenXR runtime: {}\n", runtimeName));
 
+            // Snapshot whether the framework managed to enable
+            // XR_KHR_visibility_mask. The visibility-mask path no-ops
+            // when this is false (no runtime function pointer to
+            // forward to, and no app would call the function anyway
+            // since the extension wasn't granted).
+            for (const auto& ext : GetGrantedExtensions()) {
+                if (ext == XR_KHR_VISIBILITY_MASK_EXTENSION_NAME) {
+                    m_visibilityMaskExtensionGranted = true;
+                }
+                if (ext == XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) {
+                    m_qpcConvertExtensionGranted = true;
+                }
+            }
+            Log(fmt::format("XR_KHR_visibility_mask {}\n",
+                             m_visibilityMaskExtensionGranted ? "granted" : "not granted"));
+            Log(fmt::format("XR_KHR_win32_convert_performance_counter_time {}\n",
+                             m_qpcConvertExtensionGranted ? "granted" : "not granted"));
+
             return result;
         }
 
@@ -468,6 +504,12 @@ namespace openxr_api_layer {
 
                 TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
 
+                // Capture the session handle for the visibility-mask
+                // event injection (xrPollEvent needs to attach the
+                // session to each XR_TYPE_EVENT_DATA_VISIBILITY_MASK_
+                // CHANGED_KHR it emits).
+                m_session = *session;
+
                 // Arm the helmet overlay. Best-practices: any failure
                 // here must NEVER crash the host; the overlay degrades
                 // to "not armed" and the rest of the layer keeps running.
@@ -486,6 +528,41 @@ namespace openxr_api_layer {
                     } catch (const std::exception& exc) {
                         ErrorLog(fmt::format("HelmetOverlay::initialize threw: {}\n", exc.what()));
                     }
+
+                    // Visibility-mask path: only spin up if the runtime
+                    // granted the extension. The mask itself is wired
+                    // off the same PNG (re-loaded independently) and
+                    // doesn't depend on D3D11; it just needs the file
+                    // to be readable. Failure modes are silent —
+                    // m_visibilityMask.isInitialized() stays false,
+                    // and our xrGetVisibilityMaskKHR override falls
+                    // through to pure pass-through.
+                    if (m_visibilityMaskExtensionGranted) {
+                        try {
+                            m_visibilityMask.initialize(localAppData / "helmets",
+                                                         m_helmetConfig);
+                            // Companion XR_REFERENCE_SPACE_TYPE_VIEW handle
+                            // for our own xrLocateViews calls. The helmet
+                            // overlay creates its own viewSpace internally;
+                            // we keep a dedicated one here so the two
+                            // subsystems stay independent.
+                            XrReferenceSpaceCreateInfo rci{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+                            rci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+                            rci.poseInReferenceSpace.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+                            rci.poseInReferenceSpace.position = {0.0f, 0.0f, 0.0f};
+                            if (XR_FAILED(OpenXrApi::xrCreateReferenceSpace(*session, &rci, &m_maskViewSpace))) {
+                                Log("VisibilityMask: xrCreateReferenceSpace(VIEW) failed, "
+                                    "mask path will not arm\n");
+                                m_maskViewSpace = XR_NULL_HANDLE;
+                            }
+                            Log(fmt::format(
+                                "VisibilityMask: helmet mask {}, view space {}\n",
+                                m_visibilityMask.isInitialized() ? "armed" : "inert",
+                                m_maskViewSpace != XR_NULL_HANDLE ? "ready" : "absent"));
+                        } catch (const std::exception& exc) {
+                            ErrorLog(fmt::format("HelmetVisibilityMask::initialize threw: {}\n", exc.what()));
+                        }
+                    }
                 }
             }
 
@@ -496,9 +573,36 @@ namespace openxr_api_layer {
         XrResult xrDestroySession(XrSession session) override {
             TraceLoggingWrite(g_traceProvider, "xrDestroySession", TLXArg(session, "Session"));
 
-            // Release overlay resources BEFORE forwarding: once the runtime
-            // destroys the session, its XrSwapchain / XrSpace handles are
-            // invalid and calling the destroy PFNs on them would be UB.
+            // Release overlay + visibility-mask resources BEFORE
+            // forwarding: once the runtime destroys the session, the
+            // XrSwapchain / XrSpace handles are invalid and calling
+            // destroy PFNs on them would be UB.
+            if (m_maskViewSpace != XR_NULL_HANDLE) {
+                OpenXrApi::xrDestroySpace(m_maskViewSpace);
+                m_maskViewSpace = XR_NULL_HANDLE;
+            }
+            m_eyePoseCacheValid = false;
+            m_visibilityMaskBuilt.fill(false);
+            m_visibilityMaskDumped.fill(false);  // re-arm one-shot mesh dump
+            m_endFrameDiagLogged = false;       // re-arm one-shot for the next session
+            m_strippedAppLayerLogged = false;   // ditto, layer-strip one-shot
+            // Diagnostic: report whether the app actually queried
+            // xrGetVisibilityMaskKHR during the session. Zero means
+            // our mask contribution had no chance to show up in the
+            // app's stencil and any perf impact attributed to the
+            // visibility-mask path is environmental noise.
+            if (m_visibilityMaskExtensionGranted) {
+                Log(fmt::format(
+                    "VisibilityMask: app queried xrGetVisibilityMaskKHR — "
+                    "view 0: {} call(s), view 1: {} call(s) over the session\n",
+                    m_visibilityMaskQueryCount[0], m_visibilityMaskQueryCount[1]));
+            }
+            m_visibilityMaskQueryCount.fill(0);
+            // Drop any queued visibility-mask events tied to this
+            // session — they reference m_session which is about to
+            // become invalid.
+            m_pendingVisibilityMaskEvents.clear();
+            m_session = XR_NULL_HANDLE;
             try {
                 m_helmetOverlay.shutdown();
             } catch (const std::exception& exc) {
@@ -516,31 +620,312 @@ namespace openxr_api_layer {
 
             // Fast path: nothing to add — forward untouched so the original
             // layer array (which may live in the app's stack) is not copied.
+            // debug_visibility_mask=true intentionally hides the helmet quad
+            // so the user can see exactly what the visibility mask removed
+            // from the rendered scene (the foam region appears as the app's
+            // clear color, the visor opening renders normally). The mask is
+            // still emitted via xrGetVisibilityMaskKHR — only the on-top
+            // composition layer is suppressed.
             const XrCompositionLayerBaseHeader* helmetLayer = nullptr;
             const bool haveHelmet =
-                !m_bypassApiLayer && m_helmetOverlay.isArmed() &&
+                !m_bypassApiLayer &&
+                !m_helmetConfig.debug_visibility_mask &&
+                m_helmetOverlay.isArmed() &&
                 m_helmetOverlay.appendLayer(frameEndInfo->displayTime, &helmetLayer) &&
                 helmetLayer != nullptr;
 
-            if (!haveHelmet) {
+            // One-shot diagnostic: dump every composition layer being
+            // submitted on the first frame of the session. Catches
+            // XR_ERROR_SWAPCHAIN_RECT_INVALID and similar by showing
+            // exactly which layer (the app's projection, the app's
+            // own quads, or our helmet) has a suspect imageRect /
+            // swapchain handle. Reset to false in xrDestroySession so
+            // the next session also gets one snapshot.
+            if (!m_endFrameDiagLogged) {
+                m_endFrameDiagLogged = true;
+                Log(fmt::format(
+                    "xrEndFrame[first frame of session]: appLayerCount={}, helmetAppended={}\n",
+                    frameEndInfo->layerCount, haveHelmet ? "yes" : "no"));
+                for (uint32_t i = 0; i < frameEndInfo->layerCount; ++i) {
+                    const auto* layer = frameEndInfo->layers ? frameEndInfo->layers[i] : nullptr;
+                    if (!layer) {
+                        Log(fmt::format("  appLayer[{}] = NULL\n", i));
+                        continue;
+                    }
+                    if (layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                        const auto* p =
+                            reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+                        Log(fmt::format(
+                            "  appLayer[{}] type=PROJECTION viewCount={} flags=0x{:x}\n",
+                            i, p->viewCount, p->layerFlags));
+                        for (uint32_t v = 0; v < p->viewCount && p->views; ++v) {
+                            const auto& view = p->views[v];
+                            Log(fmt::format(
+                                "    view[{}] swap={:p} rect=offset({},{}) extent({}x{}) "
+                                "arrayIdx={}\n",
+                                v, (void*)view.subImage.swapchain,
+                                view.subImage.imageRect.offset.x,
+                                view.subImage.imageRect.offset.y,
+                                view.subImage.imageRect.extent.width,
+                                view.subImage.imageRect.extent.height,
+                                view.subImage.imageArrayIndex));
+                        }
+                    } else if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                        const auto* q =
+                            reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+                        Log(fmt::format(
+                            "  appLayer[{}] type=QUAD swap={:p} rect=offset({},{}) "
+                            "extent({}x{}) arrayIdx={} flags=0x{:x}\n",
+                            i, (void*)q->subImage.swapchain,
+                            q->subImage.imageRect.offset.x,
+                            q->subImage.imageRect.offset.y,
+                            q->subImage.imageRect.extent.width,
+                            q->subImage.imageRect.extent.height,
+                            q->subImage.imageArrayIndex, q->layerFlags));
+                    } else {
+                        Log(fmt::format("  appLayer[{}] type={} (other, not inspected)\n",
+                                        i, static_cast<int>(layer->type)));
+                    }
+                }
+                if (haveHelmet) {
+                    const auto* q =
+                        reinterpret_cast<const XrCompositionLayerQuad*>(helmetLayer);
+                    Log(fmt::format(
+                        "  helmetLayer       type=QUAD swap={:p} rect=offset({},{}) "
+                        "extent({}x{}) arrayIdx={} flags=0x{:x}\n",
+                        (void*)q->subImage.swapchain,
+                        q->subImage.imageRect.offset.x,
+                        q->subImage.imageRect.offset.y,
+                        q->subImage.imageRect.extent.width,
+                        q->subImage.imageRect.extent.height,
+                        q->subImage.imageArrayIndex, q->layerFlags));
+                }
+            }
+
+            // Detect upstream-corrupt layers that would otherwise force
+            // the runtime to fail the WHOLE submission with
+            // XR_ERROR_SWAPCHAIN_RECT_INVALID, taking our helmet down
+            // with it. Seen on LMU+OpenComposite: a QUAD with
+            // extent(WxH) where H is negative — looks like an
+            // OpenVR→OpenXR translation forgetting to absolute-value a
+            // flipped-Y texture bound. We only flag QUADs here because
+            // that's the only failure mode we've observed in the wild;
+            // PROJECTION views with bad rects would need per-view
+            // surgery (clone the views array) which we keep out for
+            // now.
+            const auto isQuadRectInvalid = [](const XrCompositionLayerBaseHeader* layer) {
+                if (!layer || layer->type != XR_TYPE_COMPOSITION_LAYER_QUAD) return false;
+                const auto* q = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+                return q->subImage.imageRect.extent.width <= 0 ||
+                       q->subImage.imageRect.extent.height <= 0;
+            };
+
+            bool anyStrippable = false;
+            if (frameEndInfo->layers) {
+                for (uint32_t i = 0; i < frameEndInfo->layerCount; ++i) {
+                    if (isQuadRectInvalid(frameEndInfo->layers[i])) {
+                        anyStrippable = true;
+                        break;
+                    }
+                }
+            }
+
+            // Fast path: nothing to strip and nothing to add — forward
+            // untouched so the original layer array (which may live on
+            // the app's stack) is not copied.
+            if (!haveHelmet && !anyStrippable) {
                 return OpenXrApi::xrEndFrame(session, frameEndInfo);
             }
 
-            // Append the helmet visor on top of the app's layers. OpenXR
-            // composition is strictly back-to-front, so placing our layer
-            // last puts it in front of everything the game submitted.
+            // Slow path: copy the app's layer pointers into our own
+            // array, drop the invalid ones, append the helmet if armed.
+            // OpenXR composition is back-to-front, so the helmet last
+            // puts it in front of everything the game submitted.
             std::vector<const XrCompositionLayerBaseHeader*> patched;
             patched.reserve(frameEndInfo->layerCount + 1u);
             for (uint32_t i = 0; i < frameEndInfo->layerCount; ++i) {
-                patched.push_back(frameEndInfo->layers[i]);
+                const auto* layer = frameEndInfo->layers ? frameEndInfo->layers[i] : nullptr;
+                if (isQuadRectInvalid(layer)) {
+                    if (!m_strippedAppLayerLogged) {
+                        m_strippedAppLayerLogged = true;
+                        const auto* q =
+                            reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+                        Log(fmt::format(
+                            "xrEndFrame: stripped appLayer[{}] (QUAD) — invalid rect "
+                            "extent({}x{}). Likely upstream submitter bug (e.g. "
+                            "OpenComposite translating an OpenVR flipped-Y bound to "
+                            "a negative XrExtent). The rest of the frame composites "
+                            "normally so the helmet still renders.\n",
+                            i, q->subImage.imageRect.extent.width,
+                            q->subImage.imageRect.extent.height));
+                    }
+                    continue;
+                }
+                patched.push_back(layer);
             }
-            patched.push_back(helmetLayer);
+            if (haveHelmet) patched.push_back(helmetLayer);
 
             XrFrameEndInfo patchedInfo = *frameEndInfo;
             patchedInfo.layerCount = static_cast<uint32_t>(patched.size());
             patchedInfo.layers = patched.data();
 
             return OpenXrApi::xrEndFrame(session, &patchedInfo);
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrGetVisibilityMaskKHR
+        XrResult xrGetVisibilityMaskKHR(XrSession session,
+                                        XrViewConfigurationType viewConfigurationType,
+                                        uint32_t viewIndex,
+                                        XrVisibilityMaskTypeKHR visibilityMaskType,
+                                        XrVisibilityMaskKHR* visibilityMask) override {
+            // Tally inbound calls. Counted before the early bail-outs
+            // below because the diagnostic is "did the app ask?",
+            // independent of whether we contribute. Both probe and
+            // fetch increment — a typical app shows a count of 2
+            // per eye over the session lifetime.
+            if (viewIndex < kMaxVisibilityViews) {
+                ++m_visibilityMaskQueryCount[viewIndex];
+            }
+
+            // Always forward first — the runtime fills its own mesh
+            // (lens occlusion / outside-FOV pixels) and crucially the
+            // *Output count fields, which our append logic reads.
+            const XrResult result = OpenXrApi::xrGetVisibilityMaskKHR(
+                session, viewConfigurationType, viewIndex, visibilityMaskType, visibilityMask);
+            if (XR_FAILED(result) || !visibilityMask) return result;
+
+            // Bail out early on every situation where we have no
+            // contribution to make. Each branch returns the runtime's
+            // result unchanged.
+            if (!m_visibilityMaskExtensionGranted) return result;
+            if (!m_helmetConfig.use_visibility_mask) return result;
+            if (!m_visibilityMask.isInitialized()) return result;
+            // Lazy snapshot fallback: apps like LMU and DiRT Rally 2
+            // query GetHiddenAreaMesh during init, before any
+            // xrWaitFrame, so our companion snapshot in xrLocateViews
+            // hasn't fired yet and m_eyePoseCacheValid is false. We
+            // try to synthesize a valid display time from QPC and
+            // run the snapshot ourselves; if XR_KHR_win32_convert_
+            // performance_counter_time isn't granted (or fails), we
+            // fall back to the original behaviour and bail.
+            if (!m_eyePoseCacheValid) {
+                const XrTime synthesizedTime =
+                    synthesizeDisplayTime(GetXrInstance());
+                snapshotEyeInViewPoses(session, synthesizedTime,
+                                       "xrGetVisibilityMaskKHR/QPC");
+            }
+            if (!m_eyePoseCacheValid) return result;
+            if (visibilityMaskType != XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR) return result;
+            if (viewIndex >= kMaxVisibilityViews) return result;
+
+            // Build the helmet NDC mesh for this eye if it hasn't
+            // been built yet (or was invalidated by live-edit). The
+            // built flag survives across xrGetVisibilityMaskKHR
+            // calls until either xrDestroySession or a live-edit
+            // geometry change clears it. Rebuild itself is cheap
+            // (16 vertex projections) but going through it 2-4 times
+            // per session for nothing was wasteful.
+            if (!m_visibilityMaskBuilt[viewIndex]) {
+                m_visibilityMask.rebuildForView(viewIndex,
+                                                m_eyeInViewPoses[viewIndex],
+                                                m_eyeFovs[viewIndex],
+                                                m_helmetConfig);
+                m_visibilityMaskBuilt[viewIndex] = true;
+            }
+            const auto& helmet = m_visibilityMask.meshForView(viewIndex);
+            const uint32_t helmetVerts = static_cast<uint32_t>(helmet.vertices.size());
+            const uint32_t helmetIdxs  = static_cast<uint32_t>(helmet.indices.size());
+
+            // One-shot dump of the freshly-built mesh so we can sanity
+            // check what we actually emit when an app reports visual
+            // weirdness. Logged once per (view, session) — m_visibility
+            // MaskBuilt re-arms us on session destroy via the existing
+            // .fill(false). Keeps the verbose path strictly diagnostic.
+            if (!m_visibilityMaskDumped[viewIndex]) {
+                m_visibilityMaskDumped[viewIndex] = true;
+                Log(fmt::format(
+                    "VisibilityMask[view {}]: helmet mesh {} verts, {} indices "
+                    "(triangles in NDC)\n",
+                    viewIndex, helmetVerts, helmetIdxs));
+                for (uint32_t v = 0; v < helmetVerts && v < 32; ++v) {
+                    Log(fmt::format("  v[{}] = ({:+.4f}, {:+.4f})\n",
+                                    v, helmet.vertices[v].x, helmet.vertices[v].y));
+                }
+                for (uint32_t t = 0; t + 2 < helmetIdxs && t < 24; t += 3) {
+                    Log(fmt::format("  tri[{}] = {} {} {}\n",
+                                    t / 3, helmet.indices[t], helmet.indices[t + 1],
+                                    helmet.indices[t + 2]));
+                }
+            }
+
+            if (helmetVerts == 0 || helmetIdxs == 0) return result;
+
+            const uint32_t runtimeVerts = visibilityMask->vertexCountOutput;
+            const uint32_t runtimeIdxs  = visibilityMask->indexCountOutput;
+            const uint32_t totalVerts   = runtimeVerts + helmetVerts;
+            const uint32_t totalIdxs    = runtimeIdxs  + helmetIdxs;
+
+            // Two-call probe: app passes capacity 0 to learn the
+            // required size. Report the merged size and stop.
+            if (visibilityMask->vertexCapacityInput == 0 ||
+                visibilityMask->indexCapacityInput == 0) {
+                visibilityMask->vertexCountOutput = totalVerts;
+                visibilityMask->indexCountOutput  = totalIdxs;
+                return XR_SUCCESS;
+            }
+
+            // Fetch call: runtime already wrote its part into the
+            // buffers. We append ours after it. Buffers must be sized
+            // for the merged total — if not, surface the standard
+            // SIZE_INSUFFICIENT and let the app re-probe.
+            if (visibilityMask->vertexCapacityInput < totalVerts ||
+                visibilityMask->indexCapacityInput  < totalIdxs) {
+                visibilityMask->vertexCountOutput = totalVerts;
+                visibilityMask->indexCountOutput  = totalIdxs;
+                return XR_ERROR_SIZE_INSUFFICIENT;
+            }
+
+            if (visibilityMask->vertices && helmetVerts > 0) {
+                std::memcpy(visibilityMask->vertices + runtimeVerts,
+                            helmet.vertices.data(),
+                            sizeof(XrVector2f) * helmetVerts);
+            }
+            if (visibilityMask->indices && helmetIdxs > 0) {
+                // Helmet indices are local to its own vertex array —
+                // shift them by the runtime's vertex count so they
+                // address the appended block correctly.
+                for (uint32_t i = 0; i < helmetIdxs; ++i) {
+                    visibilityMask->indices[runtimeIdxs + i] =
+                        helmet.indices[i] + runtimeVerts;
+                }
+            }
+            visibilityMask->vertexCountOutput = totalVerts;
+            visibilityMask->indexCountOutput  = totalIdxs;
+            return XR_SUCCESS;
+        }
+
+        // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrPollEvent
+        XrResult xrPollEvent(XrInstance instance, XrEventDataBuffer* eventData) override {
+            // If we have a pending visibility-mask-changed event,
+            // deliver it before forwarding to the runtime. xrPollEvent
+            // returns one event per call — apps poll in a loop until
+            // XR_EVENT_UNAVAILABLE, so they will pick up our event and
+            // then go on to drain runtime events on subsequent calls.
+            // Order between our events and runtime events doesn't carry
+            // semantic meaning, only "every event eventually surfaces"
+            // does, so always-front is fine.
+            if (eventData && !m_pendingVisibilityMaskEvents.empty()) {
+                const XrEventDataVisibilityMaskChangedKHR ev =
+                    m_pendingVisibilityMaskEvents.front();
+                m_pendingVisibilityMaskEvents.erase(m_pendingVisibilityMaskEvents.begin());
+                // XrEventDataBuffer is the spec's polymorphic carrier
+                // (256 bytes); writing our smaller struct via memcpy
+                // is safe and matches how runtimes typically populate
+                // it.
+                std::memcpy(eventData, &ev, sizeof(ev));
+                return XR_SUCCESS;
+            }
+            return OpenXrApi::xrPollEvent(instance, eventData);
         }
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEnumerateViewConfigurationViews
@@ -604,6 +989,18 @@ namespace openxr_api_layer {
                     if (mtime != m_configLastWriteTime) {
                         m_configLastWriteTime = mtime;
                         m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
+
+                        // Snapshot the helmet geometry + the
+                        // use_visibility_mask flag before reload so we
+                        // can decide whether the visibility-mask cache
+                        // needs to be invalidated.
+                        const float oldDistance = m_helmetConfig.distance_m;
+                        const float oldFov      = m_helmetConfig.horizontal_fov_deg;
+                        const float oldOffset   = m_helmetConfig.vertical_offset_deg;
+                        const bool  oldUseMask  = m_helmetConfig.use_visibility_mask;
+                        const bool  oldInvert   = m_helmetConfig.invert_visibility_mask;
+                        const bool  oldUv       = m_helmetConfig.visibility_mask_uv_space;
+
                         m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
                         // Push the new helmet tunables into the live
                         // overlay so distance_m / horizontal_fov_deg
@@ -614,6 +1011,57 @@ namespace openxr_api_layer {
                         // reallocation (see HelmetOverlay::updateLiveTunables).
                         m_helmetOverlay.updateLiveTunables(m_helmetConfig);
                         ++m_configGen;
+
+                        // Visibility-mask cache invalidation: any of the
+                        // three geometry knobs changing OR a toggle of
+                        // use_visibility_mask makes the app's stencil
+                        // out-of-date. Clear the built flags so the
+                        // next xrGetVisibilityMaskKHR recomputes;
+                        // queue per-view CHANGED events so apps that
+                        // listen on xrPollEvent know to re-query.
+                        // Brightness / image / enabled don't affect
+                        // mask geometry, so they don't trigger this.
+                        const bool geomChanged =
+                            std::abs(oldDistance - m_helmetConfig.distance_m) > 1e-4f ||
+                            std::abs(oldFov - m_helmetConfig.horizontal_fov_deg) > 1e-3f ||
+                            std::abs(oldOffset - m_helmetConfig.vertical_offset_deg) > 1e-3f;
+                        const bool useMaskChanged =
+                            oldUseMask != m_helmetConfig.use_visibility_mask;
+                        const bool invertChanged =
+                            oldInvert != m_helmetConfig.invert_visibility_mask;
+                        const bool uvChanged =
+                            oldUv != m_helmetConfig.visibility_mask_uv_space;
+                        if ((geomChanged || useMaskChanged || invertChanged || uvChanged) &&
+                            m_visibilityMaskExtensionGranted &&
+                            m_visibilityMask.isInitialized() &&
+                            m_session != XR_NULL_HANDLE) {
+                            m_visibilityMaskBuilt.fill(false);
+                            m_visibilityMaskDumped.fill(false);  // re-log new mesh
+                            for (uint32_t i = 0; i < kMaxVisibilityViews; ++i) {
+                                XrEventDataVisibilityMaskChangedKHR ev{
+                                    XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR};
+                                ev.session = m_session;
+                                ev.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+                                ev.viewIndex = i;
+                                // Note: XrEventDataVisibilityMaskChangedKHR
+                                // does NOT carry a visibilityMaskType field —
+                                // the spec is "this view's mask changed, re-
+                                // query whichever types you care about". So
+                                // apps that built a HIDDEN_TRIANGLE_MESH
+                                // stencil will re-query that type on their
+                                // own.
+                                m_pendingVisibilityMaskEvents.push_back(ev);
+                            }
+                            Log(fmt::format(
+                                "VisibilityMask: live-edit invalidation "
+                                "(geom={}, useMaskToggle={}, invertToggle={}, "
+                                "uvSpaceToggle={}), queued mask-changed events "
+                                "for both eyes\n",
+                                geomChanged ? "yes" : "no",
+                                useMaskChanged ? "yes" : "no",
+                                invertChanged ? "yes" : "no",
+                                uvChanged ? "yes" : "no"));
+                        }
                     }
                 } catch (...) {
                     // File mid-write, locked, or deleted. Skip, try next interval.
@@ -674,10 +1122,74 @@ namespace openxr_api_layer {
                 m_fovLogged = true;
             }
 
+            // Visibility-mask path: snapshot eye-in-view poses + FOVs
+            // the first time xrLocateViews succeeds. Reuses the app's
+            // displayTime — so this fires from the first real frame
+            // and is essentially free.
+            if (XR_SUCCEEDED(result) && !m_eyePoseCacheValid) {
+                snapshotEyeInViewPoses(session, viewLocateInfo->displayTime, "xrLocateViews");
+            }
+
             return result;
         }
 
       private:
+        // Companion xrLocateViews against m_maskViewSpace to capture
+        // the eye-relative-to-head pose + FOV used by the visibility-
+        // mask projection math. Per-session one-shot: returns silently
+        // when the cache is already valid or when the visibility-mask
+        // path isn't armed.
+        //
+        // `source` is a short tag included in the log message so we
+        // know whether the snapshot came from the app's xrLocateViews
+        // or from our own lazy fallback in xrGetVisibilityMaskKHR.
+        void snapshotEyeInViewPoses(XrSession session, XrTime displayTime,
+                                    const char* source) {
+            if (m_eyePoseCacheValid) return;
+            if (!m_visibilityMaskExtensionGranted) return;
+            if (!m_visibilityMask.isInitialized()) return;
+            if (m_maskViewSpace == XR_NULL_HANDLE) return;
+            if (displayTime == 0) return;  // sentinel — synthesized failure
+
+            XrViewLocateInfo myLocate{XR_TYPE_VIEW_LOCATE_INFO};
+            myLocate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+            myLocate.displayTime = displayTime;
+            myLocate.space = m_maskViewSpace;
+            XrViewState myState{XR_TYPE_VIEW_STATE};
+            std::array<XrView, kMaxVisibilityViews> myViews{};
+            for (auto& v : myViews) v.type = XR_TYPE_VIEW;
+            uint32_t myCount = 0;
+            const XrResult myResult = OpenXrApi::xrLocateViews(
+                session, &myLocate, &myState, kMaxVisibilityViews, &myCount, myViews.data());
+            if (XR_SUCCEEDED(myResult) && myCount > 0) {
+                const uint32_t cap = std::min<uint32_t>(myCount, kMaxVisibilityViews);
+                for (uint32_t i = 0; i < cap; ++i) {
+                    m_eyeInViewPoses[i] = myViews[i].pose;
+                    m_eyeFovs[i] = myViews[i].fov;
+                }
+                m_eyePoseCacheValid = true;
+                Log(fmt::format("VisibilityMask: snapshot {} eye(s) in view space (via {})\n",
+                                cap, source));
+            }
+        }
+
+        // Synthesize an XrTime from QueryPerformanceCounter, via
+        // XR_KHR_win32_convert_performance_counter_time. Used by the
+        // visibility-mask path when the app queries the mask before
+        // its first xrWaitFrame and we need to call xrLocateViews
+        // ourselves. Returns 0 if the extension isn't granted or the
+        // conversion fails — caller treats 0 as "no snapshot now".
+        XrTime synthesizeDisplayTime(XrInstance instance) {
+            if (!m_qpcConvertExtensionGranted) return 0;
+            LARGE_INTEGER qpc{};
+            if (!QueryPerformanceCounter(&qpc)) return 0;
+            XrTime time = 0;
+            const XrResult cvtResult = OpenXrApi::xrConvertWin32PerformanceCounterToTimeKHR(
+                instance, &qpc, &time);
+            if (XR_FAILED(cvtResult)) return 0;
+            return time;
+        }
+
         bool isSystemHandled(XrSystemId systemId) const {
             return systemId == m_systemId;
         }
@@ -720,6 +1232,68 @@ namespace openxr_api_layer {
         // overlay by value keeps its lifetime tied to the layer instance.
         HelmetOverlayConfig m_helmetConfig{};
         HelmetOverlay m_helmetOverlay{};
+
+        // Visibility-mask path. m_visibilityMask is the helmet
+        // contribution; the runtime's lens occlusion mesh comes from
+        // forwarding to OpenXrApi::xrGetVisibilityMaskKHR. Cache of
+        // eye poses in VIEW space + their FOV is filled lazily the
+        // first time xrLocateViews is called after session start (we
+        // need a frame time, which we don't have at session creation).
+        HelmetVisibilityMask m_visibilityMask{};
+        bool m_visibilityMaskExtensionGranted{false};
+        // True if the runtime granted XR_KHR_win32_convert_performance_
+        // counter_time. Lets the visibility-mask path call
+        // xrLocateViews on demand (without waiting for the app's first
+        // xrWaitFrame) by synthesizing an XrTime from
+        // QueryPerformanceCounter(). Without this extension, we fall
+        // back to the previous behaviour: cache stays invalid until the
+        // app's first xrLocateViews fires our companion snapshot.
+        bool m_qpcConvertExtensionGranted{false};
+        XrSession m_session{XR_NULL_HANDLE};
+        XrSpace m_maskViewSpace{XR_NULL_HANDLE};
+        static constexpr uint32_t kMaxVisibilityViews = 2;  // stereo
+        std::array<XrPosef, kMaxVisibilityViews> m_eyeInViewPoses{};
+        std::array<XrFovf, kMaxVisibilityViews> m_eyeFovs{};
+        bool m_eyePoseCacheValid{false};
+        // Per-view "helmet mesh has been built since last
+        // invalidation" flag. xrGetVisibilityMaskKHR rebuilds only
+        // when false, then flips to true. Reset to all-false on
+        // live-edit geometry changes.
+        std::array<bool, kMaxVisibilityViews> m_visibilityMaskBuilt{};
+        // Companion flag: log the freshly-built mesh contents once
+        // per session per view (under the same reset semantics as
+        // m_visibilityMaskBuilt — invalidated on live-edit geometry
+        // changes and on session destroy). Pure diagnostic.
+        std::array<bool, kMaxVisibilityViews> m_visibilityMaskDumped{};
+        // One-shot guard for the xrEndFrame layer-dump diagnostic.
+        // Set true after the first xrEndFrame of each session, reset
+        // to false in xrDestroySession so the next session also gets
+        // a single snapshot. Cheap to keep on permanently — the only
+        // per-frame cost after the first frame is one bool check.
+        bool m_endFrameDiagLogged{false};
+
+        // Companion guard: log a single line per session the first
+        // time we strip an invalid app layer in xrEndFrame. Avoids
+        // flooding the log when a buggy submitter sends bad rects
+        // every frame. Reset alongside m_endFrameDiagLogged.
+        bool m_strippedAppLayerLogged{false};
+
+        // Per-view tally of inbound xrGetVisibilityMaskKHR calls.
+        // Diagnostic only: lets us tell at session-end whether the
+        // app actually consumed our mask contribution. Typical apps
+        // call it twice per eye at startup (one probe + one fetch);
+        // some apps re-query on visibility-mask events. A zero count
+        // means the app never asked — our mask was effectively
+        // wallpaper, not stencil input — and the visibility-mask
+        // path produces no measurable perf delta on that runtime/app
+        // pair regardless of how good the mesh is.
+        std::array<uint32_t, kMaxVisibilityViews> m_visibilityMaskQueryCount{};
+        // Events queued for the next xrPollEvent calls. Each entry
+        // is a XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR ready
+        // to be memcpy'd into the app's eventData buffer. Pushed
+        // when live-edit invalidates the mask geometry; popped one
+        // per xrPollEvent call until empty.
+        std::vector<XrEventDataVisibilityMaskChangedKHR> m_pendingVisibilityMaskEvents;
     };
 
     // This method is required by the framework to instantiate your OpenXrApi implementation.

@@ -160,6 +160,12 @@ namespace openxr_api_layer {
         // re-querying the format list during the init helpers.
         int64_t swapchainFormat = kFormatUNORM;
         DXGI_FORMAT d3dFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+        // Source directory the PNG was loaded from. Kept so live-edit
+        // can re-decode the image when debug_visibility_mask is
+        // toggled (the static-image swapchain has to be torn down and
+        // recreated to flip the tint on/off).
+        std::filesystem::path helmetsDir;
     };
 
     HelmetOverlay::HelmetOverlay() : m_impl(std::make_unique<Impl>()) {}
@@ -202,6 +208,7 @@ namespace openxr_api_layer {
         m_impl->config = config;
         m_impl->api = api;
         m_impl->session = session;
+        m_impl->helmetsDir = helmetsDir;
 
         if (!config.enabled) {
             Log("HelmetOverlay: disabled by config, staying inert\n");
@@ -384,6 +391,17 @@ namespace openxr_api_layer {
             Log(fmt::format("HelmetOverlay: applied brightness={:.2f} to texture\n", bright));
         }
 
+        // Note: debug_visibility_mask used to red-tint the foam region
+        // here. That validated the UV bbox detection but not the
+        // downstream NDC projection of the mask geometry — so a bug
+        // where strip vertices landed outside [-1, +1] (DiRT Rally 2
+        // race mode, observed) showed correctly-placed red on the
+        // overlay yet a broken stencil mesh in the rendered image.
+        // The new debug behaviour lives in xrEndFrame: when the flag
+        // is on, the helmet quad layer is simply not appended, so the
+        // user sees the app's stencil output directly — i.e., what is
+        // really being masked, after passing through the full pipeline.
+
         D3D11_TEXTURE2D_DESC td{};
         td.Width = texW;
         td.Height = texH;
@@ -501,6 +519,23 @@ namespace openxr_api_layer {
     void HelmetOverlay::updateLiveTunables(const HelmetOverlayConfig& newConfig) {
         if (!m_impl || m_impl->mode != HelmetOverlayMode::Quad) return;
 
+        // ---- debug_visibility_mask toggle. ---------------------------
+        // Pure flag flip — the helmet overlay quad is unconditionally
+        // built; whether it gets appended to the frame is decided
+        // every frame in the layer's xrEndFrame override based on the
+        // current value of m_impl->config.debug_visibility_mask. So
+        // there is nothing to rebuild here, just record the new value
+        // and log it for the user. Cheap.
+        if (m_impl->config.debug_visibility_mask != newConfig.debug_visibility_mask) {
+            m_impl->config.debug_visibility_mask = newConfig.debug_visibility_mask;
+            Log(fmt::format(
+                "HelmetOverlay: live-tuned debug_visibility_mask={} "
+                "(helmet quad will {} be drawn next frame)\n",
+                m_impl->config.debug_visibility_mask,
+                m_impl->config.debug_visibility_mask ? "NOT" : "now"));
+        }
+
+        // ---- Geometric tunables (cheap, no swapchain churn). ---------
         // Bail out cheaply if nothing changed (avoids spamming the log
         // when the file is touched but the helmet block is identical).
         const bool sameDistance =

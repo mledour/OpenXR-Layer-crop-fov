@@ -39,6 +39,29 @@ TEST_CASE("parseHelmetConfig: empty JSON object returns disabled defaults") {
     CHECK(hc.horizontal_fov_deg == doctest::Approx(130.0f));
     CHECK(hc.vertical_offset_deg == doctest::Approx(0.0f));
     CHECK(hc.brightness == doctest::Approx(1.0f));
+    CHECK(hc.use_visibility_mask == true);
+    CHECK(hc.invert_visibility_mask == false);
+    CHECK(hc.visibility_mask_uv_space == false);
+    CHECK(hc.debug_visibility_mask == false);
+}
+
+TEST_CASE("parseHelmetConfig: visibility_mask_uv_space defaults to false") {
+    const auto hc = parseHelmetConfig(R"({"helmet_overlay": {}})");
+    CHECK(hc.visibility_mask_uv_space == false);
+}
+
+TEST_CASE("parseHelmetConfig: visibility_mask_uv_space true is honoured") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"visibility_mask_uv_space": true}
+    })");
+    CHECK(hc.visibility_mask_uv_space == true);
+}
+
+TEST_CASE("parseHelmetConfig: visibility_mask_uv_space wrong type falls back to default") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"visibility_mask_uv_space": 1}
+    })");
+    CHECK(hc.visibility_mask_uv_space == false);
 }
 
 TEST_CASE("parseHelmetConfig: missing helmet_overlay block returns defaults") {
@@ -67,7 +90,8 @@ TEST_CASE("parseHelmetConfig: full config is parsed verbatim within clamps") {
             "distance_m": 0.30,
             "horizontal_fov_deg": 160,
             "vertical_offset_deg": 5.0,
-            "brightness": 0.5
+            "brightness": 0.5,
+            "use_visibility_mask": false
         }
     })");
     CHECK(hc.enabled == true);
@@ -76,6 +100,71 @@ TEST_CASE("parseHelmetConfig: full config is parsed verbatim within clamps") {
     CHECK(hc.horizontal_fov_deg == doctest::Approx(160.0f));
     CHECK(hc.vertical_offset_deg == doctest::Approx(5.0f));
     CHECK(hc.brightness == doctest::Approx(0.5f));
+    CHECK(hc.use_visibility_mask == false);
+}
+
+TEST_CASE("parseHelmetConfig: use_visibility_mask defaults to true when absent") {
+    // Backwards-compat: settings.json files written before this knob
+    // existed should keep the default-true behaviour without surprise.
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"enabled": true, "distance_m": 0.3}
+    })");
+    CHECK(hc.use_visibility_mask == true);
+}
+
+TEST_CASE("parseHelmetConfig: use_visibility_mask wrong type falls back to default") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"use_visibility_mask": "no"}
+    })");
+    CHECK(hc.use_visibility_mask == true);  // string ignored, default kept
+}
+
+TEST_CASE("parseHelmetConfig: invert_visibility_mask defaults to false") {
+    // Off by default — the spec-correct behaviour is to emit the
+    // foam strips around the visor as HIDDEN_TRIANGLE_MESH. Inverting
+    // is an opt-in workaround for apps that mis-interpret the spec.
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"enabled": true}
+    })");
+    CHECK(hc.invert_visibility_mask == false);
+}
+
+TEST_CASE("parseHelmetConfig: invert_visibility_mask true is honoured") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"invert_visibility_mask": true}
+    })");
+    CHECK(hc.invert_visibility_mask == true);
+}
+
+TEST_CASE("parseHelmetConfig: invert_visibility_mask wrong type falls back to default") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"invert_visibility_mask": "yes"}
+    })");
+    CHECK(hc.invert_visibility_mask == false);  // string ignored, default kept
+}
+
+TEST_CASE("parseHelmetConfig: debug_visibility_mask defaults to false") {
+    // Diagnostic-only knob: must be off by default so a forgotten
+    // `true` in default_settings.json doesn't ship a red-tinted helmet
+    // to every user.
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"enabled": true}
+    })");
+    CHECK(hc.debug_visibility_mask == false);
+}
+
+TEST_CASE("parseHelmetConfig: debug_visibility_mask true is honoured") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"debug_visibility_mask": true}
+    })");
+    CHECK(hc.debug_visibility_mask == true);
+}
+
+TEST_CASE("parseHelmetConfig: debug_visibility_mask wrong type falls back to default") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"debug_visibility_mask": 1}
+    })");
+    CHECK(hc.debug_visibility_mask == false);  // int ignored, default kept
 }
 
 TEST_CASE("parseHelmetConfig: integer values for float fields are accepted") {

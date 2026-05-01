@@ -91,6 +91,60 @@ namespace openxr_api_layer {
         // Applied once at session start; needs a session restart to
         // re-apply (no live-edit yet).
         float brightness = 1.0f;
+
+        // Opt-in for the helmet's contribution to xrGetVisibilityMaskKHR.
+        // Default true: when the runtime grants XR_KHR_visibility_mask,
+        // the layer augments the runtime's hidden-triangle mesh with a
+        // bbox of the helmet's opaque foam region so apps can stencil-
+        // reject those pixels and skip shading. Disabling this knob
+        // keeps the helmet quad rendering normally but stops the mask
+        // contribution — useful as an escape hatch for games whose
+        // stencil-setup doesn't tolerate non-trivial mask geometry.
+        // Live-tunable; toggling fires a XR_TYPE_EVENT_DATA_VISIBILITY_
+        // MASK_CHANGED_KHR so apps that listen pick up the change
+        // mid-session.
+        bool use_visibility_mask = true;
+
+        // Maps the visibility-mask vertices from NDC [-1, +1] (spec-
+        // correct for OpenXR's xrGetVisibilityMaskKHR) to UV [0, 1]
+        // before emitting them. Use case: OpenVR-style apps reached
+        // via OpenComposite. OpenComposite passes our vertices through
+        // verbatim, but the OpenVR HiddenAreaMesh contract is UV
+        // [0, 1] (origin bottom-left). With our NDC values, DiRT
+        // Rally 2 (and likely other OpenVR titles) clips/discards
+        // any triangle with y < 0 — half our mesh is silently
+        // dropped. Setting this flag remaps every vertex via
+        // (v + 1) / 2 so they all land in [0, 1] and DiRT renders
+        // them in full. Per-app opt-in (default false to keep the
+        // spec-correct path for native OpenXR apps).
+        bool visibility_mask_uv_space = false;
+
+        // Inverts the visibility-mask geometry: instead of emitting 4
+        // strips around the visor bbox (the foam, the spec-correct
+        // "hidden" area), emits a single rect that IS the visor bbox.
+        // Use case: apps that interpret HIDDEN_TRIANGLE_MESH inversely
+        // (observed on DiRT Rally 2 + OpenComposite + PimaxXR — the
+        // app renders the scene where the mesh IS, skips elsewhere).
+        // For those apps, inverting our mesh restores the correct
+        // visual result. For spec-conforming apps the inverted mesh
+        // is wrong (visor opening becomes black). Per-app opt-in via
+        // settings.json. Live-tunable (fires a mask-changed event).
+        bool invert_visibility_mask = false;
+
+        // Debug aid: when true, the helmet overlay quad is NOT
+        // appended to the frame, while the visibility mask is still
+        // emitted normally via xrGetVisibilityMaskKHR. The user sees
+        // the rendered scene with the foam region replaced by the
+        // app's clear color (typically black or the sky) — i.e.,
+        // exactly what the app stencil-skipped after the full
+        // pipeline (this layer → OpenComposite → app's stencil mesh).
+        // Off by default. Live-tunable: takes effect on the next
+        // frame, no swapchain rebuild. Use this to verify visually
+        // that the mask geometry is correct end-to-end; an earlier
+        // version that tinted the helmet overlay red was misleading
+        // because it only validated the UV bbox detection, not the
+        // downstream NDC projection.
+        bool debug_visibility_mask = false;
     };
 
     // Opaque backend — hides D3D types from every TU that only needs to
@@ -134,8 +188,7 @@ namespace openxr_api_layer {
         bool appendLayer(XrTime displayTime,
                          const XrCompositionLayerBaseHeader** outLayer);
 
-        // Apply a live-edit reload of settings.json. Only fields safe
-        // to change without rebuilding swapchain/textures are honoured:
+        // Apply a live-edit reload of settings.json. Honoured fields:
         //   - distance_m            (re-poses the quad in view space)
         //   - horizontal_fov_deg    (resizes the quad's apparent FOV;
         //                            physical width is recomputed from
@@ -144,9 +197,14 @@ namespace openxr_api_layer {
         //                            angle in the user's view; world-
         //                            space Y is recomputed from
         //                            distance_m × tan(deg))
+        //   - debug_visibility_mask (just flips a flag; on next frame
+        //                            xrEndFrame either appends the
+        //                            helmet quad or doesn't, exposing
+        //                            the app's stencil output for a
+        //                            visual sanity-check)
         // Toggling enabled, replacing the PNG, or changing brightness
-        // still requires a session restart — those would need swapchain
-        // / staging-texture reallocation and a fresh initialize() call.
+        // still requires a session restart — those would need a fresh
+        // initialize() call.
         // No-op if the overlay is not armed.
         void updateLiveTunables(const HelmetOverlayConfig& newConfig);
 
