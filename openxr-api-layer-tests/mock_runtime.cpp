@@ -25,6 +25,15 @@
 #include <cstring>
 #include <string_view>
 
+// LARGE_INTEGER is needed by the stub for
+// xrConvertWin32PerformanceCounterToTimeKHR. The DLL build pulls
+// <windows.h> in via pch.h; the test binary opts out of PCH, so we
+// include it directly here. WIN32_LEAN_AND_MEAN keeps it cheap.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 namespace mock {
 
     namespace {
