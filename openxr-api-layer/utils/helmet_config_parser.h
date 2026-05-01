@@ -86,6 +86,7 @@ namespace openxr_api_layer {
         hc.enabled = readBool("enabled", false);
         hc.use_visibility_mask = readBool("use_visibility_mask", true);
         hc.invert_visibility_mask = readBool("invert_visibility_mask", false);
+        hc.visibility_mask_uv_space = readBool("visibility_mask_uv_space", false);
         hc.debug_visibility_mask = readBool("debug_visibility_mask", false);
         hc.distance_m = readFloat("distance_m", 0.5f);
 

@@ -121,7 +121,7 @@ have their own file.
 | `crop_right_percent` | float | `10` | Percentage of the image covered by the black bar on the right edge (0-50). |
 | `crop_top_percent` | float | `15` | Percentage of the image covered by the black bar on the top edge (0-50). |
 | `crop_bottom_percent` | float | `20` | Percentage of the image covered by the black bar on the bottom edge (0-50). |
-| `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Picks up changes to crop percentages and to `helmet_overlay.distance_m` / `helmet_overlay.horizontal_fov_deg` / `helmet_overlay.vertical_offset_deg` / `helmet_overlay.debug_visibility_mask` / `helmet_overlay.use_visibility_mask` / `helmet_overlay.invert_visibility_mask`. Set back to false once you're happy. |
+| `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Picks up changes to crop percentages and to `helmet_overlay.distance_m` / `helmet_overlay.horizontal_fov_deg` / `helmet_overlay.vertical_offset_deg` / `helmet_overlay.debug_visibility_mask` / `helmet_overlay.use_visibility_mask` / `helmet_overlay.invert_visibility_mask` / `helmet_overlay.visibility_mask_uv_space`. Set back to false once you're happy. |
 | `helmet_overlay` | object | (see below) | Helmet overlay configuration. See [Helmet overlay](#helmet-overlay). |
 
 ### How the percentages are interpreted
@@ -217,6 +217,7 @@ just by changing the `image` field.
   "brightness": 1.0,
   "use_visibility_mask": true,
   "invert_visibility_mask": false,
+  "visibility_mask_uv_space": false,
   "debug_visibility_mask": false
 }
 ```
@@ -231,6 +232,7 @@ just by changing the `image` field.
 | `brightness` | float | `1.0` | RGB multiplier applied at load time, clamped to `[0.0, 1.0]`. `1.0` = pristine PNG, `0.5` = half luminance, `0.0` = pure black. Useful when studio-lit photos look cramée on a bright VR HMD in a dim cockpit. Alpha is never multiplied so the visor cutout stays transparent at any value. **Not** live-tunable — changing it requires a session restart (the texture is uploaded once at session start). |
 | `use_visibility_mask` | bool | `true` | When the runtime grants `XR_KHR_visibility_mask`, the layer augments the runtime's hidden-triangle mesh with a bbox of the helmet's opaque foam region so apps can stencil-reject those pixels and skip shading. Set to `false` to keep the helmet quad rendering normally but disable the mask contribution — useful as an escape hatch for games whose stencil-setup doesn't tolerate non-trivial mask geometry. Live-tunable; toggling fires a `XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR` so apps that listen pick up the change mid-session. |
 | `invert_visibility_mask` | bool | `false` | Inverts the geometry contributed to `xrGetVisibilityMaskKHR`. Off (spec-correct): emits the foam region — apps stencil-skip the foam, render the visor opening. On: emits the visor opening as the "hidden" mesh — apps that mis-interpret the spec (observed on **DiRT Rally 2** + OpenComposite + PimaxXR, where the app renders the scene where the mesh IS instead of where it isn't) will then render correctly. Per-app opt-in; do **not** flip this on apps that work correctly with the default — it would break them visually (the visor opening becomes black). Live-tunable. |
+| `visibility_mask_uv_space` | bool | `false` | Remaps the mask vertices from NDC `[-1, +1]` (spec-correct for OpenXR's `xrGetVisibilityMaskKHR`) to UV `[0, 1]` (origin bottom-left, the OpenVR `HiddenAreaMesh_t` convention) before emitting them. **Only useful when reaching the app via OpenComposite**, which by default passes our vertices through verbatim — but OpenVR-native apps like DiRT Rally 2 expect UV `[0, 1]` and silently drop any triangle with vertices outside that range, so half our spec-correct mesh is invisible. Turn this on for OpenComposite-bridged apps; leave off for native OpenXR apps. Live-tunable. |
 | `debug_visibility_mask` | bool | `false` | Diagnostic-only: when on, the helmet overlay quad is **not drawn**, while the visibility mask is still emitted normally. You see the rendered scene with the foam region replaced by the app's clear color (typically black or the sky). This is what the app stencil-skipped end-to-end, after passing through the layer → OpenComposite → app's stencil mesh. If the visible cut-out matches the visor opening, the mask is geometrically correct on this stack. If it's misshapen / inverted / shifted, there's a bug somewhere in the pipeline — and you can debug visually instead of guessing. **Live-tunable** (with `live_edit: true`): takes effect on the next frame, no swapchain churn. Earlier versions tinted the helmet PNG red instead — replaced because that only validated UV bbox detection, not the downstream NDC projection. |
 
 ### Custom PNG: requirements

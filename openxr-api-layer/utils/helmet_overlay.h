@@ -105,6 +105,20 @@ namespace openxr_api_layer {
         // mid-session.
         bool use_visibility_mask = true;
 
+        // Maps the visibility-mask vertices from NDC [-1, +1] (spec-
+        // correct for OpenXR's xrGetVisibilityMaskKHR) to UV [0, 1]
+        // before emitting them. Use case: OpenVR-style apps reached
+        // via OpenComposite. OpenComposite passes our vertices through
+        // verbatim, but the OpenVR HiddenAreaMesh contract is UV
+        // [0, 1] (origin bottom-left). With our NDC values, DiRT
+        // Rally 2 (and likely other OpenVR titles) clips/discards
+        // any triangle with y < 0 — half our mesh is silently
+        // dropped. Setting this flag remaps every vertex via
+        // (v + 1) / 2 so they all land in [0, 1] and DiRT renders
+        // them in full. Per-app opt-in (default false to keep the
+        // spec-correct path for native OpenXR apps).
+        bool visibility_mask_uv_space = false;
+
         // Inverts the visibility-mask geometry: instead of emitting 4
         // strips around the visor bbox (the foam, the spec-correct
         // "hidden" area), emits a single rect that IS the visor bbox.

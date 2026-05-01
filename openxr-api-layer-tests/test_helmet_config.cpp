@@ -41,7 +41,27 @@ TEST_CASE("parseHelmetConfig: empty JSON object returns disabled defaults") {
     CHECK(hc.brightness == doctest::Approx(1.0f));
     CHECK(hc.use_visibility_mask == true);
     CHECK(hc.invert_visibility_mask == false);
+    CHECK(hc.visibility_mask_uv_space == false);
     CHECK(hc.debug_visibility_mask == false);
+}
+
+TEST_CASE("parseHelmetConfig: visibility_mask_uv_space defaults to false") {
+    const auto hc = parseHelmetConfig(R"({"helmet_overlay": {}})");
+    CHECK(hc.visibility_mask_uv_space == false);
+}
+
+TEST_CASE("parseHelmetConfig: visibility_mask_uv_space true is honoured") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"visibility_mask_uv_space": true}
+    })");
+    CHECK(hc.visibility_mask_uv_space == true);
+}
+
+TEST_CASE("parseHelmetConfig: visibility_mask_uv_space wrong type falls back to default") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {"visibility_mask_uv_space": 1}
+    })");
+    CHECK(hc.visibility_mask_uv_space == false);
 }
 
 TEST_CASE("parseHelmetConfig: missing helmet_overlay block returns defaults") {

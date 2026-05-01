@@ -975,6 +975,7 @@ namespace openxr_api_layer {
                         const float oldOffset   = m_helmetConfig.vertical_offset_deg;
                         const bool  oldUseMask  = m_helmetConfig.use_visibility_mask;
                         const bool  oldInvert   = m_helmetConfig.invert_visibility_mask;
+                        const bool  oldUv       = m_helmetConfig.visibility_mask_uv_space;
 
                         m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
                         // Push the new helmet tunables into the live
@@ -1004,7 +1005,9 @@ namespace openxr_api_layer {
                             oldUseMask != m_helmetConfig.use_visibility_mask;
                         const bool invertChanged =
                             oldInvert != m_helmetConfig.invert_visibility_mask;
-                        if ((geomChanged || useMaskChanged || invertChanged) &&
+                        const bool uvChanged =
+                            oldUv != m_helmetConfig.visibility_mask_uv_space;
+                        if ((geomChanged || useMaskChanged || invertChanged || uvChanged) &&
                             m_visibilityMaskExtensionGranted &&
                             m_visibilityMask.isInitialized() &&
                             m_session != XR_NULL_HANDLE) {
@@ -1027,11 +1030,13 @@ namespace openxr_api_layer {
                             }
                             Log(fmt::format(
                                 "VisibilityMask: live-edit invalidation "
-                                "(geom={}, useMaskToggle={}, invertToggle={}), "
-                                "queued mask-changed events for both eyes\n",
+                                "(geom={}, useMaskToggle={}, invertToggle={}, "
+                                "uvSpaceToggle={}), queued mask-changed events "
+                                "for both eyes\n",
                                 geomChanged ? "yes" : "no",
                                 useMaskChanged ? "yes" : "no",
-                                invertChanged ? "yes" : "no"));
+                                invertChanged ? "yes" : "no",
+                                uvChanged ? "yes" : "no"));
                         }
                     }
                 } catch (...) {

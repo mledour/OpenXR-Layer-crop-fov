@@ -342,6 +342,25 @@ namespace openxr_api_layer {
         // there's nothing to mask.
         if (visorMinX >= visorMaxX || visorMinY >= visorMaxY) return;
 
+        // The NDC values above are spec-correct for OpenXR's
+        // xrGetVisibilityMaskKHR. But OpenVR-style apps reached via
+        // OpenComposite expect UV [0, 1] (origin bottom-left), and
+        // OpenComposite (default config) does NOT remap. So our NDC
+        // values land verbatim in DiRT's stencil pipeline, where
+        // anything outside [0, 1] is silently dropped — which is
+        // every triangle with y < 0 in our spec-correct emission.
+        // Per-app opt-in remap brings the whole mesh into [0, 1].
+        if (config.visibility_mask_uv_space) {
+            quadMinX = (quadMinX + 1.0f) * 0.5f;
+            quadMaxX = (quadMaxX + 1.0f) * 0.5f;
+            quadMinY = (quadMinY + 1.0f) * 0.5f;
+            quadMaxY = (quadMaxY + 1.0f) * 0.5f;
+            visorMinX = (visorMinX + 1.0f) * 0.5f;
+            visorMaxX = (visorMaxX + 1.0f) * 0.5f;
+            visorMinY = (visorMinY + 1.0f) * 0.5f;
+            visorMaxY = (visorMaxY + 1.0f) * 0.5f;
+        }
+
         if (config.invert_visibility_mask) {
             // Inverted mode: emit a single rect that IS the visor
             // bbox, instead of the 4 foam strips around it. The mesh
