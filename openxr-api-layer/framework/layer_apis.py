@@ -39,12 +39,26 @@ requested_functions = [
     # (we always call OpenXrApi::xrFoo to get the runtime's data first,
     # then merge our own contribution).
     "xrGetVisibilityMaskKHR",
-    "xrPollEvent"
+    "xrPollEvent",
+    # XR_KHR_win32_convert_performance_counter_time: lets us synthesize
+    # a valid XrTime from QueryPerformanceCounter() when we need to
+    # call xrLocateViews ourselves (lazy eye-pose snapshot from
+    # xrGetVisibilityMaskKHR, before the app's first xrLocateViews
+    # has a chance to fire our companion snapshot). Apps like LMU and
+    # DiRT Rally 2 query GetHiddenAreaMesh during init, before any
+    # frame work — without a synthesized time the snapshot can't run
+    # in time and the helmet mesh isn't built for those queries.
+    "xrConvertWin32PerformanceCounterToTimeKHR"
 ]
 
 # The list of OpenXR extensions our layer will either override or use.
-# XR_KHR_visibility_mask: required for xrGetVisibilityMaskKHR symbol
-# resolution. Listed here so the auto-generated dispatch knows it's an
-# extension function (rather than a core one). Run-time enabling is
-# handled separately via implicitExtensions in layer.cpp.
-extensions = ["XR_KHR_visibility_mask"]
+# - XR_KHR_visibility_mask: required for xrGetVisibilityMaskKHR symbol
+#   resolution.
+# - XR_KHR_win32_convert_performance_counter_time: required for
+#   xrConvertWin32PerformanceCounterToTimeKHR symbol resolution.
+# Run-time enabling is handled separately via implicitExtensions in
+# layer.cpp.
+extensions = [
+    "XR_KHR_visibility_mask",
+    "XR_KHR_win32_convert_performance_counter_time"
+]

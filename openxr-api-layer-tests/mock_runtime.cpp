@@ -240,6 +240,19 @@ namespace mock {
             return XR_EVENT_UNAVAILABLE;
         }
 
+        // Stub for the QPC → XrTime converter. Tests don't exercise
+        // any time-based logic, so just zero the output and return
+        // success — matches "extension is granted but produces no
+        // useful time" enough that callers fall through to the
+        // existing xrLocateViews-based snapshot path.
+        XrResult XRAPI_CALL m_xrConvertWin32PerformanceCounterToTimeKHR(
+                XrInstance /*instance*/,
+                const LARGE_INTEGER* /*performanceCounter*/,
+                XrTime* time) {
+            if (time) *time = 0;
+            return XR_SUCCESS;
+        }
+
         XrResult XRAPI_CALL m_xrEndFrame(XrSession /*session*/, const XrFrameEndInfo* info) {
             g_state.endFrameCallCount++;
             g_state.lastEndFrameProjLayers.clear();
@@ -318,6 +331,8 @@ namespace mock {
             *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrGetVisibilityMaskKHR);
         else if (n == "xrPollEvent")
             *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrPollEvent);
+        else if (n == "xrConvertWin32PerformanceCounterToTimeKHR")
+            *function = reinterpret_cast<PFN_xrVoidFunction>(m_xrConvertWin32PerformanceCounterToTimeKHR);
         else {
             *function = nullptr;
             return XR_ERROR_FUNCTION_UNSUPPORTED;

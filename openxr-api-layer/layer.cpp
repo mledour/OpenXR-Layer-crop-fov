@@ -55,7 +55,13 @@ namespace openxr_api_layer {
     // logs "Cannot satisfy implicit extension request" and our
     // override falls through to "no contribution".
     const std::vector<std::string> implicitExtensions = {
-        XR_KHR_VISIBILITY_MASK_EXTENSION_NAME
+        XR_KHR_VISIBILITY_MASK_EXTENSION_NAME,
+        // QPC → XrTime conversion. Used by the visibility-mask path to
+        // synthesize a valid display time when xrLocateViews needs to
+        // run before the app has issued its first xrWaitFrame (apps
+        // that query GetHiddenAreaMesh during init, e.g. LMU and DiRT,
+        // hit this path).
+        XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME
     };
 
     // CropConfig, clampFactor, scaleSwapchainExtents, and narrowFov live in
@@ -435,11 +441,15 @@ namespace openxr_api_layer {
             for (const auto& ext : GetGrantedExtensions()) {
                 if (ext == XR_KHR_VISIBILITY_MASK_EXTENSION_NAME) {
                     m_visibilityMaskExtensionGranted = true;
-                    break;
+                }
+                if (ext == XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) {
+                    m_qpcConvertExtensionGranted = true;
                 }
             }
             Log(fmt::format("XR_KHR_visibility_mask {}\n",
                              m_visibilityMaskExtensionGranted ? "granted" : "not granted"));
+            Log(fmt::format("XR_KHR_win32_convert_performance_counter_time {}\n",
+                             m_qpcConvertExtensionGranted ? "granted" : "not granted"));
 
             return result;
         }
@@ -790,6 +800,20 @@ namespace openxr_api_layer {
             if (!m_visibilityMaskExtensionGranted) return result;
             if (!m_helmetConfig.use_visibility_mask) return result;
             if (!m_visibilityMask.isInitialized()) return result;
+            // Lazy snapshot fallback: apps like LMU and DiRT Rally 2
+            // query GetHiddenAreaMesh during init, before any
+            // xrWaitFrame, so our companion snapshot in xrLocateViews
+            // hasn't fired yet and m_eyePoseCacheValid is false. We
+            // try to synthesize a valid display time from QPC and
+            // run the snapshot ourselves; if XR_KHR_win32_convert_
+            // performance_counter_time isn't granted (or fails), we
+            // fall back to the original behaviour and bail.
+            if (!m_eyePoseCacheValid) {
+                const XrTime synthesizedTime =
+                    synthesizeDisplayTime(GetXrInstance());
+                snapshotEyeInViewPoses(session, synthesizedTime,
+                                       "xrGetVisibilityMaskKHR/QPC");
+            }
             if (!m_eyePoseCacheValid) return result;
             if (visibilityMaskType != XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR) return result;
             if (viewIndex >= kMaxVisibilityViews) return result;
@@ -1099,40 +1123,73 @@ namespace openxr_api_layer {
             }
 
             // Visibility-mask path: snapshot eye-in-view poses + FOVs
-            // the first time xrLocateViews succeeds, by re-locating
-            // against our own VIEW reference space. Done lazily because
-            // we don't have a frame time at session creation; the eye
-            // geometry relative to the head is static for a session,
-            // so a single snapshot is enough until live-edit
-            // invalidates it.
-            if (XR_SUCCEEDED(result) &&
-                !m_eyePoseCacheValid &&
-                m_visibilityMaskExtensionGranted &&
-                m_visibilityMask.isInitialized() &&
-                m_maskViewSpace != XR_NULL_HANDLE) {
-                XrViewLocateInfo myLocate = *viewLocateInfo;
-                myLocate.space = m_maskViewSpace;
-                XrViewState myState{XR_TYPE_VIEW_STATE};
-                std::array<XrView, kMaxVisibilityViews> myViews{};
-                for (auto& v : myViews) v.type = XR_TYPE_VIEW;
-                uint32_t myCount = 0;
-                const XrResult myResult = OpenXrApi::xrLocateViews(
-                    session, &myLocate, &myState, kMaxVisibilityViews, &myCount, myViews.data());
-                if (XR_SUCCEEDED(myResult) && myCount > 0) {
-                    const uint32_t cap = std::min<uint32_t>(myCount, kMaxVisibilityViews);
-                    for (uint32_t i = 0; i < cap; ++i) {
-                        m_eyeInViewPoses[i] = myViews[i].pose;
-                        m_eyeFovs[i] = myViews[i].fov;
-                    }
-                    m_eyePoseCacheValid = true;
-                    Log(fmt::format("VisibilityMask: snapshot {} eye(s) in view space\n", cap));
-                }
+            // the first time xrLocateViews succeeds. Reuses the app's
+            // displayTime — so this fires from the first real frame
+            // and is essentially free.
+            if (XR_SUCCEEDED(result) && !m_eyePoseCacheValid) {
+                snapshotEyeInViewPoses(session, viewLocateInfo->displayTime, "xrLocateViews");
             }
 
             return result;
         }
 
       private:
+        // Companion xrLocateViews against m_maskViewSpace to capture
+        // the eye-relative-to-head pose + FOV used by the visibility-
+        // mask projection math. Per-session one-shot: returns silently
+        // when the cache is already valid or when the visibility-mask
+        // path isn't armed.
+        //
+        // `source` is a short tag included in the log message so we
+        // know whether the snapshot came from the app's xrLocateViews
+        // or from our own lazy fallback in xrGetVisibilityMaskKHR.
+        void snapshotEyeInViewPoses(XrSession session, XrTime displayTime,
+                                    const char* source) {
+            if (m_eyePoseCacheValid) return;
+            if (!m_visibilityMaskExtensionGranted) return;
+            if (!m_visibilityMask.isInitialized()) return;
+            if (m_maskViewSpace == XR_NULL_HANDLE) return;
+            if (displayTime == 0) return;  // sentinel — synthesized failure
+
+            XrViewLocateInfo myLocate{XR_TYPE_VIEW_LOCATE_INFO};
+            myLocate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+            myLocate.displayTime = displayTime;
+            myLocate.space = m_maskViewSpace;
+            XrViewState myState{XR_TYPE_VIEW_STATE};
+            std::array<XrView, kMaxVisibilityViews> myViews{};
+            for (auto& v : myViews) v.type = XR_TYPE_VIEW;
+            uint32_t myCount = 0;
+            const XrResult myResult = OpenXrApi::xrLocateViews(
+                session, &myLocate, &myState, kMaxVisibilityViews, &myCount, myViews.data());
+            if (XR_SUCCEEDED(myResult) && myCount > 0) {
+                const uint32_t cap = std::min<uint32_t>(myCount, kMaxVisibilityViews);
+                for (uint32_t i = 0; i < cap; ++i) {
+                    m_eyeInViewPoses[i] = myViews[i].pose;
+                    m_eyeFovs[i] = myViews[i].fov;
+                }
+                m_eyePoseCacheValid = true;
+                Log(fmt::format("VisibilityMask: snapshot {} eye(s) in view space (via {})\n",
+                                cap, source));
+            }
+        }
+
+        // Synthesize an XrTime from QueryPerformanceCounter, via
+        // XR_KHR_win32_convert_performance_counter_time. Used by the
+        // visibility-mask path when the app queries the mask before
+        // its first xrWaitFrame and we need to call xrLocateViews
+        // ourselves. Returns 0 if the extension isn't granted or the
+        // conversion fails — caller treats 0 as "no snapshot now".
+        XrTime synthesizeDisplayTime(XrInstance instance) {
+            if (!m_qpcConvertExtensionGranted) return 0;
+            LARGE_INTEGER qpc{};
+            if (!QueryPerformanceCounter(&qpc)) return 0;
+            XrTime time = 0;
+            const XrResult cvtResult = OpenXrApi::xrConvertWin32PerformanceCounterToTimeKHR(
+                instance, &qpc, &time);
+            if (XR_FAILED(cvtResult)) return 0;
+            return time;
+        }
+
         bool isSystemHandled(XrSystemId systemId) const {
             return systemId == m_systemId;
         }
@@ -1184,6 +1241,14 @@ namespace openxr_api_layer {
         // need a frame time, which we don't have at session creation).
         HelmetVisibilityMask m_visibilityMask{};
         bool m_visibilityMaskExtensionGranted{false};
+        // True if the runtime granted XR_KHR_win32_convert_performance_
+        // counter_time. Lets the visibility-mask path call
+        // xrLocateViews on demand (without waiting for the app's first
+        // xrWaitFrame) by synthesizing an XrTime from
+        // QueryPerformanceCounter(). Without this extension, we fall
+        // back to the previous behaviour: cache stays invalid until the
+        // app's first xrLocateViews fires our companion snapshot.
+        bool m_qpcConvertExtensionGranted{false};
         XrSession m_session{XR_NULL_HANDLE};
         XrSpace m_maskViewSpace{XR_NULL_HANDLE};
         static constexpr uint32_t kMaxVisibilityViews = 2;  // stereo
