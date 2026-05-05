@@ -155,12 +155,15 @@ function Dump-WindowDiagnostics {
         $sb  = New-Object System.Text.StringBuilder 256
         [void][NS.Win32Enum]::GetWindowText($hWnd, $sb, $sb.Capacity)
         $vis = [NS.Win32Enum]::IsWindowVisible($hWnd)
-        $pid = 0
-        [void][NS.Win32Enum]::GetWindowThreadProcessId($hWnd, [ref]$pid)
+        # Note: $pid is a PowerShell automatic variable (current shell's
+        # PID) and is read-only — using it as the [ref] target throws
+        # "Cannot overwrite variable PID". Use a non-reserved name.
+        $procId = [uint32]0
+        [void][NS.Win32Enum]::GetWindowThreadProcessId($hWnd, [ref]$procId)
         $windows.Add([pscustomobject]@{
             Handle  = $hWnd
             Visible = $vis
-            Pid     = $pid
+            Pid     = $procId
             Title   = $sb.ToString()
         })
         return $true  # keep enumerating
