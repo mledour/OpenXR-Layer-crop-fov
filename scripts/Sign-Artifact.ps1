@@ -106,9 +106,100 @@ function Escape-SendKeys {
     return ($s -replace '([+^%~(){}])', '{$1}')
 }
 
+# Win32 P/Invoke surface for window enumeration + force-show. Loaded
+# once and reused across diagnostics + the main flow. Note: `$pid` is a
+# PowerShell read-only automatic variable, so we use `procId` in the
+# managed code below.
+if (-not ('NS.Win32' -as [type])) {
+    Add-Type -Namespace 'NS' -Name 'Win32' -MemberDefinition @"
+        public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool EnumWindows(EnumWindowsProc enumProc, System.IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+        public static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder text, int count);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool IsWindowVisible(System.IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint procId);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(System.IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool BringWindowToTop(System.IntPtr hWnd);
+
+        // ShowWindow nCmdShow constants. SW_RESTORE undoes minimization
+        // AND makes the window visible — the right hammer for an app
+        // that started hidden (system-tray apps like SimplySign Desktop
+        // do this on launch).
+        public const int SW_HIDE        = 0;
+        public const int SW_SHOWNORMAL  = 1;
+        public const int SW_SHOW        = 5;
+        public const int SW_RESTORE     = 9;
+"@
+}
+
+# Enumerate every top-level window on the runner. Returns a list of
+# pscustomobject{Handle, Visible, Pid, Title}.
+function Get-AllTopLevelWindows {
+    $list = New-Object 'System.Collections.Generic.List[object]'
+    $cb = [NS.Win32+EnumWindowsProc] {
+        param($hWnd, $lParam)
+        $sb  = New-Object System.Text.StringBuilder 256
+        [void][NS.Win32]::GetWindowText($hWnd, $sb, $sb.Capacity)
+        $vis = [NS.Win32]::IsWindowVisible($hWnd)
+        $procId = [uint32]0
+        [void][NS.Win32]::GetWindowThreadProcessId($hWnd, [ref]$procId)
+        $list.Add([pscustomobject]@{
+            Handle  = $hWnd
+            Visible = $vis
+            Pid     = $procId
+            Title   = $sb.ToString()
+        })
+        return $true  # keep enumerating
+    }
+    [void][NS.Win32]::EnumWindows($cb, [System.IntPtr]::Zero)
+    return ,$list
+}
+
+# Find the first SimplySign Desktop window owned by $TargetPid (or by
+# any SimplySign* process if -1). The window is matched by exact title
+# 'SimplySign Desktop' (stable across versions per Certum's UI).
+# Returns the handle as IntPtr, or [System.IntPtr]::Zero if not found.
+function Find-SimplySignWindow {
+    param([int] $TargetPid = -1)
+    $candidates = Get-AllTopLevelWindows |
+        Where-Object {
+            $_.Title -eq 'SimplySign Desktop' -and
+            ($TargetPid -lt 0 -or $_.Pid -eq $TargetPid)
+        }
+    if ($candidates.Count -eq 0) { return [System.IntPtr]::Zero }
+    return $candidates[0].Handle
+}
+
+# Force a window to be visible + foreground. SimplySign Desktop on
+# first launch on a CI runner sits hidden (its tray-icon UI metaphor),
+# so AppActivate fails until we do this. The sequence is the standard
+# Win32 incantation: SW_RESTORE → BringWindowToTop → SetForegroundWindow.
+function Show-WindowForeground {
+    param([System.IntPtr] $Handle)
+    [void][NS.Win32]::ShowWindow($Handle, [NS.Win32]::SW_RESTORE)
+    Start-Sleep -Milliseconds 200
+    [void][NS.Win32]::BringWindowToTop($Handle)
+    Start-Sleep -Milliseconds 100
+    [void][NS.Win32]::SetForegroundWindow($Handle)
+}
+
 # Dump everything we can find about the runner's window state when login
-# fails, so we don't have to guess. Used only on the failure path — logs
-# don't carry the OTP since we never echo it.
+# fails. Used only on the failure path — logs don't carry the OTP since
+# we never echo it.
 function Dump-WindowDiagnostics {
     param([System.Diagnostics.Process] $LaunchedProc)
 
@@ -130,46 +221,7 @@ function Dump-WindowDiagnostics {
         Select-Object Id, ProcessName, MainWindowHandle, MainWindowTitle, HasExited |
         Format-Table -AutoSize | Out-Host
 
-    # Enumerate every top-level window on the runner via Win32 so we see
-    # whatever Certum's GUI is *actually* called. If nothing shows up, we
-    # know the runner has no interactive window station and SendKeys has
-    # no chance of working — that's the signal to switch to a self-hosted
-    # runner or a different signing strategy.
-    if (-not ('Win32Enum' -as [type])) {
-        Add-Type -Namespace 'NS' -Name 'Win32Enum' -MemberDefinition @"
-            [System.Runtime.InteropServices.DllImport("user32.dll")]
-            public static extern bool EnumWindows(EnumWindowsProc enumProc, System.IntPtr lParam);
-            public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
-            [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
-            public static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder text, int count);
-            [System.Runtime.InteropServices.DllImport("user32.dll")]
-            public static extern bool IsWindowVisible(System.IntPtr hWnd);
-            [System.Runtime.InteropServices.DllImport("user32.dll")]
-            public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint lpdwProcessId);
-"@
-    }
-
-    $windows = New-Object 'System.Collections.Generic.List[object]'
-    $cb = [NS.Win32Enum+EnumWindowsProc] {
-        param($hWnd, $lParam)
-        $sb  = New-Object System.Text.StringBuilder 256
-        [void][NS.Win32Enum]::GetWindowText($hWnd, $sb, $sb.Capacity)
-        $vis = [NS.Win32Enum]::IsWindowVisible($hWnd)
-        # Note: $pid is a PowerShell automatic variable (current shell's
-        # PID) and is read-only — using it as the [ref] target throws
-        # "Cannot overwrite variable PID". Use a non-reserved name.
-        $procId = [uint32]0
-        [void][NS.Win32Enum]::GetWindowThreadProcessId($hWnd, [ref]$procId)
-        $windows.Add([pscustomobject]@{
-            Handle  = $hWnd
-            Visible = $vis
-            Pid     = $procId
-            Title   = $sb.ToString()
-        })
-        return $true  # keep enumerating
-    }
-    [void][NS.Win32Enum]::EnumWindows($cb, [System.IntPtr]::Zero)
-
+    $windows = Get-AllTopLevelWindows
     Write-Host ("Top-level windows (count={0}):" -f $windows.Count)
     $windows |
         Where-Object { $_.Title -ne '' -or $_.Visible } |
@@ -210,38 +262,44 @@ Start-Sleep -Milliseconds $WindowAppearMs
 
 $wshell = New-Object -ComObject WScript.Shell
 
-# Try to focus by process ID first (most reliable when there's only one
-# SimplySign Desktop instance). Fall back to title match — Certum has
-# kept "SimplySign Desktop" as the window title across versions.
+# SimplySign Desktop launches HIDDEN by default (it's a tray-style app).
+# That's why Process.MainWindowHandle stays at 0 and AppActivate fails
+# even though the window genuinely exists — we confirmed this on the
+# windows-2022 GHA runner (88 top-level windows enumerated, including
+# one titled 'SimplySign Desktop' but with Visible=False).
+#
+# So: locate the hidden window via EnumWindows, force-show it via
+# Win32 ShowWindow(SW_RESTORE) + SetForegroundWindow, *then* run
+# AppActivate. AppActivate now has a visible foreground target and
+# happily focuses it for SendKeys.
+$hwnd = [System.IntPtr]::Zero
+for ($i = 0; $i -lt 20 -and $hwnd -eq [System.IntPtr]::Zero; $i++) {
+    $hwnd = Find-SimplySignWindow -TargetPid $proc.Id
+    if ($hwnd -eq [System.IntPtr]::Zero) { Start-Sleep -Milliseconds 500 }
+}
+if ($hwnd -eq [System.IntPtr]::Zero) {
+    Dump-WindowDiagnostics -LaunchedProc $proc
+    throw "Could not find a top-level window titled 'SimplySign Desktop' owned by PID $($proc.Id) after 10s. The window title may have changed; see diagnostic dump above."
+}
+Write-Host ("Found SimplySign Desktop window: handle={0}" -f $hwnd)
+
+Show-WindowForeground -Handle $hwnd
+Start-Sleep -Milliseconds $BetweenKeysMs
+
+# Final focus belt-and-braces via AppActivate, after the window has
+# been forced visible+foreground. Retry briefly in case Show-Window's
+# state transition hasn't settled.
 $focused = $false
 for ($i = 0; $i -lt 10 -and -not $focused; $i++) {
     $focused = $wshell.AppActivate($proc.Id)
     if (-not $focused) {
         $focused = $wshell.AppActivate('SimplySign Desktop')
     }
-    if (-not $focused) { Start-Sleep -Milliseconds 500 }
+    if (-not $focused) { Start-Sleep -Milliseconds 300 }
 }
 if (-not $focused) {
     Dump-WindowDiagnostics -LaunchedProc $proc
-    throw @"
-Could not focus the SimplySign Desktop login window after 10 retries.
-See diagnostic dump above. Common causes:
-
-  1. The GitHub-hosted windows-2022 runner has no interactive
-     window station — top-level window count above will be very
-     low (maybe 0 visible). In that case, SendKeys cannot work
-     here regardless of titles, and the path forward is a
-     self-hosted runner (machine kept logged in) or local-sign
-     + manual-upload.
-
-  2. The window title changed in this Certum version (we expect
-     'SimplySign Desktop'). Look at the dump's "Top-level windows"
-     table for what's actually there and update the AppActivate
-     call in this script.
-
-  3. The process exited before showing a window (HasExited=True
-     above) — the MSI may need user-context state we don't have.
-"@
+    throw "Could not focus the SimplySign Desktop window even after ShowWindow(SW_RESTORE)+SetForegroundWindow. Window handle was $hwnd. See diagnostic dump above."
 }
 
 Start-Sleep -Milliseconds $BetweenKeysMs
