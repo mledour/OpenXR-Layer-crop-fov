@@ -49,6 +49,23 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      # Decide once, up front, whether this run will code-sign anything.
+      # PR/fork builds don't have access to secrets (GitHub blocks them by
+      # design), and Debug matrix entries we never sign. Computing it here
+      # — and only here — keeps the per-step `if:` conditions tidy and
+      # avoids referencing `secrets.*` in step-level `if:`, which is not
+      # allowed.
+      - name: Determine signing eligibility
+        id: signing
+        shell: pwsh
+        env:
+          CERTUM_USERNAME: ${{ secrets.CERTUM_USERNAME }}
+        run: |
+          $eligible = ($env:CERTUM_USERNAME -ne $null -and $env:CERTUM_USERNAME -ne '') `
+                      -and ('${{ matrix.configuration }}' -eq 'Release')
+          "should_sign=$($eligible.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "should_sign=$($eligible.ToString().ToLower())"
+
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
 
@@ -96,6 +113,42 @@ jobs:
           /verbosity:minimal
           /nologo
 
+      # Code signing (Release only, secrets present).
+      #
+      # The DLL is signed BEFORE staging / installer-building so the
+      # signature ends up in the ZIP archive AND embedded inside the
+      # Setup.exe via Inno Setup's [Files] section. The Setup.exe itself
+      # is signed in a later step, after ISCC produces it.
+      #
+      # The condition gates on a secret being non-empty: PR builds and
+      # forks (where secrets are not exposed) skip signing entirely
+      # instead of failing — they still produce unsigned artifacts so
+      # CI stays green for contributors.
+      # SimplySign Desktop is the Certum-side prerequisite for headless
+      # signing: it manages the cloud-HSM session and exposes the cert
+      # through the Windows certificate store so signtool can find it via
+      # /sha1 thumbprint. Choco package keeps the runner step simple; if
+      # the package ever lags behind the official MSI, swap to a direct
+      # download from https://files.certum.eu/.
+      - name: Install SimplySign Desktop
+        if: steps.signing.outputs.should_sign == 'true'
+        run: choco install simplysign-desktop -y --no-progress
+
+      # Sign the DLL BEFORE staging and BEFORE building the installer, so
+      # the signature lands in both the manual-install ZIP and embedded
+      # inside the Setup.exe (Inno Setup just bundles the file as-is).
+      # Setup.exe itself is signed in a later step.
+      - name: Sign DLL (Certum SimplySign)
+        if: steps.signing.outputs.should_sign == 'true'
+        shell: pwsh
+        env:
+          CERTUM_USERNAME:        ${{ secrets.CERTUM_USERNAME }}
+          CERTUM_PASSWORD:        ${{ secrets.CERTUM_PASSWORD }}
+          CERTUM_TOTP_SEED:       ${{ secrets.CERTUM_TOTP_SEED }}
+          CERTUM_CERT_THUMBPRINT: ${{ secrets.CERTUM_CERT_THUMBPRINT }}
+        run: |
+          .\scripts\Sign-Artifact.ps1 -Path "bin\x64\Release\${{ env.LAYER_NAME }}.dll"
+
       # Run the test binary. It covers two layers:
       #   - Unit tests (test_crop_math.cpp)    : pure crop-math helpers.
       #   - Integration tests (test_integration.cpp): drive the real
@@ -142,6 +195,22 @@ jobs:
           }
           $exe = Get-ChildItem "bin\installer\*.exe" | Select-Object -First 1
           Write-Host "Installer built: $($exe.Name) ($($exe.Length) bytes)"
+
+      # Sign the installer too — SmartScreen "Unknown publisher" warnings
+      # are gated on the installer's own signature, not on whatever it
+      # bundles. We sign AFTER ISCC because Inno Setup rewrites the
+      # generated .exe (compresses payload, embeds the uninstaller stub),
+      # which would invalidate any pre-existing signature.
+      - name: Sign installer (Certum SimplySign)
+        if: matrix.configuration == 'Release' && steps.signing.outputs.should_sign == 'true'
+        shell: pwsh
+        env:
+          CERTUM_USERNAME:        ${{ secrets.CERTUM_USERNAME }}
+          CERTUM_PASSWORD:        ${{ secrets.CERTUM_PASSWORD }}
+          CERTUM_TOTP_SEED:       ${{ secrets.CERTUM_TOTP_SEED }}
+          CERTUM_CERT_THUMBPRINT: ${{ secrets.CERTUM_CERT_THUMBPRINT }}
+        run: |
+          .\scripts\Sign-Artifact.ps1 -Path "bin\installer\*.exe"
 
       - name: Upload installer artifact
         if: matrix.configuration == 'Release'
@@ -286,5 +355,12 @@ jobs:
             Set the environment variable `DISABLE_${{ env.LAYER_NAME }}=1` for the
             target process.
 
-            > ⚠️ This build is **not code-signed**. Anti-cheat systems may reject it
-            > and refuse to let OpenXR games load. A signed release is planned.
+            > 🔒 Signed with a **Certum Open Source Code Signing Cloud** certificate
+            > (subject: *Open Source Developer Michael Le Dour*). Verify locally with:
+            > ```powershell
+            > signtool verify /pa /v <file>.exe
+            > ```
+            > Windows SmartScreen may still warn ("Unknown publisher") on early
+            > downloads until the publisher reputation builds with volume.
+            > Anti-cheat systems may flag any OpenXR layer DLL — even a signed
+            > one — when loaded into a hooked game.

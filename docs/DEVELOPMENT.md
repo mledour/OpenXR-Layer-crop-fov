@@ -155,18 +155,79 @@ flag passed to ISCC.
 
 ## Code signing
 
-Release binaries are **not** code-signed yet. Anti-cheat systems may
-reject unsigned DLLs loaded into OpenXR games; Windows SmartScreen
-may flag the installer.
+Release binaries are signed with a **Certum Open Source Code Signing
+Cloud** certificate (issued to the project author, valid for one year
+at a time, FIPS 140-2 Level 2 cloud HSM). Both the DLL and the
+`Setup.exe` installer are signed.
 
-A code-signing certificate is being procured. Once it is issued,
-release builds of the DLL and the `Setup.exe` installer will be
-automatically code-signed in CI.
+Anti-cheat systems may still flag any layer DLL — even a signed one —
+loaded into a hooked process; SmartScreen "Unknown publisher" warnings
+disappear once the signed installer accumulates enough downloads to
+build reputation.
 
-When signing is active, builds triggered from a fork or from a pull
-request will still not be signed (GitHub secrets are not exposed to
-forked workflows), so only binaries from the [official GitHub Releases
+Builds triggered from a fork or from a pull request are not signed
+(GitHub secrets are not exposed to forked workflows by design), so
+only binaries from the [official GitHub Releases
 page](../../../releases) of this repository should be trusted.
+
+### How CI signs headlessly
+
+Certum's official manual only documents an interactive flow (open
+SimplySign Desktop, type the TOTP from a phone, click "Sign in"). To
+run that in GitHub Actions instead of by hand, three things are
+automated:
+
+1. [`scripts/Get-CertumTotp.ps1`](../scripts/Get-CertumTotp.ps1)
+   regenerates a 6-digit RFC 6238 TOTP on demand from the Base32 seed
+   that the SimplySign portal exposes under "Show secret key". Pure
+   PowerShell + .NET, no extra modules to install on the runner.
+2. [`scripts/Sign-Artifact.ps1`](../scripts/Sign-Artifact.ps1) feeds
+   that TOTP — together with the username and password — to
+   `SimplySignDesktop.exe /login`, then waits for the cert to appear in
+   `Cert:\CurrentUser\My`, then runs `signtool sign /sha1 <thumb>
+   /tr http://time.certum.pl /td sha256 /fd sha256` exactly as the
+   Certum manual prescribes, then `signtool verify /pa /v` for an
+   independent confirmation pass.
+3. The workflow gates both signing steps on a `should_sign` flag
+   computed once (Release matrix entry + `CERTUM_USERNAME` secret
+   present), so PR/fork builds skip signing and stay green instead
+   of failing.
+
+### Required GitHub Secrets
+
+These four secrets must be configured at the repository level
+(Settings → Secrets and variables → Actions → New repository secret)
+for Release-tag builds to produce signed binaries. They are **never**
+echoed by `Sign-Artifact.ps1` and `Get-CertumTotp.ps1`, and the
+PowerShell scripts pass them as process arguments rather than through
+`cmd /c` so they don't leak into the shell-history transcript.
+
+| Secret | Source | Format |
+|--------|--------|--------|
+| `CERTUM_USERNAME` | SimplySign portal login (the email you registered with) | string |
+| `CERTUM_PASSWORD` | SimplySign portal password | string |
+| `CERTUM_TOTP_SEED` | SimplySign portal → "Show secret key" (the Base32 string behind the QR code, NOT a snapshot of the current 6-digit code) | Base32, 16+ chars |
+| `CERTUM_CERT_THUMBPRINT` | SHA-1 thumbprint of the issued certificate, no spaces | 40 hex chars |
+
+To find the thumbprint once the cert is loaded into your local
+SimplySign Desktop session:
+
+```powershell
+Get-ChildItem Cert:\CurrentUser\My |
+    Where-Object Subject -Match '<your-name>' |
+    Format-List Thumbprint, Subject, NotAfter
+```
+
+Re-run that command after each Certum certificate renewal — the
+thumbprint changes with every new cert, so the secret has to be
+updated. The renewal cadence is yearly for the Open Source tier.
+
+### Renewing the seed / rotating credentials
+
+If the TOTP seed leaks (or you suspect it has), reset it from the
+SimplySign portal: a new seed invalidates the old one immediately.
+Update `CERTUM_TOTP_SEED` in the GitHub Secrets in the same window
+or the next CI run will fail to log in.
 
 ## License
 

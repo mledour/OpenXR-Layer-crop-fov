@@ -17,10 +17,13 @@ An OpenXR API layer for Windows with two opt-in features:
 Works transparently with any OpenXR application and runtime. No game or
 headset modification required.
 
-> ⚠️ Release binaries are **not** code-signed yet. Anti-cheat systems
-> may reject unsigned DLLs loaded into OpenXR games, and Windows
-> SmartScreen will warn on the installer. A signed release is
-> planned — see [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md#code-signing).
+> ⚠️ Release binaries are signed with a **Certum Open Source Code
+> Signing Cloud** certificate. SmartScreen may still warn the first
+> few times the installer is downloaded (publisher reputation builds
+> with download volume); anti-cheat systems may flag any OpenXR layer
+> DLL — including a signed one — when loaded into a hooked game. See
+> [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md#code-signing) for the
+> CI flow and how to verify the signature.
 
 ## Installing
 
