@@ -181,6 +181,11 @@ automated:
    regenerates a 6-digit RFC 6238 TOTP on demand from the Base32 seed
    that the SimplySign portal exposes under "Show secret key". Pure
    PowerShell + .NET, no extra modules to install on the runner.
+   Uses **HMAC-SHA256** — Certum's `otpauth://` enrolment URI
+   specifies `algorithm=SHA256`, not the RFC 6238 default of SHA-1.
+   Generating SHA-1 codes against a SHA-256 seed produces wrong codes
+   silently, so this is verified against RFC 6238 Appendix B vectors
+   in [`scripts/Test-CertumTotp.ps1`](../scripts/Test-CertumTotp.ps1).
 2. [`scripts/Sign-Artifact.ps1`](../scripts/Sign-Artifact.ps1) feeds
    that TOTP — together with the username — to
    `SimplySignDesktop.exe /login`, then waits for the cert to appear in
