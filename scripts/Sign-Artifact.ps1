@@ -1,31 +1,47 @@
 # Sign-Artifact.ps1
 #
 # Code-signs a Windows binary (DLL or EXE) using a Certum SimplySign Cloud
-# certificate, headlessly, from CI.
+# certificate, automatically, from CI.
 #
-# Why this script exists
-# ----------------------
-# Certum's official "Code Signing in the Cloud" manual only documents the
-# interactive flow: a human opens SimplySign Desktop, types their username,
-# reads a TOTP off their phone, and clicks "Sign in" (the TOTP IS the
-# second factor — there is no separate static password). Once that desktop
-# session is logged in, the cert appears in the Windows certificate store
-# and `signtool /sha1 <THUMBPRINT> /tr ...` can sign any binary.
+# Why this script is the way it is
+# --------------------------------
+# Certum SimplySign Desktop has NO documented headless CLI. There is no
+#   `SimplySignDesktop.exe /login /username X /otp Y`
+# despite what the Certum manual's "automatic login" section suggests at
+# first read — that section is about persisting credentials across GUI
+# sessions, not feeding them via flags. We confirmed this by:
+#   - Reading the official manual (CS-Code_Signing_in_the_Cloud_*.pdf).
+#   - Searching the wider community of CI/CD users; everyone who
+#     automates Certum cloud signing either drives the GUI via SendKeys
+#     (devas.life) or runs SimplySign Desktop in Xvnc + p11-kit
+#     (hpvb/certum-container).
 #
-# To run this in GitHub Actions instead of by hand, three things have to be
-# automated:
+# So this script drives the GUI. The flow:
+#   1. Generate a fresh TOTP from the shared seed (Get-CertumTotp.ps1,
+#      HMAC-SHA256 — Certum's otpauth URI says algorithm=SHA256).
+#   2. Launch SimplySignDesktop.exe (no flags — it shows its login form).
+#   3. Use the WScript.Shell COM object to focus the login window.
+#   4. SendKeys: clear-username, type-username, Tab, type-OTP, Enter.
+#   5. Poll Cert:\CurrentUser\My until the cert appears (proves the
+#      cloud HSM session is live and bridged to the Windows store).
+#   6. Run signtool with /sha1 thumbprint — same invocation the Certum
+#      manual prescribes for the manual flow. Then signtool verify /pa.
 #
-#   1. Get a TOTP without the phone — we hold the Base32 seed Certum shows
-#      under "Show secret key" in the portal as a GitHub Secret, and
-#      regenerate the 6-digit code on demand with Get-CertumTotp.ps1
-#      (RFC 6238, no extra deps).
-#   2. Log SimplySign Desktop in non-interactively — its installer ships a
-#      CLI mode that takes username/OTP as arguments. We invoke that and
-#      wait for the cert to materialize in the Windows store.
-#   3. Run signtool exactly as the Certum manual prescribes — `/sha1` with
-#      the cert thumbprint, `/tr http://time.certum.pl` for RFC 3161
-#      timestamping, `/td sha256 /fd sha256` for SHA-256 file + timestamp
-#      digests.
+# Brittleness budget
+# ------------------
+# SendKeys is fragile by nature. If a Certum update changes the login
+# window's title, tab order, or layout, this script silently sends keys
+# to the wrong field. Mitigations baked in:
+#   - Window-title match: `AppActivate('SimplySign Desktop')` — Certum
+#     hasn't changed this title in years (devas.life uses it; the manual
+#     uses it).
+#   - Field clear (`^a{DEL}`) before typing username, in case the
+#     installer pre-populated something.
+#   - Final cert-store poll. If SendKeys missed, the cert never
+#     appears, and we fail fast with a clear message instead of
+#     "succeeding" with an unsigned binary.
+# When SimplySign Desktop ships an update we don't trust, pin
+# SIMPLYSIGN_VERSION in the workflow first, retest locally, then bump.
 #
 # Required GitHub Secrets (mapped into env vars by the workflow):
 #   CERTUM_USERNAME         — SimplySign portal email
@@ -36,14 +52,12 @@
 #                                   Where-Object Subject -Match 'Le ?[Dd]our' |
 #                                   Format-List Thumbprint, Subject
 #
-# Note: Certum SimplySign uses 2FA where the TOTP IS the second factor —
-# there is no separate static password to provide alongside the username.
-# We generate the TOTP on demand from the shared seed, so the username +
-# fresh TOTP is the full credential set.
+# Certum SimplySign uses 2FA where the TOTP IS the second factor — there
+# is no separate static password to provide alongside the username.
 #
-# This script intentionally does NOT echo any of those into logs. The only
-# thing that ends up in the run output is "signed <path>" plus signtool's
-# own output (which contains the cert subject — that's expected and public).
+# This script intentionally does NOT echo any of those into logs. The OTP
+# is the only short-lived secret in flight; it expires within 30 s of
+# generation, so even a logged copy is moot quickly.
 
 [CmdletBinding()]
 param(
@@ -51,20 +65,23 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string[]] $Path,
 
-    # Path to SimplySignDesktop.exe. Default matches the standard installer
-    # location on a 64-bit Windows host. Can be overridden for self-hosted
-    # runners with a non-standard layout.
+    # SimplySignDesktop.exe location. Default matches the standard MSI
+    # install on x64 Windows. Override for self-hosted runners.
     [string] $SimplySignExe = 'C:\Program Files (x86)\Certum\SimplySign Desktop\SimplySignDesktop.exe',
 
-    # signtool.exe lives inside the Windows 10 SDK. The MSBuild GitHub
-    # Actions image already adds it to PATH, but we resolve it explicitly
-    # so a missing PATH entry produces a clear error instead of a confusing
-    # "command not found".
+    # signtool.exe — present on PATH on the GitHub Actions windows-2022
+    # image via the Windows SDK. Override only if needed.
     [string] $SignToolExe = 'signtool.exe',
 
     # Description embedded in the signature ("More info" line in the UAC
-    # prompt). Keep it short and unambiguous.
-    [string] $Description = 'XR_APILAYER_MLEDOUR_fov_crop'
+    # prompt).
+    [string] $Description = 'XR_APILAYER_MLEDOUR_fov_crop',
+
+    # Login-flow timing. Defaults are conservative; tune only if you see
+    # races on a slow runner.
+    [int] $WindowAppearMs   = 6000,
+    [int] $BetweenKeysMs    = 250,
+    [int] $CertAppearTotalS = 60
 )
 
 $ErrorActionPreference = 'Stop'
@@ -78,6 +95,16 @@ function Require-Env {
     return $val
 }
 
+# SendKeys interprets `+ ^ % ~ ( ) { }` as modifier syntax. A username
+# email like "michael.ledour@gmail.com" doesn't contain any of those, but
+# the function is here so a future ID with `+` (Gmail tagging) doesn't
+# silently lose characters.
+function Escape-SendKeys {
+    param([string] $s)
+    return ($s -replace '([+^%~(){}])', '{$1}')
+}
+
+# --- Resolve inputs -------------------------------------------------------
 $username   = Require-Env 'CERTUM_USERNAME'
 $totpSeed   = Require-Env 'CERTUM_TOTP_SEED'
 $thumbprint = (Require-Env 'CERTUM_CERT_THUMBPRINT') -replace '\s', ''
@@ -90,69 +117,96 @@ if (-not (Test-Path $SimplySignExe)) {
     throw "SimplySign Desktop not found at '$SimplySignExe'. Install it on the runner first (see workflow's 'Install SimplySign Desktop' step)."
 }
 
-# Generate a fresh TOTP. Certum windows are 30 s — we issue the login
-# immediately after generation so we have ~25 s of margin; if the runner is
-# heavily loaded we still won't drift past the boundary.
+# --- Generate fresh TOTP --------------------------------------------------
+# Generated as late as possible before the keystroke send so we have the
+# full 30 s window after typing it in. Algorithm defaults to SHA-256
+# (Certum's otpauth `algorithm=` value); leave the param off here so a
+# future change in Get-CertumTotp.ps1's default propagates.
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $totp = & (Join-Path $scriptDir 'Get-CertumTotp.ps1') -Base32Seed $totpSeed
 if ([string]::IsNullOrWhiteSpace($totp) -or $totp.Length -ne 6) {
     throw "Get-CertumTotp.ps1 produced an unexpected value (length=$($totp.Length))."
 }
 
-Write-Host "Logging in to Certum SimplySign Cloud as '$username' ..."
+# --- Launch SimplySign Desktop and inject credentials via SendKeys -------
+Write-Host "Launching SimplySign Desktop ..."
+$proc = Start-Process -FilePath $SimplySignExe -PassThru
+Start-Sleep -Milliseconds $WindowAppearMs
 
-# SimplySign Desktop's headless login. Argument names follow Certum's
-# documented "Automatic login" parameters; ProcessStartInfo is used so
-# the OTP is passed as an ARGUMENT not via the shell, which avoids it
-# landing in the runner's command-history transcript.
-#
-# Certum SimplySign uses the TOTP itself as the second factor — there
-# is no separate static password to pass alongside /username.
-$psi = [System.Diagnostics.ProcessStartInfo]::new()
-$psi.FileName               = $SimplySignExe
-$psi.ArgumentList.Add('/login')
-$psi.ArgumentList.Add('/username'); $psi.ArgumentList.Add($username)
-$psi.ArgumentList.Add('/otp');      $psi.ArgumentList.Add($totp)
-$psi.UseShellExecute        = $false
-$psi.RedirectStandardOutput = $true
-$psi.RedirectStandardError  = $true
-$psi.CreateNoWindow         = $true
+$wshell = New-Object -ComObject WScript.Shell
 
-$proc = [System.Diagnostics.Process]::Start($psi)
-# 60 s is generous; a healthy login completes in <5 s.
-if (-not $proc.WaitForExit(60000)) {
-    $proc.Kill()
-    throw "SimplySignDesktop /login timed out after 60s."
+# Try to focus by process ID first (most reliable when there's only one
+# SimplySign Desktop instance). Fall back to title match — Certum has
+# kept "SimplySign Desktop" as the window title across versions.
+$focused = $false
+for ($i = 0; $i -lt 10 -and -not $focused; $i++) {
+    $focused = $wshell.AppActivate($proc.Id)
+    if (-not $focused) {
+        $focused = $wshell.AppActivate('SimplySign Desktop')
+    }
+    if (-not $focused) { Start-Sleep -Milliseconds 500 }
 }
-if ($proc.ExitCode -ne 0) {
-    # The OTP is the only short-lived secret in this flow and it could
-    # appear in error text echoed back by SimplySignDesktop. Strip it
-    # before printing. (The seed itself never reaches stderr — it's only
-    # used as the HMAC key inside Get-CertumTotp.ps1.)
-    $stderr = $proc.StandardError.ReadToEnd() -replace [Regex]::Escape($totp), '<otp>'
-    throw "SimplySignDesktop /login failed (exit $($proc.ExitCode)): $stderr"
+if (-not $focused) {
+    throw "Could not focus the SimplySign Desktop login window. The window title may have changed in this Certum version (currently expecting 'SimplySign Desktop') — pin SIMPLYSIGN_VERSION in the workflow to a known-good build, or update this script."
 }
 
-Write-Host "Login OK — waiting for cert to appear in CurrentUser\My ..."
+Start-Sleep -Milliseconds $BetweenKeysMs
 
-# After login, SimplySign Desktop pulls the cert into the Windows cert
-# store via its CryptoAPI provider. That's asynchronous; poll up to 30 s.
-$deadline = (Get-Date).AddSeconds(30)
+# Type into the username field. `^a{DEL}` first, in case the installer
+# pre-filled it with something (e.g. a previously-used account on a
+# self-hosted runner). Using Escape-SendKeys to be safe even though a
+# typical email address has no SendKeys metachars.
+Write-Host "Sending credentials ..."
+$wshell.SendKeys('^a{DEL}')
+Start-Sleep -Milliseconds $BetweenKeysMs
+$wshell.SendKeys((Escape-SendKeys $username))
+Start-Sleep -Milliseconds $BetweenKeysMs
+
+# Tab to the OTP field. SimplySign Desktop's login form has the OTP
+# directly after the username — one Tab moves focus there.
+$wshell.SendKeys('{TAB}')
+Start-Sleep -Milliseconds $BetweenKeysMs
+
+# OTP is digits only — no escaping needed, but we run it through
+# Escape-SendKeys anyway for symmetry (and to keep one code path).
+$wshell.SendKeys((Escape-SendKeys $totp))
+Start-Sleep -Milliseconds $BetweenKeysMs
+
+# Submit. {ENTER} = "press the default button", which is "Sign in".
+$wshell.SendKeys('{ENTER}')
+
+# --- Wait for the cert to materialize in the Windows store ---------------
+# This is the real proof of a successful login. Anything before this
+# point could plausibly succeed silently while sending keystrokes to the
+# wrong window or wrong field. If the cert shows up, we know:
+#   1. SimplySign Desktop accepted the username + TOTP.
+#   2. The cloud HSM session is live.
+#   3. The CryptoAPI bridge has populated the local cert store.
+Write-Host "Waiting up to $CertAppearTotalS s for cert thumbprint $thumbprint to appear in CurrentUser\My ..."
+$deadline = (Get-Date).AddSeconds($CertAppearTotalS)
 $cert     = $null
 while ((Get-Date) -lt $deadline) {
-    $cert = Get-ChildItem -Path "Cert:\CurrentUser\My" |
+    $cert = Get-ChildItem -Path 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
             Where-Object { $_.Thumbprint -eq $thumbprint } |
             Select-Object -First 1
     if ($null -ne $cert) { break }
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 1000
 }
 if ($null -eq $cert) {
-    throw "Certificate with thumbprint '$thumbprint' did not appear in CurrentUser\My within 30s after SimplySign login. Confirm the thumbprint matches the cert visible in SimplySign Desktop."
+    # Don't dump the OTP — but DO say what was attempted so the failure
+    # mode is actionable.
+    throw @"
+Certificate $thumbprint did not appear in CurrentUser\My within $CertAppearTotalS s.
+Likely causes (in order):
+  1. The OTP was wrong (clock skew on the runner > 30 s, or wrong CERTUM_TOTP_SEED).
+  2. The username was wrong (typo in CERTUM_USERNAME secret).
+  3. The thumbprint changed (Certum certs renew yearly — update CERTUM_CERT_THUMBPRINT).
+  4. SimplySign Desktop's login form layout changed in version $((Get-Item $SimplySignExe).VersionInfo.FileVersion).
+"@
 }
 Write-Host "Found cert: $($cert.Subject)"
 
-# Resolve every input glob into a flat file list before signing — this
-# fails fast if the build skipped producing one of the expected outputs.
+# --- Resolve files and sign ---------------------------------------------
 $files = @()
 foreach ($p in $Path) {
     $resolved = Get-ChildItem -Path $p -ErrorAction SilentlyContinue
@@ -162,13 +216,7 @@ foreach ($p in $Path) {
     $files += $resolved
 }
 
-# Sign each file with the exact invocation the Certum manual prescribes:
-#   /sha1 <thumbprint>          select the cert by SHA-1 thumbprint
-#   /tr   http://time.certum.pl RFC 3161 timestamp authority (free, public)
-#   /td   sha256                timestamp digest algorithm
-#   /fd   sha256                file digest algorithm
-#   /d    "<description>"       embedded description (UAC "More info")
-#   /v                          verbose — surfaces real errors in CI logs
+# signtool invocation matches the Certum manual prescription verbatim.
 foreach ($f in $files) {
     Write-Host "Signing $($f.FullName) ..."
     & $SignToolExe sign `
@@ -183,9 +231,9 @@ foreach ($f in $files) {
         throw "signtool failed for $($f.FullName) (exit $LASTEXITCODE)."
     }
 
-    # Independent verify pass so a successful exit code can't mask a
-    # malformed signature. /pa = use the default "any" policy; without it,
-    # signtool defaults to driver signing rules and rejects user-mode DLLs.
+    # /pa = use the default "any" policy. Without it, signtool verify
+    # defaults to driver-signing rules and rejects user-mode DLLs that
+    # are perfectly correctly signed.
     & $SignToolExe verify /pa /v $f.FullName
     if ($LASTEXITCODE -ne 0) {
         throw "signtool verify failed for $($f.FullName) (exit $LASTEXITCODE)."

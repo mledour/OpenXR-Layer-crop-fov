@@ -170,33 +170,68 @@ Builds triggered from a fork or from a pull request are not signed
 only binaries from the [official GitHub Releases
 page](../../../releases) of this repository should be trusted.
 
-### How CI signs headlessly
+### How CI signs in an automated way
 
-Certum's official manual only documents an interactive flow (open
-SimplySign Desktop, type the TOTP from a phone, click "Sign in"). To
-run that in GitHub Actions instead of by hand, three things are
-automated:
+Certum's official manual only documents the interactive flow (open
+SimplySign Desktop, type the TOTP from a phone, click "Sign in").
+SimplySign Desktop has **no documented headless CLI** — every CI/CD
+user we found in the wild either drives the GUI via SendKeys
+([devas.life pattern](https://www.devas.life/how-to-automate-signing-your-windows-app-with-certum/))
+or runs SimplySign Desktop in Xvnc + p11-kit
+([hpvb/certum-container](https://github.com/hpvb/certum-container)).
+We chose the SendKeys path: it works on a stock GitHub-hosted
+`windows-2022` runner with no self-hosted infrastructure.
 
-1. [`scripts/Get-CertumTotp.ps1`](../scripts/Get-CertumTotp.ps1)
+The pieces:
+
+1. The workflow downloads the SimplySign Desktop MSI from
+   `files.certum.eu` at a **pinned version** (`SIMPLYSIGN_VERSION`
+   env var in `build-and-release.yml`) and installs it silently with
+   `msiexec /qn /norestart`. Pinning matters — see "Brittleness
+   notes" below.
+2. [`scripts/Get-CertumTotp.ps1`](../scripts/Get-CertumTotp.ps1)
    regenerates a 6-digit RFC 6238 TOTP on demand from the Base32 seed
-   that the SimplySign portal exposes under "Show secret key". Pure
-   PowerShell + .NET, no extra modules to install on the runner.
-   Uses **HMAC-SHA256** — Certum's `otpauth://` enrolment URI
-   specifies `algorithm=SHA256`, not the RFC 6238 default of SHA-1.
-   Generating SHA-1 codes against a SHA-256 seed produces wrong codes
-   silently, so this is verified against RFC 6238 Appendix B vectors
-   in [`scripts/Test-CertumTotp.ps1`](../scripts/Test-CertumTotp.ps1).
-2. [`scripts/Sign-Artifact.ps1`](../scripts/Sign-Artifact.ps1) feeds
-   that TOTP — together with the username — to
-   `SimplySignDesktop.exe /login`, then waits for the cert to appear in
-   `Cert:\CurrentUser\My`, then runs `signtool sign /sha1 <thumb>
+   that the SimplySign portal exposes under "Show secret key" (the
+   same string visible in the `secret=` parameter of the
+   `otpauth://` enrolment URI). Pure PowerShell + .NET, no extra
+   modules to install on the runner. Uses **HMAC-SHA256** —
+   Certum's `otpauth://` URI specifies `algorithm=SHA256`, not the
+   RFC 6238 default of SHA-1. Generating SHA-1 codes against a
+   SHA-256 seed produces wrong codes silently, so this is verified
+   against RFC 6238 Appendix B vectors in
+   [`scripts/Test-CertumTotp.ps1`](../scripts/Test-CertumTotp.ps1).
+3. [`scripts/Sign-Artifact.ps1`](../scripts/Sign-Artifact.ps1)
+   launches SimplySignDesktop.exe (GUI), focuses the login window
+   via `WScript.Shell.AppActivate`, types `username` + `Tab` +
+   `TOTP` + `Enter` via `SendKeys`, then **polls
+   `Cert:\CurrentUser\My` for the configured thumbprint** as the
+   real proof that the login succeeded — anything earlier could
+   plausibly succeed while sending keys to the wrong window. Once
+   the cert is present, it runs `signtool sign /sha1 <thumb>
    /tr http://time.certum.pl /td sha256 /fd sha256` exactly as the
-   Certum manual prescribes, then `signtool verify /pa /v` for an
-   independent confirmation pass.
-3. The workflow gates both signing steps on a `should_sign` flag
-   computed once (Release matrix entry + `CERTUM_USERNAME` secret
-   present), so PR/fork builds skip signing and stay green instead
-   of failing.
+   Certum manual prescribes for the manual flow, then
+   `signtool verify /pa /v` to confirm.
+4. The workflow gates every signing-related step on a `should_sign`
+   flag computed once up front (Release matrix entry +
+   `CERTUM_USERNAME` secret present), so PR/fork builds skip signing
+   and stay green instead of failing.
+
+### Brittleness notes (SendKeys is fragile)
+
+SendKeys talks to whatever window has focus. If a Certum update
+changes the login window's title, tab order, or layout, this script
+silently sends keys to the wrong place — the cert won't appear in the
+store, and the wait loop will fail with a clear message instead of
+"succeeding" with an unsigned binary. That's the safety net.
+
+When bumping `SIMPLYSIGN_VERSION` in the workflow:
+
+1. Re-run `scripts\Sign-Artifact.ps1` against the new MSI on a local
+   Windows VM with a test secret set. Verify a sample DLL signs.
+2. Confirm the window title is still `SimplySign Desktop` and the
+   field order is still `username, Tab, OTP, Enter`. If not, update
+   the script before merging the version bump.
+3. Then bump the env var in `.github/workflows/build-and-release.yml`.
 
 ### Required GitHub Secrets
 

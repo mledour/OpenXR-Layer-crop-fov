@@ -124,15 +124,47 @@ jobs:
       # forks (where secrets are not exposed) skip signing entirely
       # instead of failing — they still produce unsigned artifacts so
       # CI stays green for contributors.
-      # SimplySign Desktop is the Certum-side prerequisite for headless
-      # signing: it manages the cloud-HSM session and exposes the cert
-      # through the Windows certificate store so signtool can find it via
-      # /sha1 thumbprint. Choco package keeps the runner step simple; if
-      # the package ever lags behind the official MSI, swap to a direct
-      # download from https://files.certum.eu/.
+      # SimplySign Desktop is the Certum-side prerequisite for cloud
+      # signing: it logs into the cloud HSM and exposes the cert through
+      # the Windows certificate store so signtool can find it via /sha1
+      # thumbprint. There is NO Chocolatey package (community.chocolatey
+      # has no simplysign-desktop entry) and NO documented headless CLI;
+      # the only public install path is the MSI from files.certum.eu.
+      #
+      # The version is pinned: a Certum-side "latest" that breaks the GUI
+      # layout would silently break our SendKeys-based login (see
+      # Sign-Artifact.ps1). Bumping is a deliberate act — re-test SendKeys
+      # against the new version locally first.
       - name: Install SimplySign Desktop
         if: steps.signing.outputs.should_sign == 'true'
-        run: choco install simplysign-desktop -y --no-progress
+        shell: pwsh
+        env:
+          SIMPLYSIGN_VERSION: '9.4.3.90'
+        run: |
+          $url = "https://files.certum.eu/software/SimplySignDesktop/Windows/$env:SIMPLYSIGN_VERSION/SimplySignDesktop-$env:SIMPLYSIGN_VERSION-64-bit-en.msi"
+          $msi = "$env:RUNNER_TEMP\SimplySignDesktop.msi"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
+          if (-not (Test-Path $msi) -or (Get-Item $msi).Length -lt 1MB) {
+            throw "MSI download looks invalid: $msi"
+          }
+          Write-Host "Installing silently ..."
+          $p = Start-Process -FilePath msiexec.exe `
+                             -ArgumentList @('/i', $msi, '/qn', '/norestart') `
+                             -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            throw "msiexec exited $($p.ExitCode)"
+          }
+          # Verify the binary ended up where Sign-Artifact.ps1 expects it.
+          $exe = 'C:\Program Files (x86)\Certum\SimplySign Desktop\SimplySignDesktop.exe'
+          if (-not (Test-Path $exe)) {
+            # Search the install just in case the layout changed in a
+            # newer Certum build — fail loudly with the actual path so
+            # the next bump in SIMPLYSIGN_VERSION is easy to fix.
+            $found = Get-ChildItem 'C:\Program Files*\' -Recurse -Filter 'SimplySignDesktop.exe' -ErrorAction SilentlyContinue
+            throw "SimplySignDesktop.exe not at expected path. Found instead: $($found.FullName -join '; ')"
+          }
+          Write-Host "Installed: $exe"
 
       # Sign the DLL BEFORE staging and BEFORE building the installer, so
       # the signature lands in both the manual-install ZIP and embedded
