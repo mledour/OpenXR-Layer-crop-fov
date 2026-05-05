@@ -169,19 +169,31 @@ function Get-AllTopLevelWindows {
     return ,$list
 }
 
-# Find the first SimplySign Desktop window owned by $TargetPid (or by
-# any SimplySign* process if -1). The window is matched by exact title
-# 'SimplySign Desktop' (stable across versions per Certum's UI).
+# Find a SimplySign Desktop login window. Prefers a VISIBLE window
+# whose title contains 'SimplySign' or 'Login' (login dialogs typically
+# carry one of those, even if Certum localizes the rest of the form).
+# Falls back to a hidden 'SimplySign Desktop' window, but the caller
+# should treat that as a poor target — calling ShowWindow on Certum's
+# hidden tray host has been observed to destroy the window outright on
+# CI runners.
 # Returns the handle as IntPtr, or [System.IntPtr]::Zero if not found.
 function Find-SimplySignWindow {
-    param([int] $TargetPid = -1)
-    $candidates = Get-AllTopLevelWindows |
-        Where-Object {
-            $_.Title -eq 'SimplySign Desktop' -and
-            ($TargetPid -lt 0 -or $_.Pid -eq $TargetPid)
-        }
-    if ($candidates.Count -eq 0) { return [System.IntPtr]::Zero }
-    return $candidates[0].Handle
+    param([int] $TargetPid = -1, [switch] $RequireVisible)
+    $all = Get-AllTopLevelWindows | Where-Object {
+        $TargetPid -lt 0 -or $_.Pid -eq $TargetPid
+    }
+    # Prefer visible windows with a SimplySign-ish or Login-ish title.
+    $visible = $all | Where-Object {
+        $_.Visible -and ($_.Title -match 'SimplySign' -or $_.Title -match 'Login' -or $_.Title -match 'Logowanie')
+    }
+    if ($visible.Count -gt 0) { return $visible[0].Handle }
+    if ($RequireVisible) { return [System.IntPtr]::Zero }
+    # Fallback to hidden ones — the caller should be cautious.
+    $hidden = $all | Where-Object {
+        $_.Title -eq 'SimplySign Desktop'
+    }
+    if ($hidden.Count -gt 0) { return $hidden[0].Handle }
+    return [System.IntPtr]::Zero
 }
 
 # Force a window to be visible + foreground. SimplySign Desktop on
@@ -217,16 +229,33 @@ function Dump-WindowDiagnostics {
     }
 
     Write-Host 'All SimplySign* processes:'
+    $simplyPids = @(Get-Process -Name 'SimplySign*' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.Id })
     Get-Process -Name 'SimplySign*' -ErrorAction SilentlyContinue |
         Select-Object Id, ProcessName, MainWindowHandle, MainWindowTitle, HasExited |
         Format-Table -AutoSize | Out-Host
 
     $windows = Get-AllTopLevelWindows
-    Write-Host ("Top-level windows (count={0}):" -f $windows.Count)
+
+    # 1. EVERY top-level window owned by a SimplySign* process — even
+    #    untitled ones, even hidden ones. This tells us whether the
+    #    process is silently sitting on a window we'd otherwise miss
+    #    in the title-filtered listing below.
+    if ($simplyPids.Count -gt 0) {
+        Write-Host ("All windows owned by SimplySign* PIDs ({0}):" -f ($simplyPids -join ', '))
+        $windows |
+            Where-Object { $simplyPids -contains $_.Pid } |
+            Format-Table -AutoSize | Out-Host
+    }
+
+    # 2. The wider top-level dump — limited to titled OR visible
+    #    windows so the table stays readable. We bumped the cap to 50
+    #    because the previous 30 truncated relevant entries.
+    Write-Host ("Top-level windows on the runner (count={0}, showing titled+visible):" -f $windows.Count)
     $windows |
         Where-Object { $_.Title -ne '' -or $_.Visible } |
         Sort-Object Visible -Descending |
-        Select-Object -First 30 |
+        Select-Object -First 50 |
         Format-Table -AutoSize | Out-Host
     Write-Host '--- end diagnostics ---'
 }
@@ -262,33 +291,56 @@ Start-Sleep -Milliseconds $WindowAppearMs
 
 $wshell = New-Object -ComObject WScript.Shell
 
-# SimplySign Desktop launches HIDDEN by default (it's a tray-style app).
-# That's why Process.MainWindowHandle stays at 0 and AppActivate fails
-# even though the window genuinely exists — we confirmed this on the
-# windows-2022 GHA runner (88 top-level windows enumerated, including
-# one titled 'SimplySign Desktop' but with Visible=False).
+# Strategy: wait patiently for SimplySign Desktop to show a VISIBLE
+# login window on its own. We don't force-show its hidden tray host
+# any more — that's been observed to destroy the window outright on
+# the CI runner (run #2 ended up with the SimplySign process owning
+# only "Default IME" windows after a ShowWindow(SW_RESTORE) call).
 #
-# So: locate the hidden window via EnumWindows, force-show it via
-# Win32 ShowWindow(SW_RESTORE) + SetForegroundWindow, *then* run
-# AppActivate. AppActivate now has a visible foreground target and
-# happily focuses it for SendKeys.
-$hwnd = [System.IntPtr]::Zero
-for ($i = 0; $i -lt 20 -and $hwnd -eq [System.IntPtr]::Zero; $i++) {
-    $hwnd = Find-SimplySignWindow -TargetPid $proc.Id
-    if ($hwnd -eq [System.IntPtr]::Zero) { Start-Sleep -Milliseconds 500 }
+# Run #1 saw the window 'SimplySign Desktop' with Visible=False. Two
+# possibilities now:
+#
+#   (a) Certum eventually shows the login dialog by itself if we wait
+#       long enough — first launch on a fresh install commonly does
+#       this with a multi-second initialization delay. We give it up
+#       to $WaitForVisibleS seconds.
+#
+#   (b) Certum never shows it on a non-interactive desktop (despite
+#       the desktop being technically present — Program Manager and
+#       all are there). In that case we fail with a full diagnostic
+#       and switch strategies.
+$WaitForVisibleS = 60
+Write-Host ("Waiting up to ${WaitForVisibleS}s for a visible SimplySign Desktop login window ...")
+
+$hwnd     = [System.IntPtr]::Zero
+$deadline = (Get-Date).AddSeconds($WaitForVisibleS)
+while ((Get-Date) -lt $deadline -and $hwnd -eq [System.IntPtr]::Zero) {
+    $hwnd = Find-SimplySignWindow -TargetPid $proc.Id -RequireVisible
+    if ($hwnd -eq [System.IntPtr]::Zero) {
+        Start-Sleep -Seconds 2
+    }
 }
+
 if ($hwnd -eq [System.IntPtr]::Zero) {
     Dump-WindowDiagnostics -LaunchedProc $proc
-    throw "Could not find a top-level window titled 'SimplySign Desktop' owned by PID $($proc.Id) after 10s. The window title may have changed; see diagnostic dump above."
+    throw @"
+SimplySign Desktop never produced a visible login window after ${WaitForVisibleS}s.
+The diagnostic dump above shows what windows the process did create.
+If the only entries owned by the SimplySign* PID are "Default IME" and
+nothing else, Certum is failing to render its login UI on this runner
+type — switch to a self-hosted runner (Windows machine kept logged in)
+or local-sign + manual upload.
+"@
 }
-Write-Host ("Found SimplySign Desktop window: handle={0}" -f $hwnd)
+Write-Host ("Found visible SimplySign window: handle={0}" -f $hwnd)
 
-Show-WindowForeground -Handle $hwnd
+# Belt-and-braces foreground bring-up. SetForegroundWindow on a window
+# that's ALREADY visible is benign (no destruction risk; that risk was
+# specific to forcing a hidden tray-host visible).
+[void][NS.Win32]::BringWindowToTop($hwnd)
+[void][NS.Win32]::SetForegroundWindow($hwnd)
 Start-Sleep -Milliseconds $BetweenKeysMs
 
-# Final focus belt-and-braces via AppActivate, after the window has
-# been forced visible+foreground. Retry briefly in case Show-Window's
-# state transition hasn't settled.
 $focused = $false
 for ($i = 0; $i -lt 10 -and -not $focused; $i++) {
     $focused = $wshell.AppActivate($proc.Id)
@@ -299,7 +351,7 @@ for ($i = 0; $i -lt 10 -and -not $focused; $i++) {
 }
 if (-not $focused) {
     Dump-WindowDiagnostics -LaunchedProc $proc
-    throw "Could not focus the SimplySign Desktop window even after ShowWindow(SW_RESTORE)+SetForegroundWindow. Window handle was $hwnd. See diagnostic dump above."
+    throw "Found visible window (handle $hwnd) but AppActivate refused to focus it. See diagnostic dump above."
 }
 
 Start-Sleep -Milliseconds $BetweenKeysMs
