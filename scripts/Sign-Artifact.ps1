@@ -65,9 +65,11 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string[]] $Path,
 
-    # SimplySignDesktop.exe location. Default matches the standard MSI
-    # install on x64 Windows. Override for self-hosted runners.
-    [string] $SimplySignExe = 'C:\Program Files (x86)\Certum\SimplySign Desktop\SimplySignDesktop.exe',
+    # SimplySignDesktop.exe location. The 64-bit MSI installs to
+    # `C:\Program Files\Certum\SimplySign Desktop\` (real 64-bit app —
+    # `Program Files (x86)` would be wrong here). Override for
+    # self-hosted runners with a non-default install layout.
+    [string] $SimplySignExe = 'C:\Program Files\Certum\SimplySign Desktop\SimplySignDesktop.exe',
 
     # signtool.exe — present on PATH on the GitHub Actions windows-2022
     # image via the Windows SDK. Override only if needed.

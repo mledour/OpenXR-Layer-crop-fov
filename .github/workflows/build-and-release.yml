@@ -156,11 +156,14 @@ jobs:
             throw "msiexec exited $($p.ExitCode)"
           }
           # Verify the binary ended up where Sign-Artifact.ps1 expects it.
-          $exe = 'C:\Program Files (x86)\Certum\SimplySign Desktop\SimplySignDesktop.exe'
+          # The 64-bit MSI installs to `C:\Program Files\` (the real
+          # 64-bit hive), NOT `Program Files (x86)`.
+          $exe = 'C:\Program Files\Certum\SimplySign Desktop\SimplySignDesktop.exe'
           if (-not (Test-Path $exe)) {
-            # Search the install just in case the layout changed in a
-            # newer Certum build — fail loudly with the actual path so
-            # the next bump in SIMPLYSIGN_VERSION is easy to fix.
+            # Search both Program Files hives just in case the layout
+            # changed in a newer Certum build — fail loudly with the
+            # actual path so the next bump in SIMPLYSIGN_VERSION is
+            # easy to fix.
             $found = Get-ChildItem 'C:\Program Files*\' -Recurse -Filter 'SimplySignDesktop.exe' -ErrorAction SilentlyContinue
             throw "SimplySignDesktop.exe not at expected path. Found instead: $($found.FullName -join '; ')"
           }
