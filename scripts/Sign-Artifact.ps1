@@ -106,6 +106,76 @@ function Escape-SendKeys {
     return ($s -replace '([+^%~(){}])', '{$1}')
 }
 
+# Dump everything we can find about the runner's window state when login
+# fails, so we don't have to guess. Used only on the failure path — logs
+# don't carry the OTP since we never echo it.
+function Dump-WindowDiagnostics {
+    param([System.Diagnostics.Process] $LaunchedProc)
+
+    Write-Host '--- Window diagnostics ---'
+    if ($LaunchedProc) {
+        $LaunchedProc.Refresh()
+        Write-Host ("LaunchedProc.Id              = {0}" -f $LaunchedProc.Id)
+        Write-Host ("LaunchedProc.HasExited       = {0}" -f $LaunchedProc.HasExited)
+        if ($LaunchedProc.HasExited) {
+            Write-Host ("LaunchedProc.ExitCode      = {0}" -f $LaunchedProc.ExitCode)
+        } else {
+            Write-Host ("LaunchedProc.MainWindowHandle = {0}" -f $LaunchedProc.MainWindowHandle)
+            Write-Host ("LaunchedProc.MainWindowTitle  = '{0}'" -f $LaunchedProc.MainWindowTitle)
+        }
+    }
+
+    Write-Host 'All SimplySign* processes:'
+    Get-Process -Name 'SimplySign*' -ErrorAction SilentlyContinue |
+        Select-Object Id, ProcessName, MainWindowHandle, MainWindowTitle, HasExited |
+        Format-Table -AutoSize | Out-Host
+
+    # Enumerate every top-level window on the runner via Win32 so we see
+    # whatever Certum's GUI is *actually* called. If nothing shows up, we
+    # know the runner has no interactive window station and SendKeys has
+    # no chance of working — that's the signal to switch to a self-hosted
+    # runner or a different signing strategy.
+    if (-not ('Win32Enum' -as [type])) {
+        Add-Type -Namespace 'NS' -Name 'Win32Enum' -MemberDefinition @"
+            [System.Runtime.InteropServices.DllImport("user32.dll")]
+            public static extern bool EnumWindows(EnumWindowsProc enumProc, System.IntPtr lParam);
+            public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
+            [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+            public static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder text, int count);
+            [System.Runtime.InteropServices.DllImport("user32.dll")]
+            public static extern bool IsWindowVisible(System.IntPtr hWnd);
+            [System.Runtime.InteropServices.DllImport("user32.dll")]
+            public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint lpdwProcessId);
+"@
+    }
+
+    $windows = New-Object 'System.Collections.Generic.List[object]'
+    $cb = [NS.Win32Enum+EnumWindowsProc] {
+        param($hWnd, $lParam)
+        $sb  = New-Object System.Text.StringBuilder 256
+        [void][NS.Win32Enum]::GetWindowText($hWnd, $sb, $sb.Capacity)
+        $vis = [NS.Win32Enum]::IsWindowVisible($hWnd)
+        $pid = 0
+        [void][NS.Win32Enum]::GetWindowThreadProcessId($hWnd, [ref]$pid)
+        $windows.Add([pscustomobject]@{
+            Handle  = $hWnd
+            Visible = $vis
+            Pid     = $pid
+            Title   = $sb.ToString()
+        })
+        return $true  # keep enumerating
+    }
+    [void][NS.Win32Enum]::EnumWindows($cb, [System.IntPtr]::Zero)
+
+    Write-Host ("Top-level windows (count={0}):" -f $windows.Count)
+    $windows |
+        Where-Object { $_.Title -ne '' -or $_.Visible } |
+        Sort-Object Visible -Descending |
+        Select-Object -First 30 |
+        Format-Table -AutoSize | Out-Host
+    Write-Host '--- end diagnostics ---'
+}
+
 # --- Resolve inputs -------------------------------------------------------
 $username   = Require-Env 'CERTUM_USERNAME'
 $totpSeed   = Require-Env 'CERTUM_TOTP_SEED'
@@ -149,7 +219,26 @@ for ($i = 0; $i -lt 10 -and -not $focused; $i++) {
     if (-not $focused) { Start-Sleep -Milliseconds 500 }
 }
 if (-not $focused) {
-    throw "Could not focus the SimplySign Desktop login window. The window title may have changed in this Certum version (currently expecting 'SimplySign Desktop') — pin SIMPLYSIGN_VERSION in the workflow to a known-good build, or update this script."
+    Dump-WindowDiagnostics -LaunchedProc $proc
+    throw @"
+Could not focus the SimplySign Desktop login window after 10 retries.
+See diagnostic dump above. Common causes:
+
+  1. The GitHub-hosted windows-2022 runner has no interactive
+     window station — top-level window count above will be very
+     low (maybe 0 visible). In that case, SendKeys cannot work
+     here regardless of titles, and the path forward is a
+     self-hosted runner (machine kept logged in) or local-sign
+     + manual-upload.
+
+  2. The window title changed in this Certum version (we expect
+     'SimplySign Desktop'). Look at the dump's "Top-level windows"
+     table for what's actually there and update the AppActivate
+     call in this script.
+
+  3. The process exited before showing a window (HasExited=True
+     above) — the MSI may need user-context state we don't have.
+"@
 }
 
 Start-Sleep -Milliseconds $BetweenKeysMs
