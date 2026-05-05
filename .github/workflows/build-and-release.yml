@@ -143,7 +143,6 @@ jobs:
         shell: pwsh
         env:
           CERTUM_USERNAME:        ${{ secrets.CERTUM_USERNAME }}
-          CERTUM_PASSWORD:        ${{ secrets.CERTUM_PASSWORD }}
           CERTUM_TOTP_SEED:       ${{ secrets.CERTUM_TOTP_SEED }}
           CERTUM_CERT_THUMBPRINT: ${{ secrets.CERTUM_CERT_THUMBPRINT }}
         run: |
@@ -206,7 +205,6 @@ jobs:
         shell: pwsh
         env:
           CERTUM_USERNAME:        ${{ secrets.CERTUM_USERNAME }}
-          CERTUM_PASSWORD:        ${{ secrets.CERTUM_PASSWORD }}
           CERTUM_TOTP_SEED:       ${{ secrets.CERTUM_TOTP_SEED }}
           CERTUM_CERT_THUMBPRINT: ${{ secrets.CERTUM_CERT_THUMBPRINT }}
         run: |

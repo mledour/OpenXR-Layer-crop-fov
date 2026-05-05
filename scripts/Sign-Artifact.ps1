@@ -6,10 +6,11 @@
 # Why this script exists
 # ----------------------
 # Certum's official "Code Signing in the Cloud" manual only documents the
-# interactive flow: a human opens SimplySign Desktop, types username +
-# password, reads a TOTP off their phone, and clicks "Sign in". Once that
-# desktop session is logged in, the cert appears in the Windows certificate
-# store and `signtool /sha1 <THUMBPRINT> /tr ...` can sign any binary.
+# interactive flow: a human opens SimplySign Desktop, types their username,
+# reads a TOTP off their phone, and clicks "Sign in" (the TOTP IS the
+# second factor — there is no separate static password). Once that desktop
+# session is logged in, the cert appears in the Windows certificate store
+# and `signtool /sha1 <THUMBPRINT> /tr ...` can sign any binary.
 #
 # To run this in GitHub Actions instead of by hand, three things have to be
 # automated:
@@ -19,8 +20,8 @@
 #      regenerate the 6-digit code on demand with Get-CertumTotp.ps1
 #      (RFC 6238, no extra deps).
 #   2. Log SimplySign Desktop in non-interactively — its installer ships a
-#      CLI mode that takes username/password/OTP as arguments. We invoke
-#      that and wait for the cert to materialize in the Windows store.
+#      CLI mode that takes username/OTP as arguments. We invoke that and
+#      wait for the cert to materialize in the Windows store.
 #   3. Run signtool exactly as the Certum manual prescribes — `/sha1` with
 #      the cert thumbprint, `/tr http://time.certum.pl` for RFC 3161
 #      timestamping, `/td sha256 /fd sha256` for SHA-256 file + timestamp
@@ -28,13 +29,17 @@
 #
 # Required GitHub Secrets (mapped into env vars by the workflow):
 #   CERTUM_USERNAME         — SimplySign portal email
-#   CERTUM_PASSWORD         — SimplySign portal password
 #   CERTUM_TOTP_SEED        — Base32 seed from "Show secret key"
 #   CERTUM_CERT_THUMBPRINT  — 40-hex-char SHA-1 of the issued certificate
 #                             (no spaces). Find it once with:
 #                               Get-ChildItem Cert:\CurrentUser\My |
 #                                   Where-Object Subject -Match 'Le ?[Dd]our' |
 #                                   Format-List Thumbprint, Subject
+#
+# Note: Certum SimplySign uses 2FA where the TOTP IS the second factor —
+# there is no separate static password to provide alongside the username.
+# We generate the TOTP on demand from the shared seed, so the username +
+# fresh TOTP is the full credential set.
 #
 # This script intentionally does NOT echo any of those into logs. The only
 # thing that ends up in the run output is "signed <path>" plus signtool's
@@ -74,7 +79,6 @@ function Require-Env {
 }
 
 $username   = Require-Env 'CERTUM_USERNAME'
-$password   = Require-Env 'CERTUM_PASSWORD'
 $totpSeed   = Require-Env 'CERTUM_TOTP_SEED'
 $thumbprint = (Require-Env 'CERTUM_CERT_THUMBPRINT') -replace '\s', ''
 
@@ -99,13 +103,15 @@ Write-Host "Logging in to Certum SimplySign Cloud as '$username' ..."
 
 # SimplySign Desktop's headless login. Argument names follow Certum's
 # documented "Automatic login" parameters; ProcessStartInfo is used so
-# password/OTP are passed as ARGUMENTS not via the shell, which avoids
-# them landing in the runner's command-history transcript.
+# the OTP is passed as an ARGUMENT not via the shell, which avoids it
+# landing in the runner's command-history transcript.
+#
+# Certum SimplySign uses the TOTP itself as the second factor — there
+# is no separate static password to pass alongside /username.
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
 $psi.FileName               = $SimplySignExe
 $psi.ArgumentList.Add('/login')
 $psi.ArgumentList.Add('/username'); $psi.ArgumentList.Add($username)
-$psi.ArgumentList.Add('/password'); $psi.ArgumentList.Add($password)
 $psi.ArgumentList.Add('/otp');      $psi.ArgumentList.Add($totp)
 $psi.UseShellExecute        = $false
 $psi.RedirectStandardOutput = $true
@@ -119,9 +125,10 @@ if (-not $proc.WaitForExit(60000)) {
     throw "SimplySignDesktop /login timed out after 60s."
 }
 if ($proc.ExitCode -ne 0) {
-    # Stderr from SimplySignDesktop should not leak the password since we
-    # never echoed it, but the OTP could appear in error text. Strip it
-    # before printing.
+    # The OTP is the only short-lived secret in this flow and it could
+    # appear in error text echoed back by SimplySignDesktop. Strip it
+    # before printing. (The seed itself never reaches stderr — it's only
+    # used as the HMAC key inside Get-CertumTotp.ps1.)
     $stderr = $proc.StandardError.ReadToEnd() -replace [Regex]::Escape($totp), '<otp>'
     throw "SimplySignDesktop /login failed (exit $($proc.ExitCode)): $stderr"
 }

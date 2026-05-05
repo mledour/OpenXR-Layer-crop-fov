@@ -182,7 +182,7 @@ automated:
    that the SimplySign portal exposes under "Show secret key". Pure
    PowerShell + .NET, no extra modules to install on the runner.
 2. [`scripts/Sign-Artifact.ps1`](../scripts/Sign-Artifact.ps1) feeds
-   that TOTP — together with the username and password — to
+   that TOTP — together with the username — to
    `SimplySignDesktop.exe /login`, then waits for the cert to appear in
    `Cert:\CurrentUser\My`, then runs `signtool sign /sha1 <thumb>
    /tr http://time.certum.pl /td sha256 /fd sha256` exactly as the
@@ -195,17 +195,21 @@ automated:
 
 ### Required GitHub Secrets
 
-These four secrets must be configured at the repository level
+These three secrets must be configured at the repository level
 (Settings → Secrets and variables → Actions → New repository secret)
 for Release-tag builds to produce signed binaries. They are **never**
 echoed by `Sign-Artifact.ps1` and `Get-CertumTotp.ps1`, and the
 PowerShell scripts pass them as process arguments rather than through
 `cmd /c` so they don't leak into the shell-history transcript.
 
+Certum SimplySign uses 2FA where the **TOTP is the second factor** —
+there is no separate static password to set, so we don't need a
+`CERTUM_PASSWORD` secret. Username + freshly-generated TOTP is the
+full credential set SimplySign Desktop expects.
+
 | Secret | Source | Format |
 |--------|--------|--------|
 | `CERTUM_USERNAME` | SimplySign portal login (the email you registered with) | string |
-| `CERTUM_PASSWORD` | SimplySign portal password | string |
 | `CERTUM_TOTP_SEED` | SimplySign portal → "Show secret key" (the Base32 string behind the QR code, NOT a snapshot of the current 6-digit code) | Base32, 16+ chars |
 | `CERTUM_CERT_THUMBPRINT` | SHA-1 thumbprint of the issued certificate, no spaces | 40 hex chars |
 
