@@ -180,6 +180,94 @@ namespace openxr_api_layer {
 
     namespace {
 
+        // Hardcoded interpupillary distance, in meters, baked into the
+        // stereo SBS disparity. Median adult value (Wikipedia: 63 mm
+        // mean, 64 mm popular round number used by IPD calibration in
+        // SteamVR / Meta). Users with significantly different IPD
+        // (~58 mm or ~70 mm) will see a slightly off depth feel — the
+        // proper fix is to query the runtime via xrLocateViews at
+        // session init and bake per-user, which is a future
+        // enhancement (needs a wait/locate dance during initialize()).
+        constexpr float kStereoIpdMeters = 0.064f;
+
+        // Cosine depth profile centered on u=0.5: 0 at the center,
+        // grows to 1 at the edges. Equivalent to (1 − cos(2π(u−0.5)))/2,
+        // expressed via sin²(π(u−0.5)) for one fewer trig call.
+        inline float depthProfileCosine(float u) {
+            constexpr float kPi = 3.14159265358979323846f;
+            const float s = std::sin(kPi * (u - 0.5f));
+            return s * s;
+        }
+
+        // Build a 2*pngW × pngH RGBA8 buffer where the left half is the
+        // mono PNG with each column sampled at (x − shift) and the right
+        // half at (x + shift). Shift is computed per-column from a
+        // cosine depth profile + IPD + quad geometry, baking binocular
+        // disparity into the asset so the user perceives the helmet as
+        // wrapping toward the face at the edges. Round-to-nearest pixel
+        // (no bilinear filtering) — sufficient for a feathered visor
+        // edge; bilinear is a future enhancement if a hard-alpha asset
+        // shows seams.
+        //
+        // The math (eye at ±IPD/2, screen at depth D, virtual point at
+        // depth Z(u)):
+        //   parallax(u) = IPD × (Z(u) − D) / Z(u)        [meters on screen]
+        //   shift_norm  = parallax / (2 × quadW)          [normalized 0..1]
+        //   shift_px    = round(shift_norm × pngW)        [mono pixels]
+        // For Z < D (helmet edges closer than screen) shift > 0, so the
+        // left-eye output sees the source content shifted *right* in
+        // its own image (i.e. left[output_x] = mono[output_x − shift]),
+        // which is the correct crossed disparity for a closer-than-
+        // screen point. Symmetric for the right eye.
+        void bakeStereoSbsBuffer(const uint8_t* mono,
+                                 int pngW, int pngH,
+                                 float depthAmpM,
+                                 float distanceM,
+                                 float quadWMeters,
+                                 std::vector<uint8_t>& outBuffer) {
+            const int swapW = 2 * pngW;
+            outBuffer.assign(static_cast<size_t>(swapW) * pngH * 4u, 0);
+
+            // Guard against pathological config (distance_m near zero
+            // or quad width near zero would blow up the formula). The
+            // parser already clamps amplitude to [0, 0.5] and FOV to
+            // [10°, 270°], so quadW > 0 and D > 0 in practice; this is
+            // belt-and-braces for live-tunable distance_m which could
+            // be set to 0 by a hand-edited settings.json.
+            if (distanceM < 0.01f || quadWMeters < 0.001f || pngW <= 0 || pngH <= 0) {
+                return;
+            }
+
+            const float D = distanceM;
+            const float invTwoQuadW = 1.0f / (2.0f * quadWMeters);
+            const float pngWf = static_cast<float>(pngW);
+
+            for (int y = 0; y < pngH; ++y) {
+                const uint8_t* srcRow = mono + (static_cast<size_t>(y) * pngW) * 4u;
+                uint8_t* dstRow = outBuffer.data() +
+                                  (static_cast<size_t>(y) * swapW) * 4u;
+
+                for (int x = 0; x < pngW; ++x) {
+                    const float u = (x + 0.5f) / pngWf;
+                    // Z floor of 1 cm: keeps the (D/Z − 1) term finite
+                    // even if a future config lets Δ exceed D − 0.01.
+                    const float Z = std::max(0.01f, D - depthAmpM * depthProfileCosine(u));
+                    const float shiftNorm = kStereoIpdMeters * invTwoQuadW * (D / Z - 1.0f);
+                    const int shift = static_cast<int>(std::lround(shiftNorm * pngWf));
+
+                    const int leftSrc =
+                        std::max(0, std::min(pngW - 1, x - shift));
+                    const int rightSrc =
+                        std::max(0, std::min(pngW - 1, x + shift));
+
+                    std::memcpy(dstRow + static_cast<size_t>(x) * 4u,
+                                srcRow + static_cast<size_t>(leftSrc) * 4u, 4);
+                    std::memcpy(dstRow + (static_cast<size_t>(pngW) + x) * 4u,
+                                srcRow + static_cast<size_t>(rightSrc) * 4u, 4);
+                }
+            }
+        }
+
         // Loads a PNG at `path` into a newly-allocated RGBA8 buffer.
         // Returns true on success, in which case caller takes ownership
         // of `*outPixels` and must eventually free it with stbi_image_free.
@@ -341,7 +429,14 @@ namespace openxr_api_layer {
             Log("HelmetOverlay: createSwapchainFromPng called with invalid PNG\n");
             return false;
         }
-        const uint32_t texW = static_cast<uint32_t>(pngWidth);
+
+        // Stereo SBS: allocate a swapchain twice as wide as the mono
+        // input. The bake step below produces a 2W × H buffer with
+        // per-eye disparity baked into each half. The composition
+        // layers (built in tryInitQuad) then read each half via a
+        // half-swapchain imageRect with EYE_VISIBILITY_LEFT / RIGHT.
+        const bool sbs = m_impl->config.stereo_sbs;
+        const uint32_t texW = static_cast<uint32_t>(sbs ? 2 * pngWidth : pngWidth);
         const uint32_t texH = static_cast<uint32_t>(pngHeight);
 
         XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -381,9 +476,33 @@ namespace openxr_api_layer {
         // Build the source pixel buffer we own and can mutate (so the
         // brightness multiplier below can run without touching
         // stb_image's internal allocation).
+        //
+        // Mono path: uploadBytes is a straight copy of pngPixels.
+        // Stereo SBS path: uploadBytes is a 2W × H buffer with the
+        // per-eye disparity baked in by bakeStereoSbsBuffer (see
+        // anonymous-namespace helper above for the math). Both paths
+        // produce a buffer matching texW × texH, so the rest of the
+        // function (brightness, staging texture, CopyResource) stays
+        // the same.
         const size_t pixelBytes = static_cast<size_t>(texW) * texH * 4u;
-        std::vector<uint8_t> uploadBytes(pixelBytes);
-        std::memcpy(uploadBytes.data(), pngPixels, pixelBytes);
+        std::vector<uint8_t> uploadBytes;
+        if (sbs) {
+            constexpr float kPi = 3.14159265358979323846f;
+            const float halfFov = m_impl->config.horizontal_fov_deg * 0.5f * kPi / 180.0f;
+            const float quadWMeters =
+                2.0f * m_impl->config.distance_m * std::tan(halfFov);
+            bakeStereoSbsBuffer(pngPixels, pngWidth, pngHeight,
+                                m_impl->config.stereo_depth_amplitude_m,
+                                m_impl->config.distance_m,
+                                quadWMeters,
+                                uploadBytes);
+            Log(fmt::format("HelmetOverlay: baked stereo SBS texture "
+                            "(amp={:.3f} m, IPD=64 mm, quadW={:.2f} m)\n",
+                            m_impl->config.stereo_depth_amplitude_m, quadWMeters));
+        } else {
+            uploadBytes.resize(pixelBytes);
+            std::memcpy(uploadBytes.data(), pngPixels, pixelBytes);
+        }
 
         // Apply brightness multiplier on RGB before upload. Alpha is
         // left untouched so the visor cutout stays transparent even at
@@ -468,31 +587,25 @@ namespace openxr_api_layer {
     // That decouples coverage (set by horizontal_fov_deg) from depth
     // feel (set by distance_m).
     //
-    // In stereo_sbs mode the PNG is laid out side-by-side (left half
-    // is the left-eye view, right half is the right-eye view); we
-    // submit two quads pointing at the same swapchain with a split
-    // imageRect and per-eye visibility. Single texture, single upload,
-    // two layer pointers per frame — see HelmetOverlay::appendLayers
-    // for the per-frame consumer side.
+    // In stereo_sbs mode the (mono) PNG was expanded into a 2W × H SBS
+    // swapchain by createSwapchainFromPng with per-eye disparity baked
+    // in. We submit two quads pointing at the same swapchain with a
+    // split imageRect and per-eye visibility. Single texture, single
+    // upload, two layer pointers per frame — see
+    // HelmetOverlay::appendLayers for the per-frame consumer side. The
+    // per-eye imageRect width is the *mono* pngWidth (the input dim);
+    // the swapchain is twice that.
     bool HelmetOverlay::tryInitQuad(int pngWidth, int pngHeight) {
         constexpr float kPi = 3.14159265358979323846f;
 
         const bool sbs = m_impl->config.stereo_sbs;
 
-        // In SBS mode the per-eye image takes half the PNG width.
-        // Validate up-front rather than risk an off-by-one imageRect.
-        if (sbs && (pngWidth % 2 != 0)) {
-            Log(fmt::format("HelmetOverlay: stereo_sbs=true but PNG width {} "
-                            "is odd; cannot split into two equal halves. "
-                            "Bypassing overlay.\n", pngWidth));
-            return false;
-        }
-        const int perEyeWidth = sbs ? (pngWidth / 2) : pngWidth;
-
-        // Aspect uses the per-eye width: in SBS mode the quad shows
-        // half the PNG, so its natural aspect doubles.
+        // Aspect ratio is per-eye: pngHeight / pngWidth in BOTH modes,
+        // because pngWidth is the mono input width and the per-eye
+        // image always has those dims (the stereo path expanded the
+        // swapchain horizontally, not the per-eye view).
         m_impl->pngAspectRatio = static_cast<float>(pngHeight) /
-                                 static_cast<float>(perEyeWidth);
+                                 static_cast<float>(pngWidth);
 
         const float halfFov = m_impl->config.horizontal_fov_deg * 0.5f * kPi / 180.0f;
         const float quadW = 2.0f * m_impl->config.distance_m * std::tan(halfFov);
@@ -511,7 +624,7 @@ namespace openxr_api_layer {
                            XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
             q.space = m_impl->viewSpace;
             q.subImage.swapchain = m_impl->swapchain;
-            q.subImage.imageRect.extent = {perEyeWidth, pngHeight};
+            q.subImage.imageRect.extent = {pngWidth, pngHeight};
             q.subImage.imageArrayIndex = 0;
             q.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
             q.pose.position = {0.0f, vOffsetY, -m_impl->config.distance_m};
@@ -525,7 +638,7 @@ namespace openxr_api_layer {
 
             fillCommon(m_impl->quadRight);
             m_impl->quadRight.eyeVisibility = XR_EYE_VISIBILITY_RIGHT;
-            m_impl->quadRight.subImage.imageRect.offset = {perEyeWidth, 0};
+            m_impl->quadRight.subImage.imageRect.offset = {pngWidth, 0};
 
             m_impl->numQuads = 2;
         } else {

@@ -115,7 +115,8 @@ namespace openxr_api_layer {
             << "    \"brightness\": 0.25,\n"
             << "    \"horizontal_fov_deg\": 120,\n"
             << "    \"vertical_offset_deg\": -10,\n"
-            << "    \"stereo_sbs\": false\n"
+            << "    \"stereo_sbs\": false,\n"
+            << "    \"stereo_depth_amplitude_m\": 0.05\n"
             << "  }\n"
             << "}\n";
         return out.good();

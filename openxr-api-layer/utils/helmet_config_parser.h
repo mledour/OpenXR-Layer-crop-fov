@@ -47,8 +47,9 @@ namespace openxr_api_layer {
     //   distance_m           = 0.5
     //   horizontal_fov_deg   = 130   (clamped to [10, 270])
     //   vertical_offset_deg  = 0     (clamped to [-30, +30])
-    //   brightness           = 1.0   (clamped to [0, 1])
-    //   stereo_sbs           = false
+    //   brightness                  = 1.0   (clamped to [0, 1])
+    //   stereo_sbs                  = false
+    //   stereo_depth_amplitude_m    = 0.05  (clamped to [0, 0.5])
     //
     // Robustness contract:
     //   - Empty / malformed JSON → all defaults.
@@ -84,6 +85,13 @@ namespace openxr_api_layer {
         hc.enabled = readBool("enabled", false);
         hc.stereo_sbs = readBool("stereo_sbs", false);
         hc.distance_m = readFloat("distance_m", 0.5f);
+
+        // Clamp depth amplitude to [0, 0.5] m. Negative makes no
+        // physical sense (would push edges further than the screen);
+        // above 0.5 m starts producing extreme disparities that the
+        // user won't fuse stereoscopically anyway.
+        hc.stereo_depth_amplitude_m = std::max(0.0f, std::min(0.5f,
+            readFloat("stereo_depth_amplitude_m", 0.05f)));
 
         // Clamp the angular FOV to a sane range. Below ~10° the quad
         // is a thin vertical strip; above ~270° tan() blows up and

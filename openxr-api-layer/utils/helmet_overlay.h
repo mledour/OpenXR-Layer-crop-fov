@@ -92,21 +92,38 @@ namespace openxr_api_layer {
         // re-apply (no live-edit yet).
         float brightness = 1.0f;
 
-        // When true, the PNG is interpreted as side-by-side stereo: the
-        // left half feeds XR_EYE_VISIBILITY_LEFT and the right half feeds
-        // XR_EYE_VISIBILITY_RIGHT. The layer submits two
-        // XrCompositionLayerQuad with split subImage.imageRect into the
-        // same swapchain — single texture, single upload, just two layer
-        // pointers per frame. Use this with a PNG produced by
-        // tools/cylinder_warp.py in stereo mode (left|right packed) to
-        // get binocular depth on the helmet.
-        // Requires PNG width to be even; bypasses the overlay otherwise.
-        // The quad's physical width in meters is unchanged (driven by
-        // horizontal_fov_deg and distance_m); the aspect ratio used for
-        // the quad's height is recomputed from the per-eye PNG (half-
-        // width, full height) so the image is never stretched.
+        // When true, the layer generates a side-by-side stereo image
+        // from the (mono) PNG at session init: each output column is
+        // sampled from the source with a horizontal disparity offset
+        // computed from a cosine depth profile (edges closer to the eye
+        // than the center, like a real visor wrapping around the face),
+        // the IPD, and stereo_depth_amplitude_m below. The two halves
+        // are uploaded to a single 2×W × H swapchain; the layer then
+        // submits two XrCompositionLayerQuad pointing at it via split
+        // subImage.imageRect with EYE_VISIBILITY_LEFT / EYE_VISIBILITY_RIGHT.
+        // Single texture, single upload, two layer pointers per frame.
+        //
+        // The user's PNG stays mono — no external tool required. The
+        // quad's physical width (driven by horizontal_fov_deg and
+        // distance_m) and aspect (driven by the mono PNG aspect) are
+        // both unchanged from mono mode; only the swapchain is wider.
+        //
         // Set at session start; needs a session restart to toggle.
         bool stereo_sbs = false;
+
+        // Depth amplitude for the cosine profile, in meters. The visor
+        // edges are simulated as Δ closer to the eye than the center:
+        //   Z(u) = distance_m − stereo_depth_amplitude_m · sin²(π(u−0.5))
+        // Disparity scales with (Z − D)/Z, so the perceived depth grows
+        // with this value and shrinks with distance_m.
+        // Effect rule of thumb: at distance_m=0.15, ~3 cm gives a soft
+        // wrap; ~10 cm pushes the edges noticeably toward the face.
+        // At distance_m=0.5, you typically need 10–20 cm to get a
+        // perceptible effect. Set at init; not live-tunable (would
+        // require destroying and recreating the static-image swapchain).
+        // Clamped to [0, 0.5] m by the parser. Ignored when stereo_sbs
+        // is false.
+        float stereo_depth_amplitude_m = 0.05f;
     };
 
     // Opaque backend — hides D3D types from every TU that only needs to
