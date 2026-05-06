@@ -68,8 +68,10 @@ param(
     # runners with a non-default install layout.
     [string] $SimplySignExe = 'C:\Program Files\Certum\SimplySign Desktop\SimplySignDesktop.exe',
 
-    # signtool.exe — present on PATH on the GitHub Actions windows-2022
-    # image via the Windows SDK. Override only if needed.
+    # signtool.exe. The Windows SDK ships it but does NOT add it to PATH
+    # by default on the GitHub Actions windows-2022 image, so we resolve
+    # it by searching the SDK install paths if the default isn't on PATH.
+    # Override to skip the search if you know the exact path.
     [string] $SignToolExe = 'signtool.exe',
 
     # Description embedded in the signature ("More info" line in the UAC
@@ -125,6 +127,48 @@ function Stop-SimplySignDesktop {
             # Already dead — fine.
         }
     }
+}
+
+# Resolve signtool.exe to a usable absolute path. Tries (in order):
+#   1. The -SignToolExe parameter as-given (might be a full path or
+#      something already on PATH).
+#   2. Get-Command — picks it up from PATH if any caller added it.
+#   3. The Windows SDK install tree under
+#      `C:\Program Files (x86)\Windows Kits\10\bin\<sdk-ver>\x64\`,
+#      preferring the highest SDK version available.
+# Throws if none of these work, with the search paths shown.
+function Resolve-SignTool {
+    param([string] $Hint)
+
+    if ([System.IO.Path]::IsPathRooted($Hint) -and (Test-Path $Hint)) {
+        return (Resolve-Path $Hint).Path
+    }
+    $cmd = Get-Command $Hint -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    # Search the SDK. Pattern matches multiple SDK versions installed
+    # side-by-side (10.0.19041.0, 10.0.22621.0, etc.) and picks the
+    # latest by lexicographic sort of the version segment, which is
+    # equivalent to numeric for SDK versions.
+    $sdkRoots = @(
+        'C:\Program Files (x86)\Windows Kits\10\bin',
+        'C:\Program Files\Windows Kits\10\bin'
+    )
+    $candidates = foreach ($root in $sdkRoots) {
+        if (Test-Path $root) {
+            Get-ChildItem -Path $root -Filter 'signtool.exe' -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' }
+        }
+    }
+    $best = $candidates |
+        Sort-Object @{Expression = {
+            # Pull the version from the path so x64 + version sort numeric-ish.
+            if ($_.FullName -match '\\bin\\(\d+(?:\.\d+){2,3})\\') { $matches[1] } else { '0' }
+        }} -Descending |
+        Select-Object -First 1
+    if ($best) { return $best.FullName }
+
+    throw "Could not find signtool.exe. Looked in: PATH, '$Hint', $($sdkRoots -join '; '). Install the Windows 10 SDK or pass -SignToolExe with the full path."
 }
 
 # Try a single /autologin attempt with a specific TOTP value. Returns
@@ -250,11 +294,16 @@ foreach ($p in $Path) {
     $files += $resolved
 }
 
+# Resolve once so the per-file loop doesn't pay the cost N times, and
+# so a missing-signtool error fires before we waste a TOTP window.
+$resolvedSignTool = Resolve-SignTool -Hint $SignToolExe
+Write-Host "Using signtool at: $resolvedSignTool"
+
 # signtool invocation matches the Certum manual prescription verbatim.
 try {
     foreach ($f in $files) {
         Write-Host "Signing $($f.FullName) ..."
-        & $SignToolExe sign `
+        & $resolvedSignTool sign `
             /sha1 $thumbprint `
             /tr   'http://time.certum.pl' `
             /td   sha256 `
@@ -268,7 +317,7 @@ try {
 
         # /pa = use the default "any" policy. Without it, signtool verify
         # defaults to driver-signing rules and rejects user-mode DLLs.
-        & $SignToolExe verify /pa /v $f.FullName
+        & $resolvedSignTool verify /pa /v $f.FullName
         if ($LASTEXITCODE -ne 0) {
             throw "signtool verify failed for $($f.FullName) (exit $LASTEXITCODE)."
         }
