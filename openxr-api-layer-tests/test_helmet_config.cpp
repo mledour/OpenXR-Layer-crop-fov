@@ -39,6 +39,7 @@ TEST_CASE("parseHelmetConfig: empty JSON object returns disabled defaults") {
     CHECK(hc.horizontal_fov_deg == doctest::Approx(130.0f));
     CHECK(hc.vertical_offset_deg == doctest::Approx(0.0f));
     CHECK(hc.brightness == doctest::Approx(1.0f));
+    CHECK(hc.stereo_sbs == false);
 }
 
 TEST_CASE("parseHelmetConfig: missing helmet_overlay block returns defaults") {
@@ -67,7 +68,8 @@ TEST_CASE("parseHelmetConfig: full config is parsed verbatim within clamps") {
             "distance_m": 0.30,
             "horizontal_fov_deg": 160,
             "vertical_offset_deg": 5.0,
-            "brightness": 0.5
+            "brightness": 0.5,
+            "stereo_sbs": true
         }
     })");
     CHECK(hc.enabled == true);
@@ -76,6 +78,27 @@ TEST_CASE("parseHelmetConfig: full config is parsed verbatim within clamps") {
     CHECK(hc.horizontal_fov_deg == doctest::Approx(160.0f));
     CHECK(hc.vertical_offset_deg == doctest::Approx(5.0f));
     CHECK(hc.brightness == doctest::Approx(0.5f));
+    CHECK(hc.stereo_sbs == true);
+}
+
+TEST_CASE("parseHelmetConfig: stereo_sbs defaults to false when omitted") {
+    const auto hc = parseHelmetConfig(R"({
+        "helmet_overlay": {
+            "enabled": true
+        }
+    })");
+    CHECK(hc.stereo_sbs == false);
+}
+
+TEST_CASE("parseHelmetConfig: stereo_sbs wrong type falls back to default") {
+    // String, integer, and array should all fall back to false rather
+    // than poison the rest of the config.
+    CHECK(parseHelmetConfig(R"({"helmet_overlay": {"stereo_sbs": "yes"}})")
+              .stereo_sbs == false);
+    CHECK(parseHelmetConfig(R"({"helmet_overlay": {"stereo_sbs": 1}})")
+              .stereo_sbs == false);
+    CHECK(parseHelmetConfig(R"({"helmet_overlay": {"stereo_sbs": [true]}})")
+              .stereo_sbs == false);
 }
 
 TEST_CASE("parseHelmetConfig: integer values for float fields are accepted") {

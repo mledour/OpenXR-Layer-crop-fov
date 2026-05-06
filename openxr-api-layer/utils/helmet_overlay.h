@@ -91,6 +91,22 @@ namespace openxr_api_layer {
         // Applied once at session start; needs a session restart to
         // re-apply (no live-edit yet).
         float brightness = 1.0f;
+
+        // When true, the PNG is interpreted as side-by-side stereo: the
+        // left half feeds XR_EYE_VISIBILITY_LEFT and the right half feeds
+        // XR_EYE_VISIBILITY_RIGHT. The layer submits two
+        // XrCompositionLayerQuad with split subImage.imageRect into the
+        // same swapchain — single texture, single upload, just two layer
+        // pointers per frame. Use this with a PNG produced by
+        // tools/cylinder_warp.py in stereo mode (left|right packed) to
+        // get binocular depth on the helmet.
+        // Requires PNG width to be even; bypasses the overlay otherwise.
+        // The quad's physical width in meters is unchanged (driven by
+        // horizontal_fov_deg and distance_m); the aspect ratio used for
+        // the quad's height is recomputed from the per-eye PNG (half-
+        // width, full height) so the image is never stretched.
+        // Set at session start; needs a session restart to toggle.
+        bool stereo_sbs = false;
     };
 
     // Opaque backend — hides D3D types from every TU that only needs to
@@ -113,7 +129,7 @@ namespace openxr_api_layer {
         // (config.imageRelativePath) is resolved against — typically
         // %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets so users
         // can drop PNGs without admin elevation. Returns true if the
-        // overlay is armed and will contribute a layer in appendLayer();
+        // overlay is armed and will contribute layer(s) in appendLayers();
         // false means "silently degrade to bypass" per best-practices.
         bool initialize(OpenXrApi* api,
                         XrSession session,
@@ -125,14 +141,19 @@ namespace openxr_api_layer {
         // invalid. Always safe to call, even if initialize() returned false.
         void shutdown();
 
-        // Called from xrEndFrame. If the overlay is armed, renders the
-        // visor into its swapchain and writes a pointer to a
-        // XrCompositionLayerQuad (owned by *this*, stable until the next
-        // appendLayer() call) into *outLayer. Returns false if the overlay
-        // is not armed or could not produce a layer this frame, in which
-        // case *outLayer is left untouched.
-        bool appendLayer(XrTime displayTime,
-                         const XrCompositionLayerBaseHeader** outLayer);
+        // Maximum number of composition layers appendLayers() can emit.
+        // 1 in mono mode, 2 in stereo SBS mode (one quad per eye).
+        static constexpr size_t kMaxLayers = 2;
+
+        // Called from xrEndFrame. If the overlay is armed, writes up to
+        // kMaxLayers pointers into outLayers[] (each pointing at an
+        // XrCompositionLayerQuad owned by *this*, stable until the next
+        // appendLayers() call) and returns the number written. Returns
+        // 0 if the overlay is not armed or could not produce layers
+        // this frame, in which case outLayers is left untouched.
+        // Caller must provide an array of at least kMaxLayers slots.
+        size_t appendLayers(XrTime displayTime,
+                            const XrCompositionLayerBaseHeader** outLayers);
 
         // Apply a live-edit reload of settings.json. Only fields safe
         // to change without rebuilding swapchain/textures are honoured:

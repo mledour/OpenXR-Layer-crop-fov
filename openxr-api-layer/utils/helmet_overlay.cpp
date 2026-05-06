@@ -54,9 +54,9 @@
 // — content is uploaded once at session start (acquire / wait /
 // CopyResource(staging→swapchain) / release, then we drop the
 // staging texture). The runtime composites that single image every
-// frame on its own; appendLayer() just hands back the cached layer
-// pointer with no per-frame texture work, which is the entire point
-// of the static-image flag.
+// frame on its own; appendLayers() just hands back the cached layer
+// pointer(s) with no per-frame texture work, which is the entire
+// point of the static-image flag.
 //
 // Earlier revisions tried a XrCompositionLayerCylinderKHR backend
 // for natural edge curvature, but neither runtime we test
@@ -144,15 +144,26 @@ namespace openxr_api_layer {
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
 
-        // Composition layer kept stable between appendLayer() calls so
-        // the pointer we hand back to layer.cpp remains valid through
+        // Composition layer(s) kept stable between appendLayers() calls
+        // so the pointers we hand back to layer.cpp remain valid through
         // xrEndFrame.
-        XrCompositionLayerQuad quadLayer{};
+        //
+        // Mono mode: only quadLeft is used, with EYE_VISIBILITY_BOTH and
+        // the full PNG as imageRect. numQuads = 1.
+        //
+        // Stereo SBS mode: both quads point at the same swapchain but
+        // with split imageRect (left half / right half), each restricted
+        // to its eye via eyeVisibility. numQuads = 2.
+        XrCompositionLayerQuad quadLeft{};
+        XrCompositionLayerQuad quadRight{};
+        size_t numQuads = 0;
 
-        // PNG aspect ratio captured at init so live-edit can recompute
-        // the quad height when the user changes horizontal_fov_deg or
-        // distance_m, without re-decoding the PNG.
-        float pngAspectRatio = 1.0f;  // height / width
+        // Per-eye PNG aspect ratio captured at init so live-edit can
+        // recompute the quad height when the user changes
+        // horizontal_fov_deg or distance_m, without re-decoding the PNG.
+        // In mono mode this is pngHeight / pngWidth; in stereo SBS mode
+        // it's pngHeight / (pngWidth/2) since the quad shows one half.
+        float pngAspectRatio = 1.0f;  // height / per-eye-width
 
         // DXGI format selected at init, used for both the (transient)
         // staging texture and the XR swapchain. SRGB when the runtime
@@ -298,10 +309,14 @@ namespace openxr_api_layer {
         }
 
         m_impl->mode = HelmetOverlayMode::Quad;
-        Log(fmt::format("HelmetOverlay: armed. distance={:.2f}m, size={:.2f}x{:.2f}m\n",
+        Log(fmt::format("HelmetOverlay: armed. distance={:.2f}m, size={:.2f}x{:.2f}m, "
+                        "stereo_sbs={} ({} quad{})\n",
                         config.distance_m,
-                        m_impl->quadLayer.size.width,
-                        m_impl->quadLayer.size.height));
+                        m_impl->quadLeft.size.width,
+                        m_impl->quadLeft.size.height,
+                        config.stereo_sbs ? "true" : "false",
+                        m_impl->numQuads,
+                        m_impl->numQuads == 1 ? "" : "s"));
         return true;
     }
 
@@ -320,7 +335,7 @@ namespace openxr_api_layer {
     // so the per-frame hot path drops the acquire/wait/copy/release
     // dance entirely. Both staging and the swapchain image pointer
     // are released at the end of the function; only the XrSwapchain
-    // handle survives, used by m_impl->quadLayer.subImage.swapchain.
+    // handle survives, shared by both per-eye quads' subImage.swapchain.
     bool HelmetOverlay::createSwapchainFromPng(const uint8_t* pngPixels, int pngWidth, int pngHeight) {
         if (!pngPixels || pngWidth <= 0 || pngHeight <= 0) {
             Log("HelmetOverlay: createSwapchainFromPng called with invalid PNG\n");
@@ -440,11 +455,10 @@ namespace openxr_api_layer {
         // staging goes out of scope here → ComPtr releases the GPU
         // texture. We never need it again because the runtime now
         // owns the only copy we care about (the static swapchain image).
-
-        // PNG aspect ratio recorded so live-edit can recompute the
-        // quad dimensions when the user changes horizontal_fov_deg
-        // or distance_m.
-        m_impl->pngAspectRatio = static_cast<float>(pngHeight) / static_cast<float>(pngWidth);
+        //
+        // pngAspectRatio is set in tryInitQuad() because it depends on
+        // whether the PNG is interpreted as mono or as side-by-side
+        // stereo (per-eye width = full vs half).
         return true;
     }
 
@@ -453,49 +467,94 @@ namespace openxr_api_layer {
     // wants and the distance: quadW = 2 * distance_m * tan(fov/2).
     // That decouples coverage (set by horizontal_fov_deg) from depth
     // feel (set by distance_m).
+    //
+    // In stereo_sbs mode the PNG is laid out side-by-side (left half
+    // is the left-eye view, right half is the right-eye view); we
+    // submit two quads pointing at the same swapchain with a split
+    // imageRect and per-eye visibility. Single texture, single upload,
+    // two layer pointers per frame — see HelmetOverlay::appendLayers
+    // for the per-frame consumer side.
     bool HelmetOverlay::tryInitQuad(int pngWidth, int pngHeight) {
         constexpr float kPi = 3.14159265358979323846f;
+
+        const bool sbs = m_impl->config.stereo_sbs;
+
+        // In SBS mode the per-eye image takes half the PNG width.
+        // Validate up-front rather than risk an off-by-one imageRect.
+        if (sbs && (pngWidth % 2 != 0)) {
+            Log(fmt::format("HelmetOverlay: stereo_sbs=true but PNG width {} "
+                            "is odd; cannot split into two equal halves. "
+                            "Bypassing overlay.\n", pngWidth));
+            return false;
+        }
+        const int perEyeWidth = sbs ? (pngWidth / 2) : pngWidth;
+
+        // Aspect uses the per-eye width: in SBS mode the quad shows
+        // half the PNG, so its natural aspect doubles.
+        m_impl->pngAspectRatio = static_cast<float>(pngHeight) /
+                                 static_cast<float>(perEyeWidth);
+
         const float halfFov = m_impl->config.horizontal_fov_deg * 0.5f * kPi / 180.0f;
         const float quadW = 2.0f * m_impl->config.distance_m * std::tan(halfFov);
         const float quadH = quadW * m_impl->pngAspectRatio;
-
-        m_impl->quadLayer.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
-        m_impl->quadLayer.next = nullptr;
-        m_impl->quadLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
-                                       XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
-        m_impl->quadLayer.space = m_impl->viewSpace;
-        m_impl->quadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-        m_impl->quadLayer.subImage.swapchain = m_impl->swapchain;
-        m_impl->quadLayer.subImage.imageRect.offset = {0, 0};
-        m_impl->quadLayer.subImage.imageRect.extent = {pngWidth, pngHeight};
-        m_impl->quadLayer.subImage.imageArrayIndex = 0;
         const float vOffsetY =
             m_impl->config.distance_m *
             std::tan(m_impl->config.vertical_offset_deg * kPi / 180.0f);
 
-        m_impl->quadLayer.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
-        m_impl->quadLayer.pose.position = {0.0f,
-                                           vOffsetY,
-                                           -m_impl->config.distance_m};
-        m_impl->quadLayer.size = {quadW, quadH};
+        // Shared layer fields. Both quads in SBS mode use the same pose,
+        // same size, same swapchain, same blend flags — only
+        // eyeVisibility and imageRect.offset differ.
+        const auto fillCommon = [&](XrCompositionLayerQuad& q) {
+            q.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+            q.next = nullptr;
+            q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+                           XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            q.space = m_impl->viewSpace;
+            q.subImage.swapchain = m_impl->swapchain;
+            q.subImage.imageRect.extent = {perEyeWidth, pngHeight};
+            q.subImage.imageArrayIndex = 0;
+            q.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+            q.pose.position = {0.0f, vOffsetY, -m_impl->config.distance_m};
+            q.size = {quadW, quadH};
+        };
+
+        fillCommon(m_impl->quadLeft);
+        if (sbs) {
+            m_impl->quadLeft.eyeVisibility = XR_EYE_VISIBILITY_LEFT;
+            m_impl->quadLeft.subImage.imageRect.offset = {0, 0};
+
+            fillCommon(m_impl->quadRight);
+            m_impl->quadRight.eyeVisibility = XR_EYE_VISIBILITY_RIGHT;
+            m_impl->quadRight.subImage.imageRect.offset = {perEyeWidth, 0};
+
+            m_impl->numQuads = 2;
+        } else {
+            m_impl->quadLeft.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            m_impl->quadLeft.subImage.imageRect.offset = {0, 0};
+            m_impl->numQuads = 1;
+        }
 
         return true;
     }
 
     // --- Per-frame entry point. -----------------------------------------
 
-    bool HelmetOverlay::appendLayer(XrTime /*displayTime*/,
-                                    const XrCompositionLayerBaseHeader** outLayer) {
-        if (!m_impl || !outLayer) return false;
-        if (m_impl->mode == HelmetOverlayMode::Disabled) return false;
-        if (m_impl->swapchain == XR_NULL_HANDLE) return false;
+    size_t HelmetOverlay::appendLayers(XrTime /*displayTime*/,
+                                       const XrCompositionLayerBaseHeader** outLayers) {
+        if (!m_impl || !outLayers) return 0;
+        if (m_impl->mode == HelmetOverlayMode::Disabled) return 0;
+        if (m_impl->swapchain == XR_NULL_HANDLE) return 0;
+        if (m_impl->numQuads == 0) return 0;
 
         // The static-image swapchain was filled once at init (see
         // createSwapchainFromPng). The runtime composites that single
         // image every frame on its own — we just hand back the layer
-        // pointer. No acquire / wait / release / CopyResource here.
-        *outLayer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&m_impl->quadLayer);
-        return true;
+        // pointers. No acquire / wait / release / CopyResource here.
+        outLayers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&m_impl->quadLeft);
+        if (m_impl->numQuads >= 2) {
+            outLayers[1] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&m_impl->quadRight);
+        }
+        return m_impl->numQuads;
     }
 
     void HelmetOverlay::updateLiveTunables(const HelmetOverlayConfig& newConfig) {
@@ -521,10 +580,19 @@ namespace openxr_api_layer {
         const float quadH = quadW * m_impl->pngAspectRatio;
         const float vOffsetY = newConfig.distance_m *
                                std::tan(newConfig.vertical_offset_deg * kPi / 180.0f);
-        m_impl->quadLayer.pose.position = {0.0f,
-                                           vOffsetY,
-                                           -newConfig.distance_m};
-        m_impl->quadLayer.size = {quadW, quadH};
+
+        // In SBS mode both quads share pose & size — only eyeVisibility
+        // and imageRect.offset differ between them, and those are not
+        // live-tunable.
+        const XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f},
+                           {0.0f, vOffsetY, -newConfig.distance_m}};
+        const XrExtent2Df size{quadW, quadH};
+        m_impl->quadLeft.pose = pose;
+        m_impl->quadLeft.size = size;
+        if (m_impl->numQuads >= 2) {
+            m_impl->quadRight.pose = pose;
+            m_impl->quadRight.size = size;
+        }
 
         Log(fmt::format("HelmetOverlay: live-tuned distance={:.2f}m, fov={:.0f}°, "
                         "v_offset={:+.1f}°, size={:.2f}x{:.2f}m\n",

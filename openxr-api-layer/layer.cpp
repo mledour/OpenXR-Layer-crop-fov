@@ -114,7 +114,8 @@ namespace openxr_api_layer {
             << "    \"distance_m\": 0.15,\n"
             << "    \"brightness\": 0.25,\n"
             << "    \"horizontal_fov_deg\": 120,\n"
-            << "    \"vertical_offset_deg\": -10\n"
+            << "    \"vertical_offset_deg\": -10,\n"
+            << "    \"stereo_sbs\": false\n"
             << "  }\n"
             << "}\n";
         return out.good();
@@ -516,11 +517,13 @@ namespace openxr_api_layer {
                 return XR_ERROR_VALIDATION_FAILURE;
             }
 
-            const XrCompositionLayerBaseHeader* helmetLayer = nullptr;
-            const bool haveHelmet =
-                !m_bypassApiLayer && m_helmetOverlay.isArmed() &&
-                m_helmetOverlay.appendLayer(frameEndInfo->displayTime, &helmetLayer) &&
-                helmetLayer != nullptr;
+            const XrCompositionLayerBaseHeader* helmetLayers[
+                openxr_api_layer::HelmetOverlay::kMaxLayers] = {nullptr, nullptr};
+            const size_t numHelmetLayers =
+                (!m_bypassApiLayer && m_helmetOverlay.isArmed())
+                    ? m_helmetOverlay.appendLayers(frameEndInfo->displayTime, helmetLayers)
+                    : 0;
+            const bool haveHelmet = numHelmetLayers > 0;
 
             // Detect upstream-corrupt layers that would otherwise force the
             // runtime to fail the WHOLE submission with
@@ -559,9 +562,14 @@ namespace openxr_api_layer {
             // Slow path: copy the app's layer pointers into our own array,
             // drop the invalid ones, append the helmet if armed. OpenXR
             // composition is back-to-front, so the helmet last puts it in
-            // front of everything the game submitted.
+            // front of everything the game submitted. In stereo SBS mode
+            // appendLayers() returns two pointers (one quad per eye); we
+            // push them in order so the right eye is composited last,
+            // which is irrelevant for visibility (each quad is restricted
+            // to a single eye via eyeVisibility) but keeps a deterministic
+            // order in trace logs.
             std::vector<const XrCompositionLayerBaseHeader*> patched;
-            patched.reserve(frameEndInfo->layerCount + 1u);
+            patched.reserve(frameEndInfo->layerCount + numHelmetLayers);
             for (uint32_t i = 0; i < frameEndInfo->layerCount; ++i) {
                 const auto* layer = frameEndInfo->layers ? frameEndInfo->layers[i] : nullptr;
                 if (isQuadRectInvalid(layer)) {
@@ -582,7 +590,9 @@ namespace openxr_api_layer {
                 }
                 patched.push_back(layer);
             }
-            if (haveHelmet) patched.push_back(helmetLayer);
+            for (size_t i = 0; i < numHelmetLayers; ++i) {
+                patched.push_back(helmetLayers[i]);
+            }
 
             XrFrameEndInfo patchedInfo = *frameEndInfo;
             patchedInfo.layerCount = static_cast<uint32_t>(patched.size());

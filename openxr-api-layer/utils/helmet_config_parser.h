@@ -48,6 +48,7 @@ namespace openxr_api_layer {
     //   horizontal_fov_deg   = 130   (clamped to [10, 270])
     //   vertical_offset_deg  = 0     (clamped to [-30, +30])
     //   brightness           = 1.0   (clamped to [0, 1])
+    //   stereo_sbs           = false
     //
     // Robustness contract:
     //   - Empty / malformed JSON → all defaults.
@@ -81,6 +82,7 @@ namespace openxr_api_layer {
         };
 
         hc.enabled = readBool("enabled", false);
+        hc.stereo_sbs = readBool("stereo_sbs", false);
         hc.distance_m = readFloat("distance_m", 0.5f);
 
         // Clamp the angular FOV to a sane range. Below ~10° the quad
