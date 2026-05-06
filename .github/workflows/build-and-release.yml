@@ -19,6 +19,11 @@ permissions:
 env:
   SOLUTION: XR_APILAYER_MLEDOUR_fov_crop.sln
   LAYER_NAME: XR_APILAYER_MLEDOUR_fov_crop
+  # Hoisted to workflow level so the cache key (Restore step) and the
+  # download step (Install step) reference the same version. Bumping
+  # this triggers a fresh download because the cache key changes —
+  # exactly the behavior we want for Certum MSI updates.
+  SIMPLYSIGN_VERSION: '9.4.3.90'
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -135,18 +140,37 @@ jobs:
       # layout would silently break our SendKeys-based login (see
       # Sign-Artifact.ps1). Bumping is a deliberate act — re-test SendKeys
       # against the new version locally first.
+      # Cache the MSI bytes by version. The MSI is ~50-100 MB and Certum's
+      # CDN sometimes throttles, so saving the download (~30 s typical)
+      # is the bulk of what's cacheable here. We do NOT cache the
+      # installed Program Files tree: the install registers components
+      # the cert-store bridge depends on, and copying the directory back
+      # without re-running msiexec would skip that registration.
+      #
+      # Cache key includes SIMPLYSIGN_VERSION so a Certum bump
+      # automatically invalidates the cache.
+      - name: Restore cached SimplySign Desktop MSI
+        if: steps.signing.outputs.should_sign == 'true'
+        id: cache-simplysign-msi
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/SimplySignDesktop.msi
+          key: simplysign-msi-${{ env.SIMPLYSIGN_VERSION }}
+
       - name: Install SimplySign Desktop
         if: steps.signing.outputs.should_sign == 'true'
         shell: pwsh
-        env:
-          SIMPLYSIGN_VERSION: '9.4.3.90'
         run: |
-          $url = "https://files.certum.eu/software/SimplySignDesktop/Windows/$env:SIMPLYSIGN_VERSION/SimplySignDesktop-$env:SIMPLYSIGN_VERSION-64-bit-en.msi"
           $msi = "$env:RUNNER_TEMP\SimplySignDesktop.msi"
-          Write-Host "Downloading $url"
-          Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
-          if (-not (Test-Path $msi) -or (Get-Item $msi).Length -lt 1MB) {
-            throw "MSI download looks invalid: $msi"
+          if ((Test-Path $msi) -and (Get-Item $msi).Length -ge 1MB) {
+            Write-Host ("Using cached MSI: {0} ({1:N0} bytes)" -f $msi, (Get-Item $msi).Length)
+          } else {
+            $url = "https://files.certum.eu/software/SimplySignDesktop/Windows/$env:SIMPLYSIGN_VERSION/SimplySignDesktop-$env:SIMPLYSIGN_VERSION-64-bit-en.msi"
+            Write-Host "Downloading $url"
+            Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
+            if (-not (Test-Path $msi) -or (Get-Item $msi).Length -lt 1MB) {
+              throw "MSI download looks invalid: $msi"
+            }
           }
           Write-Host "Installing silently ..."
           $p = Start-Process -FilePath msiexec.exe `
