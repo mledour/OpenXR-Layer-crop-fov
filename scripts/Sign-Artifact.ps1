@@ -1,63 +1,60 @@
 # Sign-Artifact.ps1
 #
 # Code-signs a Windows binary (DLL or EXE) using a Certum SimplySign Cloud
-# certificate, automatically, from CI.
+# certificate, headlessly, from CI.
 #
-# Why this script is the way it is
-# --------------------------------
-# Certum SimplySign Desktop has NO documented headless CLI. There is no
-#   `SimplySignDesktop.exe /login /username X /otp Y`
-# despite what the Certum manual's "automatic login" section suggests at
-# first read — that section is about persisting credentials across GUI
-# sessions, not feeding them via flags. We confirmed this by:
-#   - Reading the official manual (CS-Code_Signing_in_the_Cloud_*.pdf).
-#   - Searching the wider community of CI/CD users; everyone who
-#     automates Certum cloud signing either drives the GUI via SendKeys
-#     (devas.life) or runs SimplySign Desktop in Xvnc + p11-kit
-#     (hpvb/certum-container).
+# How this works
+# --------------
+# SimplySignDesktop.exe ships an undocumented headless login mode:
 #
-# So this script drives the GUI. The flow:
-#   1. Generate a fresh TOTP from the shared seed (Get-CertumTotp.ps1,
-#      HMAC-SHA256 — Certum's otpauth URI says algorithm=SHA256).
-#   2. Launch SimplySignDesktop.exe (no flags — it shows its login form).
-#   3. Use the WScript.Shell COM object to focus the login window.
-#   4. SendKeys: clear-username, type-username, Tab, type-OTP, Enter.
-#   5. Poll Cert:\CurrentUser\My until the cert appears (proves the
-#      cloud HSM session is live and bridged to the Windows store).
-#   6. Run signtool with /sha1 thumbprint — same invocation the Certum
-#      manual prescribes for the manual flow. Then signtool verify /pa.
+#     SimplySignDesktop.exe /autologin <username> <totp>
 #
-# Brittleness budget
-# ------------------
-# SendKeys is fragile by nature. If a Certum update changes the login
-# window's title, tab order, or layout, this script silently sends keys
-# to the wrong field. Mitigations baked in:
-#   - Window-title match: `AppActivate('SimplySign Desktop')` — Certum
-#     hasn't changed this title in years (devas.life uses it; the manual
-#     uses it).
-#   - Field clear (`^a{DEL}`) before typing username, in case the
-#     installer pre-populated something.
-#   - Final cert-store poll. If SendKeys missed, the cert never
-#     appears, and we fail fast with a clear message instead of
-#     "succeeding" with an unsigned binary.
-# When SimplySign Desktop ships an update we don't trust, pin
-# SIMPLYSIGN_VERSION in the workflow first, retest locally, then bump.
+# Discovered via ILSpy by an anonymous commenter on
+# https://www.devas.life/how-to-automate-signing-your-windows-app-with-certum/.
+# Certum does not document this flag anywhere, but it's been verified to
+# work on non-interactive Windows agents — exactly the GitHub Actions
+# runner environment, where the Session-1 desktop exists but no human
+# is around to click on a tray icon.
+#
+# After /autologin succeeds, SimplySignDesktop runs as a background
+# process (no UI, no tray icon) acting as the bridge between Certum's
+# cloud HSM and the Windows certificate store. Once the cert appears in
+# CurrentUser\My, signtool.exe with /sha1 <thumbprint> can sign as
+# normal.
+#
+# The flow:
+#   1. Stop any leftover SimplySignDesktop.exe (graceful /close, then
+#      kill if needed). A stale session blocks the new /autologin.
+#   2. For each TOTP drift offset in [0, -1, +1] (current 30s window,
+#      then previous, then next): generate that OTP and run /autologin.
+#      A successful login leaves the process running; a failed login
+#      makes it exit within ~3 s. We detect that and try the next
+#      offset. This handles ±30 s clock drift between the runner and
+#      Certum's TOTP server without sacrificing security (each window
+#      is still 30 s wide, the only widening is in WHICH window we try).
+#   3. Poll Cert:\CurrentUser\My for the configured thumbprint to
+#      confirm the cloud HSM session is live and the cert is bridged.
+#   4. signtool sign /sha1 /tr http://time.certum.pl /td sha256
+#      /fd sha256 + signtool verify /pa for each input file.
+#   5. Graceful /close to leave the runner clean.
 #
 # Required GitHub Secrets (mapped into env vars by the workflow):
 #   CERTUM_USERNAME         — SimplySign portal email
-#   CERTUM_TOTP_SEED        — Base32 seed from "Show secret key"
+#   CERTUM_TOTP_SEED        — Base32 seed from "Show secret key" (the
+#                             same string in the otpauth:// URI's
+#                             secret= parameter)
 #   CERTUM_CERT_THUMBPRINT  — 40-hex-char SHA-1 of the issued certificate
 #                             (no spaces). Find it once with:
 #                               Get-ChildItem Cert:\CurrentUser\My |
 #                                   Where-Object Subject -Match 'Le ?[Dd]our' |
 #                                   Format-List Thumbprint, Subject
 #
-# Certum SimplySign uses 2FA where the TOTP IS the second factor — there
-# is no separate static password to provide alongside the username.
+# Certum SimplySign uses 2FA where the TOTP IS the second factor — no
+# separate static password is required.
 #
-# This script intentionally does NOT echo any of those into logs. The OTP
-# is the only short-lived secret in flight; it expires within 30 s of
-# generation, so even a logged copy is moot quickly.
+# This script intentionally does NOT echo credentials into logs. The OTP
+# is short-lived (30 s window); the username is in the secret store; the
+# thumbprint is technically public anyway (it's in every signed binary).
 
 [CmdletBinding()]
 param(
@@ -66,9 +63,9 @@ param(
     [string[]] $Path,
 
     # SimplySignDesktop.exe location. The 64-bit MSI installs to
-    # `C:\Program Files\Certum\SimplySign Desktop\` (real 64-bit app —
-    # `Program Files (x86)` would be wrong here). Override for
-    # self-hosted runners with a non-default install layout.
+    # `C:\Program Files\Certum\SimplySign Desktop\` (real 64-bit app
+    # — `Program Files (x86)` would be wrong). Override for self-hosted
+    # runners with a non-default install layout.
     [string] $SimplySignExe = 'C:\Program Files\Certum\SimplySign Desktop\SimplySignDesktop.exe',
 
     # signtool.exe — present on PATH on the GitHub Actions windows-2022
@@ -79,11 +76,14 @@ param(
     # prompt).
     [string] $Description = 'XR_APILAYER_MLEDOUR_fov_crop',
 
-    # Login-flow timing. Defaults are conservative; tune only if you see
-    # races on a slow runner.
-    [int] $WindowAppearMs   = 6000,
-    [int] $BetweenKeysMs    = 250,
-    [int] $CertAppearTotalS = 60
+    # How many seconds to give /autologin before deciding it failed.
+    # A bad OTP / bad username makes the process exit within ~1-2 s in
+    # practice; we wait 5 s to be safe.
+    [int] $AutoLoginProbeS = 5,
+
+    # How long to poll Cert:\CurrentUser\My for the thumbprint after a
+    # successful /autologin before giving up.
+    [int] $CertAppearTotalS = 30
 )
 
 $ErrorActionPreference = 'Stop'
@@ -97,167 +97,68 @@ function Require-Env {
     return $val
 }
 
-# SendKeys interprets `+ ^ % ~ ( ) { }` as modifier syntax. A username
-# email like "michael.ledour@gmail.com" doesn't contain any of those, but
-# the function is here so a future ID with `+` (Gmail tagging) doesn't
-# silently lose characters.
-function Escape-SendKeys {
-    param([string] $s)
-    return ($s -replace '([+^%~(){}])', '{$1}')
-}
+# Stop any running SimplySignDesktop, gracefully if possible. A leftover
+# instance from an earlier (failed) run blocks the new /autologin —
+# Certum allows only one cloud session per host.
+function Stop-SimplySignDesktop {
+    param([string] $ExePath)
+    $existing = @(Get-Process -Name 'SimplySignDesktop' -ErrorAction SilentlyContinue)
+    if ($existing.Count -eq 0) { return }
 
-# Win32 P/Invoke surface for window enumeration + force-show. Loaded
-# once and reused across diagnostics + the main flow. Note: `$pid` is a
-# PowerShell read-only automatic variable, so we use `procId` in the
-# managed code below.
-if (-not ('NS.Win32' -as [type])) {
-    Add-Type -Namespace 'NS' -Name 'Win32' -MemberDefinition @"
-        public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
-
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        public static extern bool EnumWindows(EnumWindowsProc enumProc, System.IntPtr lParam);
-
-        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
-        public static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder text, int count);
-
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        public static extern bool IsWindowVisible(System.IntPtr hWnd);
-
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint procId);
-
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
-
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        public static extern bool SetForegroundWindow(System.IntPtr hWnd);
-
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        public static extern bool BringWindowToTop(System.IntPtr hWnd);
-
-        // ShowWindow nCmdShow constants. SW_RESTORE undoes minimization
-        // AND makes the window visible — the right hammer for an app
-        // that started hidden (system-tray apps like SimplySign Desktop
-        // do this on launch).
-        public const int SW_HIDE        = 0;
-        public const int SW_SHOWNORMAL  = 1;
-        public const int SW_SHOW        = 5;
-        public const int SW_RESTORE     = 9;
-"@
-}
-
-# Enumerate every top-level window on the runner. Returns a list of
-# pscustomobject{Handle, Visible, Pid, Title}.
-function Get-AllTopLevelWindows {
-    $list = New-Object 'System.Collections.Generic.List[object]'
-    $cb = [NS.Win32+EnumWindowsProc] {
-        param($hWnd, $lParam)
-        $sb  = New-Object System.Text.StringBuilder 256
-        [void][NS.Win32]::GetWindowText($hWnd, $sb, $sb.Capacity)
-        $vis = [NS.Win32]::IsWindowVisible($hWnd)
-        $procId = [uint32]0
-        [void][NS.Win32]::GetWindowThreadProcessId($hWnd, [ref]$procId)
-        $list.Add([pscustomobject]@{
-            Handle  = $hWnd
-            Visible = $vis
-            Pid     = $procId
-            Title   = $sb.ToString()
-        })
-        return $true  # keep enumerating
+    Write-Host ("Stopping {0} existing SimplySignDesktop process(es) ..." -f $existing.Count)
+    # /close asks the app to shut down its session cleanly. It returns
+    # immediately; the process exits asynchronously. We then wait for
+    # the previous instances to actually go away, falling back to Kill.
+    try {
+        Start-Process -FilePath $ExePath -ArgumentList '/close' -Wait -ErrorAction SilentlyContinue
+    } catch {
+        # /close on a non-running app may itself error. Ignore.
     }
-    [void][NS.Win32]::EnumWindows($cb, [System.IntPtr]::Zero)
-    return ,$list
-}
-
-# Find a SimplySign Desktop login window. Prefers a VISIBLE window
-# whose title contains 'SimplySign' or 'Login' (login dialogs typically
-# carry one of those, even if Certum localizes the rest of the form).
-# Falls back to a hidden 'SimplySign Desktop' window, but the caller
-# should treat that as a poor target — calling ShowWindow on Certum's
-# hidden tray host has been observed to destroy the window outright on
-# CI runners.
-# Returns the handle as IntPtr, or [System.IntPtr]::Zero if not found.
-function Find-SimplySignWindow {
-    param([int] $TargetPid = -1, [switch] $RequireVisible)
-    $all = Get-AllTopLevelWindows | Where-Object {
-        $TargetPid -lt 0 -or $_.Pid -eq $TargetPid
-    }
-    # Prefer visible windows with a SimplySign-ish or Login-ish title.
-    $visible = $all | Where-Object {
-        $_.Visible -and ($_.Title -match 'SimplySign' -or $_.Title -match 'Login' -or $_.Title -match 'Logowanie')
-    }
-    if ($visible.Count -gt 0) { return $visible[0].Handle }
-    if ($RequireVisible) { return [System.IntPtr]::Zero }
-    # Fallback to hidden ones — the caller should be cautious.
-    $hidden = $all | Where-Object {
-        $_.Title -eq 'SimplySign Desktop'
-    }
-    if ($hidden.Count -gt 0) { return $hidden[0].Handle }
-    return [System.IntPtr]::Zero
-}
-
-# Force a window to be visible + foreground. SimplySign Desktop on
-# first launch on a CI runner sits hidden (its tray-icon UI metaphor),
-# so AppActivate fails until we do this. The sequence is the standard
-# Win32 incantation: SW_RESTORE → BringWindowToTop → SetForegroundWindow.
-function Show-WindowForeground {
-    param([System.IntPtr] $Handle)
-    [void][NS.Win32]::ShowWindow($Handle, [NS.Win32]::SW_RESTORE)
-    Start-Sleep -Milliseconds 200
-    [void][NS.Win32]::BringWindowToTop($Handle)
-    Start-Sleep -Milliseconds 100
-    [void][NS.Win32]::SetForegroundWindow($Handle)
-}
-
-# Dump everything we can find about the runner's window state when login
-# fails. Used only on the failure path — logs don't carry the OTP since
-# we never echo it.
-function Dump-WindowDiagnostics {
-    param([System.Diagnostics.Process] $LaunchedProc)
-
-    Write-Host '--- Window diagnostics ---'
-    if ($LaunchedProc) {
-        $LaunchedProc.Refresh()
-        Write-Host ("LaunchedProc.Id              = {0}" -f $LaunchedProc.Id)
-        Write-Host ("LaunchedProc.HasExited       = {0}" -f $LaunchedProc.HasExited)
-        if ($LaunchedProc.HasExited) {
-            Write-Host ("LaunchedProc.ExitCode      = {0}" -f $LaunchedProc.ExitCode)
-        } else {
-            Write-Host ("LaunchedProc.MainWindowHandle = {0}" -f $LaunchedProc.MainWindowHandle)
-            Write-Host ("LaunchedProc.MainWindowTitle  = '{0}'" -f $LaunchedProc.MainWindowTitle)
+    foreach ($p in $existing) {
+        try {
+            if (-not $p.WaitForExit(5000)) {
+                Write-Host ("  PID {0} did not exit on /close; killing." -f $p.Id)
+                $p.Kill()
+                [void]$p.WaitForExit(2000)
+            }
+        } catch {
+            # Already dead — fine.
         }
     }
+}
 
-    Write-Host 'All SimplySign* processes:'
-    $simplyPids = @(Get-Process -Name 'SimplySign*' -ErrorAction SilentlyContinue |
-                    ForEach-Object { $_.Id })
-    Get-Process -Name 'SimplySign*' -ErrorAction SilentlyContinue |
-        Select-Object Id, ProcessName, MainWindowHandle, MainWindowTitle, HasExited |
-        Format-Table -AutoSize | Out-Host
+# Try a single /autologin attempt with a specific TOTP value. Returns
+# $true if the process is still running after $AutoLoginProbeS seconds
+# (the success signal — bad creds make it exit fast). Returns $false
+# otherwise, after which the caller should try the next drift offset.
+function Try-Autologin {
+    param(
+        [string] $ExePath,
+        [string] $Username,
+        [string] $Totp
+    )
+    # ProcessStartInfo with ArgumentList passes the OTP as a *single
+    # argument* without going through cmd.exe's parser, which keeps it
+    # out of the runner's command-line transcript that ps/Tasklist would
+    # show.
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $ExePath
+    $psi.ArgumentList.Add('/autologin')
+    $psi.ArgumentList.Add($Username)
+    $psi.ArgumentList.Add($Totp)
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow  = $true
 
-    $windows = Get-AllTopLevelWindows
-
-    # 1. EVERY top-level window owned by a SimplySign* process — even
-    #    untitled ones, even hidden ones. This tells us whether the
-    #    process is silently sitting on a window we'd otherwise miss
-    #    in the title-filtered listing below.
-    if ($simplyPids.Count -gt 0) {
-        Write-Host ("All windows owned by SimplySign* PIDs ({0}):" -f ($simplyPids -join ', '))
-        $windows |
-            Where-Object { $simplyPids -contains $_.Pid } |
-            Format-Table -AutoSize | Out-Host
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    Write-Host ("Started SimplySignDesktop /autologin (PID={0}); probing for {1}s ..." -f $proc.Id, $AutoLoginProbeS)
+    Start-Sleep -Seconds $AutoLoginProbeS
+    $proc.Refresh()
+    if ($proc.HasExited) {
+        Write-Host ("  exited with code {0} — login rejected." -f $proc.ExitCode)
+        return $false
     }
-
-    # 2. The wider top-level dump — limited to titled OR visible
-    #    windows so the table stays readable. We bumped the cap to 50
-    #    because the previous 30 truncated relevant entries.
-    Write-Host ("Top-level windows on the runner (count={0}, showing titled+visible):" -f $windows.Count)
-    $windows |
-        Where-Object { $_.Title -ne '' -or $_.Visible } |
-        Sort-Object Visible -Descending |
-        Select-Object -First 50 |
-        Format-Table -AutoSize | Out-Host
-    Write-Host '--- end diagnostics ---'
+    Write-Host '  still running — login accepted.'
+    return $true
 }
 
 # --- Resolve inputs -------------------------------------------------------
@@ -268,127 +169,58 @@ $thumbprint = (Require-Env 'CERTUM_CERT_THUMBPRINT') -replace '\s', ''
 if ($thumbprint -notmatch '^[0-9A-Fa-f]{40}$') {
     throw "CERTUM_CERT_THUMBPRINT must be 40 hex characters (SHA-1 of the cert). Got length $($thumbprint.Length)."
 }
-
 if (-not (Test-Path $SimplySignExe)) {
     throw "SimplySign Desktop not found at '$SimplySignExe'. Install it on the runner first (see workflow's 'Install SimplySign Desktop' step)."
 }
 
-# --- Generate fresh TOTP --------------------------------------------------
-# Generated as late as possible before the keystroke send so we have the
-# full 30 s window after typing it in. Algorithm defaults to SHA-256
-# (Certum's otpauth `algorithm=` value); leave the param off here so a
-# future change in Get-CertumTotp.ps1's default propagates.
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$totp = & (Join-Path $scriptDir 'Get-CertumTotp.ps1') -Base32Seed $totpSeed
-if ([string]::IsNullOrWhiteSpace($totp) -or $totp.Length -ne 6) {
-    throw "Get-CertumTotp.ps1 produced an unexpected value (length=$($totp.Length))."
-}
+$gen       = Join-Path $scriptDir 'Get-CertumTotp.ps1'
 
-# --- Launch SimplySign Desktop and inject credentials via SendKeys -------
-Write-Host "Launching SimplySign Desktop ..."
-$proc = Start-Process -FilePath $SimplySignExe -PassThru
-Start-Sleep -Milliseconds $WindowAppearMs
+# --- Login ----------------------------------------------------------------
+# Clean slate first.
+Stop-SimplySignDesktop -ExePath $SimplySignExe
 
-$wshell = New-Object -ComObject WScript.Shell
-
-# Strategy: wait patiently for SimplySign Desktop to show a VISIBLE
-# login window on its own. We don't force-show its hidden tray host
-# any more — that's been observed to destroy the window outright on
-# the CI runner (run #2 ended up with the SimplySign process owning
-# only "Default IME" windows after a ShowWindow(SW_RESTORE) call).
-#
-# Run #1 saw the window 'SimplySign Desktop' with Visible=False. Two
-# possibilities now:
-#
-#   (a) Certum eventually shows the login dialog by itself if we wait
-#       long enough — first launch on a fresh install commonly does
-#       this with a multi-second initialization delay. We give it up
-#       to $WaitForVisibleS seconds.
-#
-#   (b) Certum never shows it on a non-interactive desktop (despite
-#       the desktop being technically present — Program Manager and
-#       all are there). In that case we fail with a full diagnostic
-#       and switch strategies.
-$WaitForVisibleS = 60
-Write-Host ("Waiting up to ${WaitForVisibleS}s for a visible SimplySign Desktop login window ...")
-
-$hwnd     = [System.IntPtr]::Zero
-$deadline = (Get-Date).AddSeconds($WaitForVisibleS)
-while ((Get-Date) -lt $deadline -and $hwnd -eq [System.IntPtr]::Zero) {
-    $hwnd = Find-SimplySignWindow -TargetPid $proc.Id -RequireVisible
-    if ($hwnd -eq [System.IntPtr]::Zero) {
-        Start-Sleep -Seconds 2
+# Try the current 30 s window, then the previous, then the next. Each
+# offset is +/- one period (30 s). We never go further: a clock that's
+# off by >30 s from Certum's NTP-disciplined server is broken in a way
+# that needs investigation, not silent compensation.
+$now    = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$period = 30
+$loggedIn = $false
+foreach ($driftSteps in @(0, -1, 1)) {
+    $time = $now + ($driftSteps * $period)
+    Write-Host ("Trying TOTP at drift offset {0:+0;-0;0} step ..." -f $driftSteps)
+    $totp = & $gen -Base32Seed $totpSeed -Time $time
+    if ([string]::IsNullOrWhiteSpace($totp) -or $totp.Length -ne 6) {
+        throw "Get-CertumTotp.ps1 produced an unexpected value (length=$($totp.Length))."
     }
-}
 
-if ($hwnd -eq [System.IntPtr]::Zero) {
-    Dump-WindowDiagnostics -LaunchedProc $proc
+    if (Try-Autologin -ExePath $SimplySignExe -Username $username -Totp $totp) {
+        $loggedIn = $true
+        break
+    }
+    # Failed — make sure we clean up before retrying with the next offset.
+    Stop-SimplySignDesktop -ExePath $SimplySignExe
+}
+if (-not $loggedIn) {
     throw @"
-SimplySign Desktop never produced a visible login window after ${WaitForVisibleS}s.
-The diagnostic dump above shows what windows the process did create.
-If the only entries owned by the SimplySign* PID are "Default IME" and
-nothing else, Certum is failing to render its login UI on this runner
-type — switch to a self-hosted runner (Windows machine kept logged in)
-or local-sign + manual upload.
+SimplySignDesktop /autologin failed at all three drift offsets (0, -1, +1).
+Likely causes:
+  1. CERTUM_TOTP_SEED is wrong (decode mismatch — confirm it's the Base32
+     string from the otpauth:// URI's secret= parameter, not the current
+     6-digit code).
+  2. CERTUM_USERNAME is wrong.
+  3. The runner clock is off by more than 30 s from UTC.
+  4. The SimplySign account has been locked (too many failed attempts).
 "@
 }
-Write-Host ("Found visible SimplySign window: handle={0}" -f $hwnd)
 
-# Belt-and-braces foreground bring-up. SetForegroundWindow on a window
-# that's ALREADY visible is benign (no destruction risk; that risk was
-# specific to forcing a hidden tray-host visible).
-[void][NS.Win32]::BringWindowToTop($hwnd)
-[void][NS.Win32]::SetForegroundWindow($hwnd)
-Start-Sleep -Milliseconds $BetweenKeysMs
-
-$focused = $false
-for ($i = 0; $i -lt 10 -and -not $focused; $i++) {
-    $focused = $wshell.AppActivate($proc.Id)
-    if (-not $focused) {
-        $focused = $wshell.AppActivate('SimplySign Desktop')
-    }
-    if (-not $focused) { Start-Sleep -Milliseconds 300 }
-}
-if (-not $focused) {
-    Dump-WindowDiagnostics -LaunchedProc $proc
-    throw "Found visible window (handle $hwnd) but AppActivate refused to focus it. See diagnostic dump above."
-}
-
-Start-Sleep -Milliseconds $BetweenKeysMs
-
-# Type into the username field. `^a{DEL}` first, in case the installer
-# pre-filled it with something (e.g. a previously-used account on a
-# self-hosted runner). Using Escape-SendKeys to be safe even though a
-# typical email address has no SendKeys metachars.
-Write-Host "Sending credentials ..."
-$wshell.SendKeys('^a{DEL}')
-Start-Sleep -Milliseconds $BetweenKeysMs
-$wshell.SendKeys((Escape-SendKeys $username))
-Start-Sleep -Milliseconds $BetweenKeysMs
-
-# Tab to the OTP field. SimplySign Desktop's login form has the OTP
-# directly after the username — one Tab moves focus there.
-$wshell.SendKeys('{TAB}')
-Start-Sleep -Milliseconds $BetweenKeysMs
-
-# OTP is digits only — no escaping needed, but we run it through
-# Escape-SendKeys anyway for symmetry (and to keep one code path).
-$wshell.SendKeys((Escape-SendKeys $totp))
-Start-Sleep -Milliseconds $BetweenKeysMs
-
-# Submit. {ENTER} = "press the default button", which is "Sign in".
-$wshell.SendKeys('{ENTER}')
-
-# --- Wait for the cert to materialize in the Windows store ---------------
-# This is the real proof of a successful login. Anything before this
-# point could plausibly succeed silently while sending keystrokes to the
-# wrong window or wrong field. If the cert shows up, we know:
-#   1. SimplySign Desktop accepted the username + TOTP.
-#   2. The cloud HSM session is live.
-#   3. The CryptoAPI bridge has populated the local cert store.
-Write-Host "Waiting up to $CertAppearTotalS s for cert thumbprint $thumbprint to appear in CurrentUser\My ..."
+# --- Wait for the cert in CurrentUser\My ---------------------------------
+# Belt-and-braces: the process running is one signal, the cert actually
+# materialising in the Windows store is the *real* proof we can sign.
+Write-Host "Waiting up to ${CertAppearTotalS}s for cert thumbprint $thumbprint to appear in CurrentUser\My ..."
 $deadline = (Get-Date).AddSeconds($CertAppearTotalS)
-$cert     = $null
+$cert = $null
 while ((Get-Date) -lt $deadline) {
     $cert = Get-ChildItem -Path 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
             Where-Object { $_.Thumbprint -eq $thumbprint } |
@@ -397,15 +229,13 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 1000
 }
 if ($null -eq $cert) {
-    # Don't dump the OTP — but DO say what was attempted so the failure
-    # mode is actionable.
     throw @"
-Certificate $thumbprint did not appear in CurrentUser\My within $CertAppearTotalS s.
-Likely causes (in order):
-  1. The OTP was wrong (clock skew on the runner > 30 s, or wrong CERTUM_TOTP_SEED).
-  2. The username was wrong (typo in CERTUM_USERNAME secret).
-  3. The thumbprint changed (Certum certs renew yearly — update CERTUM_CERT_THUMBPRINT).
-  4. SimplySign Desktop's login form layout changed in version $((Get-Item $SimplySignExe).VersionInfo.FileVersion).
+Login succeeded but cert $thumbprint did not appear in CurrentUser\My within ${CertAppearTotalS}s.
+Likely causes:
+  1. CERTUM_CERT_THUMBPRINT is for a different (e.g. previously renewed)
+     cert. Check with 'Get-ChildItem Cert:\CurrentUser\My' against the
+     SimplySign portal's certificate page.
+  2. The cert was revoked.
 "@
 }
 Write-Host "Found cert: $($cert.Subject)"
@@ -421,27 +251,35 @@ foreach ($p in $Path) {
 }
 
 # signtool invocation matches the Certum manual prescription verbatim.
-foreach ($f in $files) {
-    Write-Host "Signing $($f.FullName) ..."
-    & $SignToolExe sign `
-        /sha1 $thumbprint `
-        /tr   'http://time.certum.pl' `
-        /td   sha256 `
-        /fd   sha256 `
-        /d    $Description `
-        /v    `
-        $f.FullName
-    if ($LASTEXITCODE -ne 0) {
-        throw "signtool failed for $($f.FullName) (exit $LASTEXITCODE)."
-    }
+try {
+    foreach ($f in $files) {
+        Write-Host "Signing $($f.FullName) ..."
+        & $SignToolExe sign `
+            /sha1 $thumbprint `
+            /tr   'http://time.certum.pl' `
+            /td   sha256 `
+            /fd   sha256 `
+            /d    $Description `
+            /v    `
+            $f.FullName
+        if ($LASTEXITCODE -ne 0) {
+            throw "signtool failed for $($f.FullName) (exit $LASTEXITCODE)."
+        }
 
-    # /pa = use the default "any" policy. Without it, signtool verify
-    # defaults to driver-signing rules and rejects user-mode DLLs that
-    # are perfectly correctly signed.
-    & $SignToolExe verify /pa /v $f.FullName
-    if ($LASTEXITCODE -ne 0) {
-        throw "signtool verify failed for $($f.FullName) (exit $LASTEXITCODE)."
+        # /pa = use the default "any" policy. Without it, signtool verify
+        # defaults to driver-signing rules and rejects user-mode DLLs.
+        & $SignToolExe verify /pa /v $f.FullName
+        if ($LASTEXITCODE -ne 0) {
+            throw "signtool verify failed for $($f.FullName) (exit $LASTEXITCODE)."
+        }
     }
 }
+finally {
+    # Always tear down the session cleanly, even if signtool failed.
+    # Leaving SimplySignDesktop running ties up Certum's one-session
+    # quota and burns a TOTP window for the next CI run.
+    Write-Host 'Closing SimplySign Desktop session ...'
+    try { Stop-SimplySignDesktop -ExePath $SimplySignExe } catch { }
+}
 
-Write-Host "All artifacts signed and verified."
+Write-Host 'All artifacts signed and verified.'
