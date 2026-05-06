@@ -130,37 +130,35 @@ jobs:
           /verbosity:minimal
           /nologo
 
-      # Code signing (Release only, secrets present).
+      # ---- Code signing (tag pushes only, Release matrix only) -------
       #
-      # The DLL is signed BEFORE staging / installer-building so the
-      # signature ends up in the ZIP archive AND embedded inside the
-      # Setup.exe via Inno Setup's [Files] section. The Setup.exe itself
-      # is signed in a later step, after ISCC produces it.
+      # Gated by `should_sign` (set in "Determine signing eligibility"
+      # above). PR builds, push-to-main, workflow_dispatch, fork builds
+      # and Debug entries all skip these steps automatically.
       #
-      # The condition gates on a secret being non-empty: PR builds and
-      # forks (where secrets are not exposed) skip signing entirely
-      # instead of failing — they still produce unsigned artifacts so
-      # CI stays green for contributors.
-      # SimplySign Desktop is the Certum-side prerequisite for cloud
-      # signing: it logs into the cloud HSM and exposes the cert through
-      # the Windows certificate store so signtool can find it via /sha1
-      # thumbprint. There is NO Chocolatey package (community.chocolatey
-      # has no simplysign-desktop entry) and NO documented headless CLI;
-      # the only public install path is the MSI from files.certum.eu.
+      # Order matters: the DLL is signed BEFORE staging and BEFORE the
+      # installer build, so the signature ends up in the manual ZIP AND
+      # is embedded as-is inside the Setup.exe (Inno Setup just bundles
+      # the file). The Setup.exe itself is signed in a later step,
+      # after ISCC has produced it.
       #
-      # The version is pinned: a Certum-side "latest" that breaks the GUI
-      # layout would silently break our SendKeys-based login (see
-      # Sign-Artifact.ps1). Bumping is a deliberate act — re-test SendKeys
-      # against the new version locally first.
-      # Cache the MSI bytes by version. The MSI is ~50-100 MB and Certum's
-      # CDN sometimes throttles, so saving the download (~30 s typical)
-      # is the bulk of what's cacheable here. We do NOT cache the
-      # installed Program Files tree: the install registers components
-      # the cert-store bridge depends on, and copying the directory back
-      # without re-running msiexec would skip that registration.
+      # SimplySign Desktop is the Certum-side prerequisite: it owns the
+      # cloud HSM session and bridges the cert into the Windows
+      # certificate store so signtool /sha1 <thumbprint> can pick it up.
+      # There is NO Chocolatey package; the only public install path is
+      # the MSI from files.certum.eu. We pin SIMPLYSIGN_VERSION so a
+      # Certum-side "latest" can't silently break the undocumented
+      # /autologin flag Sign-Artifact.ps1 relies on (see
+      # docs/DEVELOPMENT.md "Brittleness notes"). Bumping is a
+      # deliberate act — retest /autologin against the new version
+      # locally before merging.
       #
-      # Cache key includes SIMPLYSIGN_VERSION so a Certum bump
-      # automatically invalidates the cache.
+      # MSI cache: the file is ~50-100 MB and Certum's CDN sometimes
+      # throttles. Caching it on the cache key SIMPLYSIGN_VERSION saves
+      # the download (~30 s typical) on subsequent runs. We do NOT
+      # cache the installed Program Files tree because the MSI
+      # registers components the cert-store bridge depends on, and a
+      # plain directory copy would skip that registration.
       - name: Restore cached SimplySign Desktop MSI
         if: steps.signing.outputs.should_sign == 'true'
         id: cache-simplysign-msi
@@ -272,7 +270,9 @@ jobs:
       # generated .exe (compresses payload, embeds the uninstaller stub),
       # which would invalidate any pre-existing signature.
       - name: Sign installer (Certum SimplySign)
-        if: matrix.configuration == 'Release' && steps.signing.outputs.should_sign == 'true'
+        # should_sign already implies matrix.configuration == 'Release',
+        # so no additional matrix gate is needed here.
+        if: steps.signing.outputs.should_sign == 'true'
         shell: pwsh
         env:
           CERTUM_USERNAME:        ${{ secrets.CERTUM_USERNAME }}
@@ -425,7 +425,7 @@ jobs:
             target process.
 
             > 🔒 Signed with a **Certum Open Source Code Signing Cloud** certificate
-            > (subject: *Open Source Developer Michael Le Dour*). Verify locally with:
+            > (subject: *Open Source Developer Michael Le dour*). Verify locally with:
             > ```powershell
             > signtool verify /pa /v <file>.exe
             > ```

@@ -6,8 +6,9 @@
 #
 # Used by CI to authenticate non-interactively to Certum SimplySign Cloud:
 #   Sign-Artifact.ps1 calls this once per signing session, feeds the result
-#   to SimplySignDesktop.exe's /login flow, and signtool then sees the cert
-#   through the Windows certificate store.
+#   to SimplySignDesktop.exe's undocumented `/autologin <user> <totp>`
+#   flag, and signtool then sees the cert through the Windows certificate
+#   store.
 #
 # The seed is the Base32 string Certum shows behind the QR code in the
 # SimplySign portal under "Show secret key". Treat it as you would the

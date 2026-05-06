@@ -165,10 +165,15 @@ loaded into a hooked process; SmartScreen "Unknown publisher" warnings
 disappear once the signed installer accumulates enough downloads to
 build reputation.
 
-Builds triggered from a fork or from a pull request are not signed
-(GitHub secrets are not exposed to forked workflows by design), so
-only binaries from the [official GitHub Releases
-page](../../../releases) of this repository should be trusted.
+**Only tag pushes are signed.** Push-to-main, pull-request,
+workflow_dispatch and fork-triggered builds all produce **unsigned**
+artifacts on purpose — they're verification builds, not user-facing
+ones, and signing every commit would burn a Certum cloud-HSM session
+per push for no benefit. Forks additionally don't have access to the
+GitHub secrets by GitHub's own design. So only binaries from the
+[official GitHub Releases page](../../../releases) of this repository,
+which are produced from `v*.*.*` tag pushes, should be trusted as
+signed.
 
 ### How CI signs in an automated way
 
@@ -232,10 +237,26 @@ The pieces:
    `signtool verify /pa /v`. A `finally` block runs `/close` so the
    runner doesn't leave a lingering session that would block the
    next CI run.
-4. The workflow gates every signing-related step on a `should_sign`
-   flag computed once up front (Release matrix entry +
-   `CERTUM_USERNAME` secret present), so PR/fork builds skip signing
-   and stay green instead of failing.
+4. The workflow gates every signing-related step (MSI cache restore,
+   MSI install, sign DLL, sign Setup.exe) on a `should_sign` flag
+   computed once up front. The flag is true iff **all three** of:
+   - `GITHUB_REF` matches `refs/tags/v*` (we're on a release tag),
+   - the matrix entry is `Release` (Debug never signs), and
+   - the `CERTUM_USERNAME` secret is set (PR/fork builds without
+     access to secrets fall through cleanly).
+
+   Computing it once and only once keeps the per-step `if:`
+   conditions tidy and avoids referencing `secrets.*` inside step-
+   level `if:` expressions, which GitHub Actions does not allow.
+
+5. The MSI itself is cached via `actions/cache@v4` keyed on
+   `SIMPLYSIGN_VERSION`. The first signed-release run after a
+   version bump downloads the ~50-100 MB installer; subsequent runs
+   on the same version reuse the cached bytes. The msiexec install
+   step always runs — we deliberately do **not** cache the installed
+   `Program Files\Certum\SimplySign Desktop\` tree because the
+   install registers components the cert-store bridge depends on,
+   and a plain directory copy would skip that registration.
 
 ### Brittleness notes
 
