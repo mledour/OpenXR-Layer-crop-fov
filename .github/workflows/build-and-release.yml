@@ -19,6 +19,11 @@ permissions:
 env:
   SOLUTION: XR_APILAYER_MLEDOUR_fov_crop.sln
   LAYER_NAME: XR_APILAYER_MLEDOUR_fov_crop
+  # Hoisted to workflow level so the cache key (Restore step) and the
+  # download step (Install step) reference the same version. Bumping
+  # this triggers a fresh download because the cache key changes —
+  # exactly the behavior we want for Certum MSI updates.
+  SIMPLYSIGN_VERSION: '9.4.3.90'
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -48,6 +53,35 @@ jobs:
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
+
+      # Decide once, up front, whether this run will code-sign anything.
+      # We sign ONLY when ALL of these are true:
+      #   1. We're on a tag push (refs/tags/v*) — i.e. an actual release.
+      #      Push-to-main, PR, and workflow_dispatch builds are unsigned
+      #      because they're not user-facing artifacts and signing them
+      #      would burn a Certum HSM session per push for no benefit.
+      #   2. The matrix entry is Release (Debug is never signed).
+      #   3. The CERTUM_USERNAME secret is set. PR/fork builds don't have
+      #      access to secrets by GitHub design, so this also keeps them
+      #      green automatically.
+      # Computing it here (and nowhere else) keeps the per-step `if:`
+      # conditions tidy and avoids referencing `secrets.*` directly in a
+      # step-level `if:`, which is not allowed.
+      - name: Determine signing eligibility
+        id: signing
+        shell: pwsh
+        env:
+          CERTUM_USERNAME: ${{ secrets.CERTUM_USERNAME }}
+        run: |
+          $isTagBuild     = $env:GITHUB_REF -like 'refs/tags/v*'
+          $isReleaseEntry = ('${{ matrix.configuration }}' -eq 'Release')
+          $hasSecret      = -not [string]::IsNullOrEmpty($env:CERTUM_USERNAME)
+          $eligible       = $isTagBuild -and $isReleaseEntry -and $hasSecret
+          Write-Host "isTagBuild     = $isTagBuild  (ref=$env:GITHUB_REF)"
+          Write-Host "isReleaseEntry = $isReleaseEntry"
+          Write-Host "hasSecret      = $hasSecret"
+          Write-Host "should_sign    = $eligible"
+          "should_sign=$($eligible.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
@@ -96,6 +130,93 @@ jobs:
           /verbosity:minimal
           /nologo
 
+      # ---- Code signing (tag pushes only, Release matrix only) -------
+      #
+      # Gated by `should_sign` (set in "Determine signing eligibility"
+      # above). PR builds, push-to-main, workflow_dispatch, fork builds
+      # and Debug entries all skip these steps automatically.
+      #
+      # Order matters: the DLL is signed BEFORE staging and BEFORE the
+      # installer build, so the signature ends up in the manual ZIP AND
+      # is embedded as-is inside the Setup.exe (Inno Setup just bundles
+      # the file). The Setup.exe itself is signed in a later step,
+      # after ISCC has produced it.
+      #
+      # SimplySign Desktop is the Certum-side prerequisite: it owns the
+      # cloud HSM session and bridges the cert into the Windows
+      # certificate store so signtool /sha1 <thumbprint> can pick it up.
+      # There is NO Chocolatey package; the only public install path is
+      # the MSI from files.certum.eu. We pin SIMPLYSIGN_VERSION so a
+      # Certum-side "latest" can't silently break the undocumented
+      # /autologin flag Sign-Artifact.ps1 relies on (see
+      # docs/DEVELOPMENT.md "Brittleness notes"). Bumping is a
+      # deliberate act — retest /autologin against the new version
+      # locally before merging.
+      #
+      # MSI cache: the file is ~50-100 MB and Certum's CDN sometimes
+      # throttles. Caching it on the cache key SIMPLYSIGN_VERSION saves
+      # the download (~30 s typical) on subsequent runs. We do NOT
+      # cache the installed Program Files tree because the MSI
+      # registers components the cert-store bridge depends on, and a
+      # plain directory copy would skip that registration.
+      - name: Restore cached SimplySign Desktop MSI
+        if: steps.signing.outputs.should_sign == 'true'
+        id: cache-simplysign-msi
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/SimplySignDesktop.msi
+          key: simplysign-msi-${{ env.SIMPLYSIGN_VERSION }}
+
+      - name: Install SimplySign Desktop
+        if: steps.signing.outputs.should_sign == 'true'
+        shell: pwsh
+        run: |
+          $msi = "$env:RUNNER_TEMP\SimplySignDesktop.msi"
+          if ((Test-Path $msi) -and (Get-Item $msi).Length -ge 1MB) {
+            Write-Host ("Using cached MSI: {0} ({1:N0} bytes)" -f $msi, (Get-Item $msi).Length)
+          } else {
+            $url = "https://files.certum.eu/software/SimplySignDesktop/Windows/$env:SIMPLYSIGN_VERSION/SimplySignDesktop-$env:SIMPLYSIGN_VERSION-64-bit-en.msi"
+            Write-Host "Downloading $url"
+            Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
+            if (-not (Test-Path $msi) -or (Get-Item $msi).Length -lt 1MB) {
+              throw "MSI download looks invalid: $msi"
+            }
+          }
+          Write-Host "Installing silently ..."
+          $p = Start-Process -FilePath msiexec.exe `
+                             -ArgumentList @('/i', $msi, '/qn', '/norestart') `
+                             -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            throw "msiexec exited $($p.ExitCode)"
+          }
+          # Verify the binary ended up where Sign-Artifact.ps1 expects it.
+          # The 64-bit MSI installs to `C:\Program Files\` (the real
+          # 64-bit hive), NOT `Program Files (x86)`.
+          $exe = 'C:\Program Files\Certum\SimplySign Desktop\SimplySignDesktop.exe'
+          if (-not (Test-Path $exe)) {
+            # Search both Program Files hives just in case the layout
+            # changed in a newer Certum build — fail loudly with the
+            # actual path so the next bump in SIMPLYSIGN_VERSION is
+            # easy to fix.
+            $found = Get-ChildItem 'C:\Program Files*\' -Recurse -Filter 'SimplySignDesktop.exe' -ErrorAction SilentlyContinue
+            throw "SimplySignDesktop.exe not at expected path. Found instead: $($found.FullName -join '; ')"
+          }
+          Write-Host "Installed: $exe"
+
+      # Sign the DLL BEFORE staging and BEFORE building the installer, so
+      # the signature lands in both the manual-install ZIP and embedded
+      # inside the Setup.exe (Inno Setup just bundles the file as-is).
+      # Setup.exe itself is signed in a later step.
+      - name: Sign DLL (Certum SimplySign)
+        if: steps.signing.outputs.should_sign == 'true'
+        shell: pwsh
+        env:
+          CERTUM_USERNAME:        ${{ secrets.CERTUM_USERNAME }}
+          CERTUM_TOTP_SEED:       ${{ secrets.CERTUM_TOTP_SEED }}
+          CERTUM_CERT_THUMBPRINT: ${{ secrets.CERTUM_CERT_THUMBPRINT }}
+        run: |
+          .\scripts\Sign-Artifact.ps1 -Path "bin\x64\Release\${{ env.LAYER_NAME }}.dll"
+
       # Run the test binary. It covers two layers:
       #   - Unit tests (test_crop_math.cpp)    : pure crop-math helpers.
       #   - Integration tests (test_integration.cpp): drive the real
@@ -142,6 +263,23 @@ jobs:
           }
           $exe = Get-ChildItem "bin\installer\*.exe" | Select-Object -First 1
           Write-Host "Installer built: $($exe.Name) ($($exe.Length) bytes)"
+
+      # Sign the installer too — SmartScreen "Unknown publisher" warnings
+      # are gated on the installer's own signature, not on whatever it
+      # bundles. We sign AFTER ISCC because Inno Setup rewrites the
+      # generated .exe (compresses payload, embeds the uninstaller stub),
+      # which would invalidate any pre-existing signature.
+      - name: Sign installer (Certum SimplySign)
+        # should_sign already implies matrix.configuration == 'Release',
+        # so no additional matrix gate is needed here.
+        if: steps.signing.outputs.should_sign == 'true'
+        shell: pwsh
+        env:
+          CERTUM_USERNAME:        ${{ secrets.CERTUM_USERNAME }}
+          CERTUM_TOTP_SEED:       ${{ secrets.CERTUM_TOTP_SEED }}
+          CERTUM_CERT_THUMBPRINT: ${{ secrets.CERTUM_CERT_THUMBPRINT }}
+        run: |
+          .\scripts\Sign-Artifact.ps1 -Path "bin\installer\*.exe"
 
       - name: Upload installer artifact
         if: matrix.configuration == 'Release'
@@ -286,5 +424,12 @@ jobs:
             Set the environment variable `DISABLE_${{ env.LAYER_NAME }}=1` for the
             target process.
 
-            > ⚠️ This build is **not code-signed**. Anti-cheat systems may reject it
-            > and refuse to let OpenXR games load. A signed release is planned.
+            > 🔒 Signed with a **Certum Open Source Code Signing Cloud** certificate
+            > (subject: *Open Source Developer Michael Le dour*). Verify locally with:
+            > ```powershell
+            > signtool verify /pa /v <file>.exe
+            > ```
+            > Windows SmartScreen may still warn ("Unknown publisher") on early
+            > downloads until the publisher reputation builds with volume.
+            > Anti-cheat systems may flag any OpenXR layer DLL — even a signed
+            > one — when loaded into a hooked game.
