@@ -55,21 +55,33 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       # Decide once, up front, whether this run will code-sign anything.
-      # PR/fork builds don't have access to secrets (GitHub blocks them by
-      # design), and Debug matrix entries we never sign. Computing it here
-      # — and only here — keeps the per-step `if:` conditions tidy and
-      # avoids referencing `secrets.*` in step-level `if:`, which is not
-      # allowed.
+      # We sign ONLY when ALL of these are true:
+      #   1. We're on a tag push (refs/tags/v*) — i.e. an actual release.
+      #      Push-to-main, PR, and workflow_dispatch builds are unsigned
+      #      because they're not user-facing artifacts and signing them
+      #      would burn a Certum HSM session per push for no benefit.
+      #   2. The matrix entry is Release (Debug is never signed).
+      #   3. The CERTUM_USERNAME secret is set. PR/fork builds don't have
+      #      access to secrets by GitHub design, so this also keeps them
+      #      green automatically.
+      # Computing it here (and nowhere else) keeps the per-step `if:`
+      # conditions tidy and avoids referencing `secrets.*` directly in a
+      # step-level `if:`, which is not allowed.
       - name: Determine signing eligibility
         id: signing
         shell: pwsh
         env:
           CERTUM_USERNAME: ${{ secrets.CERTUM_USERNAME }}
         run: |
-          $eligible = ($env:CERTUM_USERNAME -ne $null -and $env:CERTUM_USERNAME -ne '') `
-                      -and ('${{ matrix.configuration }}' -eq 'Release')
+          $isTagBuild     = $env:GITHUB_REF -like 'refs/tags/v*'
+          $isReleaseEntry = ('${{ matrix.configuration }}' -eq 'Release')
+          $hasSecret      = -not [string]::IsNullOrEmpty($env:CERTUM_USERNAME)
+          $eligible       = $isTagBuild -and $isReleaseEntry -and $hasSecret
+          Write-Host "isTagBuild     = $isTagBuild  (ref=$env:GITHUB_REF)"
+          Write-Host "isReleaseEntry = $isReleaseEntry"
+          Write-Host "hasSecret      = $hasSecret"
+          Write-Host "should_sign    = $eligible"
           "should_sign=$($eligible.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host "should_sign=$($eligible.ToString().ToLower())"
 
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
