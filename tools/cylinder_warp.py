@@ -146,20 +146,31 @@ def build_mesh_sphere(width, height,
                       n_h, n_v):
     """Build the PIL Image.MESH parameter list for the sphere/dome warp.
 
-    Combines the cylinder horizontal mapping with a vertical inflation
-    by 1/cos(θ_h(u)) so horizontal source lines bow toward v=0.5 at the
-    output's edges. Net visual effect: a rectangular visor opening
-    appears cushion-shaped (smaller at the corners) — what a real
-    helmet visor looks like from inside.
+    Combines the cylinder horizontal mapping with a vertical correction
+    that depends on horizontal position:
+
+    - Positive vertical_angle (cushion): vertical sample inflated by
+      1/cos(θ_h) at the edges. Source horizontal lines bow toward
+      v=0.5 at the output's edges → rectangular visor opening appears
+      cushion-shaped (smaller at corners). Matches a real helmet seen
+      from inside.
+
+    - Negative vertical_angle (barrel/fish-eye): vertical sample
+      compressed by cos(θ_h) at the edges. Source horizontal lines bow
+      AWAY from v=0.5 at the output's edges → rectangular visor
+      opening appears barrel-shaped (bigger at corners). Useful when
+      you want a "porthole" feel where the opening bulges outward.
+
+    Same convention as --angle for the horizontal: positive = forward,
+    negative = inverse direction.
 
     The vertical sample is clamped to [0, 1] so the source's top and
     bottom rows are replicated across the output's corner bands when
-    the inflated v_src would otherwise leave the source. For typical
-    helmet PNGs (uniform padding in the corners) the clamp is
-    invisible.
+    the warped v_src would otherwise leave the source.
     """
+    inverse_v = vertical_angle_deg < 0
     theta_h = math.radians(horizontal_angle_deg)
-    theta_v = math.radians(vertical_angle_deg)
+    theta_v = math.radians(abs(vertical_angle_deg))
     half_tan_h = math.tan(theta_h / 2.0)
     half_tan_v = math.tan(theta_v / 2.0)
 
@@ -167,8 +178,11 @@ def build_mesh_sphere(width, height,
         # Horizontal: same as cylinder mode.
         th = math.atan((u - 0.5) * 2.0 * half_tan_h)
         cos_th = max(math.cos(th), 0.01)  # belt-and-braces against θ→90°.
-        # Vertical: 1/cos(θ_h) inflation produces the cushion bow.
-        tv_arg = (v - 0.5) * 2.0 * half_tan_v / cos_th
+        # Vertical inflation factor:
+        #   cushion (positive vertical_angle): divide by cos_th
+        #   barrel  (negative vertical_angle): multiply by cos_th
+        scale = cos_th if inverse_v else (1.0 / cos_th)
+        tv_arg = (v - 0.5) * 2.0 * half_tan_v * scale
         tv = math.atan(tv_arg)
         u_src = th / theta_h + 0.5
         v_src = tv / theta_v + 0.5
@@ -202,11 +216,13 @@ def warp_image(input_path, output_path,
     print(f"input:  {input_path}: {w}x{h} {img.mode}")
 
     if mode == "sphere":
-        # Default vertical angle = horizontal × pngH/pngW. Treats the
-        # source PNG as an isotropic angular sampling so cells stay
-        # ~square in mesh space; user can override --vertical-angle.
+        # Default vertical angle = horizontal × pngH/pngW (positive,
+        # cushion direction). Treats the source PNG as isotropic
+        # angular sampling so cells stay ~square in mesh space.
+        # User can override --vertical-angle, including with a
+        # negative value to flip to the barrel/fish-eye direction.
         if vertical_angle_deg is None:
-            vertical_angle_deg = central_angle_deg * h / w
+            vertical_angle_deg = abs(central_angle_deg) * h / w
         # Pick n_v so cells remain ~square (~6 px on a 1536×1024 PNG
         # with default n_h=256). Clamp to keep total cell count sane.
         n_v = max(16, min(n_strips, round(n_strips * h / w)))
@@ -222,8 +238,10 @@ def warp_image(input_path, output_path,
     out_size_mb = os.path.getsize(output_path) / 1024 / 1024
     print(f"output: {output_path}: {w}x{h}, {out_size_mb:.1f} MB")
     if mode == "sphere":
+        v_dir = "barrel/fish-eye (opening BIGGER at corners)" if vertical_angle_deg < 0 \
+                else "cushion (opening SMALLER at corners)"
         print(f"mode:   sphere (h={abs(central_angle_deg):.1f}°, "
-              f"v={vertical_angle_deg:.1f}°, mesh: {n_strips}×{n_v})")
+              f"v={vertical_angle_deg:+.1f}° → {v_dir}, mesh: {n_strips}×{n_v})")
     else:
         direction = "inverse (barrel/convex)" if central_angle_deg < 0 else "forward (concave)"
         print(f"mode:   cylinder, {central_angle_deg:.1f}° {direction} "
@@ -231,8 +249,9 @@ def warp_image(input_path, output_path,
 
     # Sanity sample so the user can sanity-check the mapping
     if mode == "sphere":
+        inverse_v = vertical_angle_deg < 0
         theta_h = math.radians(abs(central_angle_deg))
-        theta_v = math.radians(vertical_angle_deg)
+        theta_v = math.radians(abs(vertical_angle_deg))
         half_tan_h = math.tan(theta_h / 2.0)
         half_tan_v = math.tan(theta_v / 2.0)
         print("  sanity (warped (u, v) → source (u, v)):")
@@ -241,12 +260,16 @@ def warp_image(input_path, output_path,
             for u in (0.0, 0.5, 1.0):
                 th = math.atan((u - 0.5) * 2.0 * half_tan_h)
                 cos_th = max(math.cos(th), 0.01)
-                tv = math.atan((v - 0.5) * 2.0 * half_tan_v / cos_th)
+                scale = cos_th if inverse_v else (1.0 / cos_th)
+                tv = math.atan((v - 0.5) * 2.0 * half_tan_v * scale)
                 u_src = th / theta_h + 0.5
                 v_src = max(0.0, min(1.0, tv / theta_v + 0.5))
                 row.append(f"({u_src:.2f},{v_src:.2f})")
             print(f"    v_w={v:.2f}: " + " | ".join(row))
-        print(f"    (top-row clamp at edges = visible if source corners are not uniform)")
+        if inverse_v:
+            print(f"    (barrel: v_w=0 maps to v_src closer to 0.5 at edges)")
+        else:
+            print(f"    (cushion: top-row clamp at edges if source corners are not uniform)")
     else:
         inverse = central_angle_deg < 0
         theta = math.radians(abs(central_angle_deg))
@@ -275,8 +298,10 @@ def main():
                         "Sphere mode ignores the sign.")
     p.add_argument("--vertical-angle", type=float, default=None,
                    help="vertical central angle in degrees, sphere mode only "
-                        "(default = horizontal_angle × pngH/pngW). Smaller values = subtler bow; "
-                        "larger values = stronger bow but more clamping at the source's top/bottom.")
+                        "(default = horizontal_angle × pngH/pngW). "
+                        "Positive = cushion direction (visor opening smaller at corners, real-helmet look). "
+                        "Negative = barrel/fish-eye direction (visor opening bigger at corners, porthole look). "
+                        "|value| controls strength: smaller = subtler, larger = more pronounced.")
     p.add_argument("--strips", type=int, default=256,
                    help="mesh subdivision count along width (default 256; lower = faster but visible seams). "
                         "Sphere mode picks n_vertical from the PNG aspect to keep cells ~square.")
@@ -290,9 +315,11 @@ def main():
         sys.exit(1)
     if args.mode == "sphere":
         if args.angle < 0:
-            print("WARNING: sphere mode ignores the sign on --angle (no inverse mapping defined).", file=sys.stderr)
-        if args.vertical_angle is not None and (args.vertical_angle <= 0 or args.vertical_angle >= 180):
-            print(f"ERROR: --vertical-angle must be in (0, 180), got {args.vertical_angle}", file=sys.stderr)
+            print("WARNING: sphere mode ignores the sign on --angle (no horizontal inverse mapping defined). "
+                  "Use --vertical-angle <negative> if you want to flip the vertical bow direction.",
+                  file=sys.stderr)
+        if args.vertical_angle is not None and (args.vertical_angle == 0 or abs(args.vertical_angle) >= 180):
+            print(f"ERROR: --vertical-angle must be in (-180, 0) ∪ (0, 180), got {args.vertical_angle}", file=sys.stderr)
             sys.exit(1)
 
     warp_image(args.input, args.output,
