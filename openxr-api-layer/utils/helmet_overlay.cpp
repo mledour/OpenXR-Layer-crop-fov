@@ -611,6 +611,107 @@ namespace openxr_api_layer {
         return true;
     }
 
+    bool HelmetOverlay::transitionStereoMode(bool toStereo) {
+        if (m_impl->monoPixelsRgba8.empty() || m_impl->monoPngWidth <= 0 ||
+            m_impl->monoPngHeight <= 0) {
+            Log("HelmetOverlay: cannot transition stereo mode: mono pixels not retained\n");
+            return false;
+        }
+
+        const uint32_t texW = static_cast<uint32_t>(
+            toStereo ? 2 * m_impl->monoPngWidth : m_impl->monoPngWidth);
+        const uint32_t texH = static_cast<uint32_t>(m_impl->monoPngHeight);
+
+        // Allocate the new swapchain(s) BEFORE touching the active set,
+        // so a partial failure leaves the previous mode usable.
+        // Mono destination uses STATIC_IMAGE_BIT (we never re-acquire
+        // on mono). Stereo destination uses regular swapchains so future
+        // re-bakes work, plus a standby for the double-buffered swap.
+        XrSwapchain newActive = XR_NULL_HANDLE;
+        XrSwapchain newStandby = XR_NULL_HANDLE;
+        if (!createBackingSwapchain(&newActive, texW, texH,
+                                    /*staticImage=*/!toStereo)) {
+            return false;
+        }
+        if (toStereo) {
+            if (!createBackingSwapchain(&newStandby, texW, texH,
+                                        /*staticImage=*/false)) {
+                m_impl->api->xrDestroySwapchain(newActive);
+                return false;
+            }
+        }
+
+        // Build the upload buffer for the destination mode. Stereo
+        // bake uses the current m_impl->config (just-updated by the
+        // caller for distance_m / amp / brightness, etc).
+        std::vector<unsigned char> uploadBytes;
+        if (toStereo) {
+            buildStereoUploadBuffer(m_impl->config.distance_m,
+                                    m_impl->config.stereo_depth_amplitude_m,
+                                    uploadBytes);
+        } else {
+            const size_t monoBytes =
+                static_cast<size_t>(m_impl->monoPngWidth) *
+                m_impl->monoPngHeight * 4u;
+            uploadBytes.resize(monoBytes);
+            std::memcpy(uploadBytes.data(),
+                        m_impl->monoPixelsRgba8.data(),
+                        monoBytes);
+            applyBrightness(uploadBytes);
+        }
+
+        // Upload to the new active. On failure, destroy the new
+        // swapchains and return — the previous mode is unchanged.
+        if (!uploadBufferToSwapchain(newActive, texW, texH, uploadBytes.data())) {
+            m_impl->api->xrDestroySwapchain(newActive);
+            if (newStandby != XR_NULL_HANDLE) {
+                m_impl->api->xrDestroySwapchain(newStandby);
+            }
+            return false;
+        }
+        if (toStereo) {
+            if (!uploadBufferToSwapchain(newStandby, texW, texH, uploadBytes.data())) {
+                m_impl->api->xrDestroySwapchain(newActive);
+                m_impl->api->xrDestroySwapchain(newStandby);
+                return false;
+            }
+        }
+
+        // ---- ATOMIC TRANSITION ---------------------------------------
+        // Save old swapchain handles so we can destroy them after the
+        // quad refs are updated to the new ones.
+        const XrSwapchain oldActive = m_impl->swapchain;
+        const XrSwapchain oldStandby = m_impl->swapchainStandby;
+
+        m_impl->swapchain = newActive;
+        m_impl->swapchainStandby = newStandby;
+        m_impl->config.stereo_sbs = toStereo;
+
+        // tryInitQuad reads m_impl->config.stereo_sbs and m_impl->swapchain
+        // and rebuilds quadLeft / quadRight / numQuads / pngAspectRatio
+        // accordingly. It also updates pose/size from the current
+        // distance_m / horizontal_fov_deg / vertical_offset_deg, so
+        // callers can update those fields before calling this method
+        // and have the new values applied in one shot.
+        tryInitQuad(m_impl->monoPngWidth, m_impl->monoPngHeight);
+
+        // Old swapchains are no longer referenced by any quad. Safe to
+        // destroy now.
+        if (oldActive != XR_NULL_HANDLE) {
+            m_impl->api->xrDestroySwapchain(oldActive);
+        }
+        if (oldStandby != XR_NULL_HANDLE) {
+            m_impl->api->xrDestroySwapchain(oldStandby);
+        }
+
+        Log(fmt::format("HelmetOverlay: live-toggled stereo_sbs → {} "
+                        "(swapchain {}×{}, {} quad{})\n",
+                        toStereo ? "true" : "false", texW, texH,
+                        m_impl->numQuads,
+                        m_impl->numQuads == 1 ? "" : "s"));
+        return true;
+    }
+
     // ---- One-shot init driver. Owns the high-level branching:
     //   * Mono mode: single STATIC_IMAGE_BIT swapchain, runtime can
     //     optimize it as a never-changes-after-init asset; the layer
@@ -630,14 +731,18 @@ namespace openxr_api_layer {
         const uint32_t texW = static_cast<uint32_t>(sbs ? 2 * pngWidth : pngWidth);
         const uint32_t texH = static_cast<uint32_t>(pngHeight);
 
-        // Stereo path retains a copy of the mono pixels for live re-bake.
-        // Mono path doesn't need them — the texture is permanent.
-        if (sbs) {
-            const size_t monoBytes = static_cast<size_t>(pngWidth) * pngHeight * 4u;
-            m_impl->monoPixelsRgba8.assign(pngPixels, pngPixels + monoBytes);
-            m_impl->monoPngWidth = pngWidth;
-            m_impl->monoPngHeight = pngHeight;
-        }
+        // Always retain a copy of the mono pixels. They're needed for:
+        //   - stereo SBS re-bake on live-edit of distance_m / amp /
+        //     brightness / image path
+        //   - live toggle of stereo_sbs in either direction (mono→stereo
+        //     needs the source for the new stereo bake; stereo→mono
+        //     needs them for the fresh mono swapchain)
+        // Memory cost: ~10 MB on a 2K helmet PNG. Acceptable for the
+        // flexibility it buys; released in shutdown().
+        const size_t monoBytes = static_cast<size_t>(pngWidth) * pngHeight * 4u;
+        m_impl->monoPixelsRgba8.assign(pngPixels, pngPixels + monoBytes);
+        m_impl->monoPngWidth = pngWidth;
+        m_impl->monoPngHeight = pngHeight;
 
         // Active swapchain: STATIC_IMAGE for mono, regular for stereo.
         if (!createBackingSwapchain(&m_impl->swapchain, texW, texH, /*staticImage=*/!sbs)) {
@@ -808,8 +913,10 @@ namespace openxr_api_layer {
             std::abs(m_impl->config.brightness - newConfig.brightness) < 1e-3f;
         const bool sameImage =
             (m_impl->config.imageRelativePath == newConfig.imageRelativePath);
+        const bool sameStereoSbs =
+            (m_impl->config.stereo_sbs == newConfig.stereo_sbs);
         if (sameDistance && sameFov && sameVOffset && sameDepthAmp &&
-            sameBrightness && sameImage) return;
+            sameBrightness && sameImage && sameStereoSbs) return;
 
         // ---- PNG path live-edit (stereo mode only). -----------------
         // Mono mode uses STATIC_IMAGE_BIT — the swapchain is locked
@@ -883,6 +990,27 @@ namespace openxr_api_layer {
         m_impl->config.stereo_depth_amplitude_m  = newConfig.stereo_depth_amplitude_m;
         m_impl->config.brightness                = newConfig.brightness;
 
+        // ---- stereo_sbs live toggle. ---------------------------------
+        // The transition uses the just-updated config (distance_m,
+        // brightness, etc) for the fresh bake — so toggling stereo_sbs
+        // and changing distance_m in the same edit is one bake, not two.
+        // On failure m_impl->config.stereo_sbs is left at its previous
+        // value, the previous swapchain set is untouched, and the quads
+        // continue rendering correctly. m_impl->config.stereo_sbs is
+        // updated only inside the successful branch of
+        // transitionStereoMode.
+        bool stereoTransitioned = false;
+        if (!sameStereoSbs) {
+            if (transitionStereoMode(newConfig.stereo_sbs)) {
+                stereoTransitioned = true;
+            } else {
+                Log(fmt::format("HelmetOverlay: stereo_sbs {} → {} transition failed; "
+                                "previous mode retained\n",
+                                m_impl->config.stereo_sbs ? "true" : "false",
+                                newConfig.stereo_sbs ? "true" : "false"));
+            }
+        }
+
         constexpr float kPi = 3.14159265358979323846f;
         const float halfFov = newConfig.horizontal_fov_deg * 0.5f * kPi / 180.0f;
         const float quadW = 2.0f * newConfig.distance_m * std::tan(halfFov);
@@ -918,7 +1046,9 @@ namespace openxr_api_layer {
         // The rebake always reads the *current* m_impl->config and
         // m_impl->monoPixelsRgba8, both already updated above, so a
         // single rebake call covers any combination of changes.
-        if (m_impl->config.stereo_sbs &&
+        // Skipped if we just transitioned to stereo — the transition
+        // already produced a fresh bake with the new config values.
+        if (m_impl->config.stereo_sbs && !stereoTransitioned &&
             (!sameDistance || !sameFov || !sameDepthAmp ||
              !sameBrightness || reloadedPng)) {
             rebakeStereoTexture(newConfig.distance_m,

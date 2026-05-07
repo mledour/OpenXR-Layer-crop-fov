@@ -110,7 +110,10 @@ namespace openxr_api_layer {
         // distance_m) and aspect (driven by the mono PNG aspect) are
         // both unchanged from mono mode; only the swapchain is wider.
         //
-        // Set at session start; needs a session restart to toggle.
+        // Live-tunable: a change destroys the old swapchain(s), creates
+        // fresh one(s) at the new size, fills them with a mode-
+        // appropriate bake, and rebuilds the quads — all atomic at the
+        // next xrEndFrame (see HelmetOverlay::transitionStereoMode).
         bool stereo_sbs = false;
 
         // Depth amplitude for the cosine profile, in meters. The visor
@@ -200,12 +203,18 @@ namespace openxr_api_layer {
         //                                  mono mode and dimension
         //                                  mismatches log a hint to
         //                                  restart the session)
+        //   - stereo_sbs                  (toggles between mono and
+        //                                  stereo SBS: destroys / re-
+        //                                  creates the swapchain(s) at
+        //                                  the new dimensions, rebuilds
+        //                                  the quads, atomically swaps
+        //                                  the active set)
         // The stereo re-bake uses a double-buffered swapchain pair
         // (active + standby) so the swap is atomic and visually
         // glitch-free at the next xrEndFrame.
-        // Toggling enabled, switching stereo_sbs on/off, or swapping
-        // PNGs of different dimensions still requires a session
-        // restart — those would need a fresh initialize() call.
+        // Toggling enabled or swapping PNGs of different dimensions
+        // still requires a session restart — those would need a fresh
+        // initialize() call.
         // No-op if the overlay is not armed.
         void updateLiveTunables(const HelmetOverlayConfig& newConfig);
 
@@ -268,6 +277,23 @@ namespace openxr_api_layer {
         // the new active swapchain. Returns false on upload failure
         // (caller leaves the active swapchain unchanged).
         bool rebakeStereoTexture(float newDistanceM, float newDepthAmpM);
+
+        // Live toggle of stereo_sbs. The two modes use different
+        // swapchain dimensions (W×H mono vs 2W×H stereo) and a
+        // different number of composition layers (1 BOTH vs 2 LEFT/
+        // RIGHT), so the transition destroys the old swapchain(s),
+        // creates fresh one(s) at the new size, fills them with a
+        // mode-appropriate bake, and rebuilds the quads via
+        // tryInitQuad.
+        // The swap is atomic at the next xrEndFrame: m_impl->swapchain
+        // (and quad references) are updated only after the new
+        // swapchains are fully populated, so a frame between the call
+        // and the next xrEndFrame still composites the previous mode
+        // correctly.
+        // Returns false (and leaves the previous mode in place) on
+        // any allocation / upload failure. m_impl->config.stereo_sbs
+        // is updated only on success.
+        bool transitionStereoMode(bool toStereo);
 
         struct Impl;
         std::unique_ptr<Impl> m_impl;
