@@ -159,6 +159,12 @@ namespace openxr_api_layer {
         int monoPngWidth = 0;
         int monoPngHeight = 0;
 
+        // Helmets directory (e.g. %LOCALAPPDATA%\<layer>\helmets)
+        // captured at initialize() time so live-edit of
+        // config.imageRelativePath can resolve the new path against
+        // the same root. Empty until initialize() runs successfully.
+        std::filesystem::path helmetsDir;
+
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
 
@@ -319,6 +325,7 @@ namespace openxr_api_layer {
         m_impl->config = config;
         m_impl->api = api;
         m_impl->session = session;
+        m_impl->helmetsDir = helmetsDir;
 
         if (!config.enabled) {
             Log("HelmetOverlay: disabled by config, staying inert\n");
@@ -797,12 +804,84 @@ namespace openxr_api_layer {
             std::abs(m_impl->config.vertical_offset_deg - newConfig.vertical_offset_deg) < 1e-3f;
         const bool sameDepthAmp =
             std::abs(m_impl->config.stereo_depth_amplitude_m - newConfig.stereo_depth_amplitude_m) < 1e-4f;
-        if (sameDistance && sameFov && sameVOffset && sameDepthAmp) return;
+        const bool sameBrightness =
+            std::abs(m_impl->config.brightness - newConfig.brightness) < 1e-3f;
+        const bool sameImage =
+            (m_impl->config.imageRelativePath == newConfig.imageRelativePath);
+        if (sameDistance && sameFov && sameVOffset && sameDepthAmp &&
+            sameBrightness && sameImage) return;
+
+        // ---- PNG path live-edit (stereo mode only). -----------------
+        // Mono mode uses STATIC_IMAGE_BIT — the swapchain is locked
+        // after init. Stereo mode keeps the mono pixels around and
+        // can re-bake into the standby swapchain, but only if the
+        // new PNG matches the existing dimensions (different dims
+        // would require destroying and recreating both swapchains,
+        // which is not implemented here).
+        bool reloadedPng = false;
+        if (!sameImage) {
+            if (!m_impl->config.stereo_sbs) {
+                Log(fmt::format("HelmetOverlay: image '{}' → '{}' requires a session "
+                                "restart in mono mode (STATIC_IMAGE swapchain is "
+                                "locked after init)\n",
+                                m_impl->config.imageRelativePath,
+                                newConfig.imageRelativePath));
+            } else {
+                const std::filesystem::path pngPath =
+                    m_impl->helmetsDir / newConfig.imageRelativePath;
+                if (!std::filesystem::exists(pngPath)) {
+                    Log(fmt::format("HelmetOverlay: image '{}' not found at '{}', "
+                                    "keeping previous\n",
+                                    newConfig.imageRelativePath, pngPath.string()));
+                } else {
+                    uint8_t* newPixels = nullptr;
+                    int newW = 0, newH = 0;
+                    if (loadPngRgba8(pngPath, &newPixels, &newW, &newH)) {
+                        if (newW != m_impl->monoPngWidth ||
+                            newH != m_impl->monoPngHeight) {
+                            Log(fmt::format("HelmetOverlay: image '{}' has different "
+                                            "dimensions ({}x{}) than current ({}x{}); "
+                                            "live-swap of different-sized PNGs is not "
+                                            "supported, restart session to apply\n",
+                                            newConfig.imageRelativePath, newW, newH,
+                                            m_impl->monoPngWidth, m_impl->monoPngHeight));
+                            stbi_image_free(newPixels);
+                        } else {
+                            const size_t newBytes =
+                                static_cast<size_t>(newW) * newH * 4u;
+                            m_impl->monoPixelsRgba8.assign(newPixels,
+                                                           newPixels + newBytes);
+                            stbi_image_free(newPixels);
+                            m_impl->config.imageRelativePath =
+                                newConfig.imageRelativePath;
+                            reloadedPng = true;
+                            Log(fmt::format("HelmetOverlay: live-loaded image '{}' "
+                                            "({}x{})\n",
+                                            newConfig.imageRelativePath, newW, newH));
+                        }
+                    }
+                    // loadPngRgba8 logs its own failure reason on error
+                }
+            }
+        }
+
+        // ---- Brightness live-tunable (stereo mode only). -------------
+        // Bakes into the disparity texture via applyBrightness during
+        // re-bake. Mono mode can't apply brightness changes live — the
+        // texture is STATIC_IMAGE — but we still update the config so
+        // subsequent reloads don't trigger the warning twice.
+        if (!sameBrightness && !m_impl->config.stereo_sbs) {
+            Log(fmt::format("HelmetOverlay: brightness {} → {} requires a session "
+                            "restart in mono mode (STATIC_IMAGE swapchain is "
+                            "locked after init)\n",
+                            m_impl->config.brightness, newConfig.brightness));
+        }
 
         m_impl->config.distance_m                = newConfig.distance_m;
         m_impl->config.horizontal_fov_deg        = newConfig.horizontal_fov_deg;
         m_impl->config.vertical_offset_deg       = newConfig.vertical_offset_deg;
         m_impl->config.stereo_depth_amplitude_m  = newConfig.stereo_depth_amplitude_m;
+        m_impl->config.brightness                = newConfig.brightness;
 
         constexpr float kPi = 3.14159265358979323846f;
         const float halfFov = newConfig.horizontal_fov_deg * 0.5f * kPi / 180.0f;
@@ -829,12 +908,19 @@ namespace openxr_api_layer {
                         newConfig.distance_m, newConfig.horizontal_fov_deg,
                         newConfig.vertical_offset_deg, quadW, quadH));
 
-        // Stereo SBS: re-bake the texture if any input to the disparity
-        // formula changed (distance_m, depth_amp, or quadW which
-        // depends on horizontal_fov_deg and distance_m).
-        // Brightness is captured at re-bake time too — if the user
-        // changes distance and brightness in the same edit, both apply.
-        if (m_impl->config.stereo_sbs && (!sameDistance || !sameFov || !sameDepthAmp)) {
+        // Stereo SBS: re-bake the texture if any input to the bake
+        // changed:
+        //   - distance_m (in the disparity formula AND quadW)
+        //   - horizontal_fov_deg (in quadW)
+        //   - stereo_depth_amplitude_m (in Z(u))
+        //   - brightness (applied to the bake buffer)
+        //   - the source PNG itself (reloadedPng)
+        // The rebake always reads the *current* m_impl->config and
+        // m_impl->monoPixelsRgba8, both already updated above, so a
+        // single rebake call covers any combination of changes.
+        if (m_impl->config.stereo_sbs &&
+            (!sameDistance || !sameFov || !sameDepthAmp ||
+             !sameBrightness || reloadedPng)) {
             rebakeStereoTexture(newConfig.distance_m,
                                 newConfig.stereo_depth_amplitude_m);
         }
@@ -862,6 +948,7 @@ namespace openxr_api_layer {
         m_impl->monoPixelsRgba8.shrink_to_fit();
         m_impl->monoPngWidth = 0;
         m_impl->monoPngHeight = 0;
+        m_impl->helmetsDir.clear();
         m_impl->context.Reset();
         m_impl->device.Reset();
         m_impl->session = XR_NULL_HANDLE;

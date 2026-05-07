@@ -89,8 +89,9 @@ namespace openxr_api_layer {
         // the PNG has highlights that look natural in studio lighting
         // but cramée on a bright VR HMD in a dim cockpit. Alpha is
         // never multiplied, so the visor cutout stays transparent.
-        // Applied once at session start; needs a session restart to
-        // re-apply (no live-edit yet).
+        // Live-tunable in stereo SBS mode (re-applied at the next bake);
+        // mono mode requires a session restart because the texture is
+        // STATIC_IMAGE-locked.
         float brightness = 1.0f;
 
         // When true, the layer generates a side-by-side stereo image
@@ -188,11 +189,22 @@ namespace openxr_api_layer {
         //   - stereo_depth_amplitude_m    (re-bakes the SBS texture
         //                                  with the new disparity
         //                                  amplitude — stereo mode only)
+        //   - brightness                  (re-applied on the next
+        //                                  re-bake — stereo mode only;
+        //                                  mono mode logs a hint to
+        //                                  restart the session)
+        //   - image (path)                (loads the new PNG, validates
+        //                                  it has the same dimensions
+        //                                  as the current asset, then
+        //                                  re-bakes — stereo mode only;
+        //                                  mono mode and dimension
+        //                                  mismatches log a hint to
+        //                                  restart the session)
         // The stereo re-bake uses a double-buffered swapchain pair
         // (active + standby) so the swap is atomic and visually
         // glitch-free at the next xrEndFrame.
-        // Toggling enabled, replacing the PNG, switching stereo_sbs
-        // on/off, or changing brightness still requires a session
+        // Toggling enabled, switching stereo_sbs on/off, or swapping
+        // PNGs of different dimensions still requires a session
         // restart — those would need a fresh initialize() call.
         // No-op if the overlay is not armed.
         void updateLiveTunables(const HelmetOverlayConfig& newConfig);
