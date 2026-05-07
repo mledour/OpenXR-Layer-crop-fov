@@ -36,6 +36,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 // Header is self-sufficient regarding OpenXR types: pulled in here so
 // translation units that include this without going through pch.h
@@ -88,9 +89,48 @@ namespace openxr_api_layer {
         // the PNG has highlights that look natural in studio lighting
         // but cramée on a bright VR HMD in a dim cockpit. Alpha is
         // never multiplied, so the visor cutout stays transparent.
-        // Applied once at session start; needs a session restart to
-        // re-apply (no live-edit yet).
+        // Live-tunable in stereo SBS mode (re-applied at the next bake);
+        // mono mode requires a session restart because the texture is
+        // STATIC_IMAGE-locked.
         float brightness = 1.0f;
+
+        // When true, the layer generates a side-by-side stereo image
+        // from the (mono) PNG at session init: each output column is
+        // sampled from the source with a horizontal disparity offset
+        // computed from a cosine depth profile (edges closer to the eye
+        // than the center, like a real visor wrapping around the face),
+        // the IPD, and stereo_depth_amplitude_m below. The two halves
+        // are uploaded to a single 2×W × H swapchain; the layer then
+        // submits two XrCompositionLayerQuad pointing at it via split
+        // subImage.imageRect with EYE_VISIBILITY_LEFT / EYE_VISIBILITY_RIGHT.
+        // Single texture, single upload, two layer pointers per frame.
+        //
+        // The user's PNG stays mono — no external tool required. The
+        // quad's physical width (driven by horizontal_fov_deg and
+        // distance_m) and aspect (driven by the mono PNG aspect) are
+        // both unchanged from mono mode; only the swapchain is wider.
+        //
+        // Live-tunable: a change destroys the old swapchain(s), creates
+        // fresh one(s) at the new size, fills them with a mode-
+        // appropriate bake, and rebuilds the quads — all atomic at the
+        // next xrEndFrame (see HelmetOverlay::transitionStereoMode).
+        bool stereo_sbs = false;
+
+        // Depth amplitude for the cosine profile, in meters. The visor
+        // edges are simulated as Δ closer to the eye than the center:
+        //   Z(u) = distance_m − stereo_depth_amplitude_m · sin²(π(u−0.5))
+        // Disparity scales with (Z − D)/Z, so the perceived depth grows
+        // with this value and shrinks with distance_m.
+        // Effect rule of thumb: at distance_m=0.15, ~3 cm gives a soft
+        // wrap; ~10 cm pushes the edges noticeably toward the face.
+        // At distance_m=0.5, you typically need 10–20 cm to get a
+        // perceptible effect.
+        // Live-tunable: a change re-bakes the SBS texture into the
+        // standby swapchain and atomically swaps it in place — no
+        // session restart needed (see HelmetOverlay::rebakeStereoTexture).
+        // Clamped to [0, 0.5] m by the parser. Ignored when stereo_sbs
+        // is false.
+        float stereo_depth_amplitude_m = 0.05f;
     };
 
     // Opaque backend — hides D3D types from every TU that only needs to
@@ -113,7 +153,7 @@ namespace openxr_api_layer {
         // (config.imageRelativePath) is resolved against — typically
         // %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets so users
         // can drop PNGs without admin elevation. Returns true if the
-        // overlay is armed and will contribute a layer in appendLayer();
+        // overlay is armed and will contribute layer(s) in appendLayers();
         // false means "silently degrade to bypass" per best-practices.
         bool initialize(OpenXrApi* api,
                         XrSession session,
@@ -125,28 +165,56 @@ namespace openxr_api_layer {
         // invalid. Always safe to call, even if initialize() returned false.
         void shutdown();
 
-        // Called from xrEndFrame. If the overlay is armed, renders the
-        // visor into its swapchain and writes a pointer to a
-        // XrCompositionLayerQuad (owned by *this*, stable until the next
-        // appendLayer() call) into *outLayer. Returns false if the overlay
-        // is not armed or could not produce a layer this frame, in which
-        // case *outLayer is left untouched.
-        bool appendLayer(XrTime displayTime,
-                         const XrCompositionLayerBaseHeader** outLayer);
+        // Maximum number of composition layers appendLayers() can emit.
+        // 1 in mono mode, 2 in stereo SBS mode (one quad per eye).
+        static constexpr size_t kMaxLayers = 2;
 
-        // Apply a live-edit reload of settings.json. Only fields safe
-        // to change without rebuilding swapchain/textures are honoured:
-        //   - distance_m            (re-poses the quad in view space)
-        //   - horizontal_fov_deg    (resizes the quad's apparent FOV;
-        //                            physical width is recomputed from
-        //                            distance_m × tan(fov/2))
-        //   - vertical_offset_deg   (shifts the quad up/down by an
-        //                            angle in the user's view; world-
-        //                            space Y is recomputed from
-        //                            distance_m × tan(deg))
-        // Toggling enabled, replacing the PNG, or changing brightness
-        // still requires a session restart — those would need swapchain
-        // / staging-texture reallocation and a fresh initialize() call.
+        // Called from xrEndFrame. If the overlay is armed, writes up to
+        // kMaxLayers pointers into outLayers[] (each pointing at an
+        // XrCompositionLayerQuad owned by *this*, stable until the next
+        // appendLayers() call) and returns the number written. Returns
+        // 0 if the overlay is not armed or could not produce layers
+        // this frame, in which case outLayers is left untouched.
+        // Caller must provide an array of at least kMaxLayers slots.
+        size_t appendLayers(XrTime displayTime,
+                            const XrCompositionLayerBaseHeader** outLayers);
+
+        // Apply a live-edit reload of settings.json. Honoured fields:
+        //   - distance_m                  (re-poses the quad; in stereo
+        //                                  SBS mode also re-bakes the
+        //                                  texture so the disparity
+        //                                  matches the new geometry)
+        //   - horizontal_fov_deg          (resizes the quad's apparent
+        //                                  FOV; in stereo SBS mode also
+        //                                  re-bakes since quadW changes)
+        //   - vertical_offset_deg         (shifts the quad up/down by
+        //                                  an angle in the user's view)
+        //   - stereo_depth_amplitude_m    (re-bakes the SBS texture
+        //                                  with the new disparity
+        //                                  amplitude — stereo mode only)
+        //   - brightness                  (re-applied on the next
+        //                                  re-bake — stereo mode only;
+        //                                  mono mode logs a hint to
+        //                                  restart the session)
+        //   - image (path)                (loads the new PNG, validates
+        //                                  it has the same dimensions
+        //                                  as the current asset, then
+        //                                  re-bakes — stereo mode only;
+        //                                  mono mode and dimension
+        //                                  mismatches log a hint to
+        //                                  restart the session)
+        //   - stereo_sbs                  (toggles between mono and
+        //                                  stereo SBS: destroys / re-
+        //                                  creates the swapchain(s) at
+        //                                  the new dimensions, rebuilds
+        //                                  the quads, atomically swaps
+        //                                  the active set)
+        // The stereo re-bake uses a double-buffered swapchain pair
+        // (active + standby) so the swap is atomic and visually
+        // glitch-free at the next xrEndFrame.
+        // Toggling enabled or swapping PNGs of different dimensions
+        // still requires a session restart — those would need a fresh
+        // initialize() call.
         // No-op if the overlay is not armed.
         void updateLiveTunables(const HelmetOverlayConfig& newConfig);
 
@@ -161,6 +229,71 @@ namespace openxr_api_layer {
         // the XrCompositionLayerQuad on top of those.
         bool createSwapchainFromPng(const uint8_t* pngPixels, int pngWidth, int pngHeight);
         bool tryInitQuad(int pngWidth, int pngHeight);
+
+        // Forward decl for size_t / pointer types in helper signatures.
+        // (uint8_t / size_t come in via pch.h on the .cpp side; the
+        // header doesn't pull <cstdint>, but `unsigned char*` is fine.)
+
+        // Create one XR swapchain handle of the given dimensions. When
+        // staticImage is true the runtime is told the image will be
+        // written exactly once (mono path); when false the image can
+        // be re-acquired and overwritten (stereo path with live re-bake).
+        bool createBackingSwapchain(XrSwapchain* outSwapchain,
+                                    uint32_t width, uint32_t height,
+                                    bool staticImage);
+
+        // Acquire / wait / CopyResource(staging→swapchain) / release for
+        // a single full-image upload. Caller-supplied bytes must match
+        // width × height × 4 (RGBA8). Returns true on success; on
+        // failure the swapchain image is released best-effort to avoid
+        // wedging the runtime on a phantom in-flight image.
+        bool uploadBufferToSwapchain(XrSwapchain swapchain,
+                                     uint32_t width, uint32_t height,
+                                     const unsigned char* bytes);
+
+        // Apply m_impl->config.brightness to RGB channels of the buffer
+        // in-place. Alpha is left untouched (visor cutout stays
+        // transparent at brightness=0). No-op when brightness ≥ ~1.0.
+        void applyBrightness(std::vector<unsigned char>& buffer);
+
+        // Build a full upload buffer (2W × H RGBA8) by baking stereo
+        // SBS disparity from the saved mono pixels with the given
+        // (distance_m, depth_amplitude_m), then applying brightness.
+        // Used both at init and on live re-bake.
+        void buildStereoUploadBuffer(float distanceM, float depthAmpM,
+                                     std::vector<unsigned char>& outBuffer);
+
+        // Bake the SBS texture for the given (distance_m,
+        // depth_amplitude_m) into the given swapchain handle. Used at
+        // init to fill the active swapchain, and again at runtime to
+        // fill the standby swapchain on live-edit.
+        bool uploadStereoToSwapchain(XrSwapchain swapchain,
+                                     float distanceM,
+                                     float depthAmpM);
+
+        // On live-edit of distance_m or stereo_depth_amplitude_m: bake a
+        // new texture into the standby swapchain, then atomically swap
+        // the active/standby pointers and update both quads to reference
+        // the new active swapchain. Returns false on upload failure
+        // (caller leaves the active swapchain unchanged).
+        bool rebakeStereoTexture(float newDistanceM, float newDepthAmpM);
+
+        // Live toggle of stereo_sbs. The two modes use different
+        // swapchain dimensions (W×H mono vs 2W×H stereo) and a
+        // different number of composition layers (1 BOTH vs 2 LEFT/
+        // RIGHT), so the transition destroys the old swapchain(s),
+        // creates fresh one(s) at the new size, fills them with a
+        // mode-appropriate bake, and rebuilds the quads via
+        // tryInitQuad.
+        // The swap is atomic at the next xrEndFrame: m_impl->swapchain
+        // (and quad references) are updated only after the new
+        // swapchains are fully populated, so a frame between the call
+        // and the next xrEndFrame still composites the previous mode
+        // correctly.
+        // Returns false (and leaves the previous mode in place) on
+        // any allocation / upload failure. m_impl->config.stereo_sbs
+        // is updated only on success.
+        bool transitionStereoMode(bool toStereo);
 
         struct Impl;
         std::unique_ptr<Impl> m_impl;
