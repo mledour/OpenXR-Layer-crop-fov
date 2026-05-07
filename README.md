@@ -1,6 +1,7 @@
 # XR_APILAYER_MLEDOUR_fov_crop
 
-An OpenXR API layer for Windows with two opt-in features:
+An OpenXR API layer for Windows with two features, both **enabled
+by default** in the shipped template:
 
 1. **FOV crop** — narrows the effective field of view and swapchain
    resolution. Your game renders fewer pixels per frame, every frame
@@ -37,8 +38,9 @@ headset modification required.
    OpenXR loader.
 4. A default `settings.json` is dropped in
    `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\`. **The layer is
-   disabled by default** — see [Configuration](#configuration) below
-   to turn it on.
+   enabled by default** for every new game — see
+   [Configuration](#configuration) below to tune the crop ratios or
+   disable it on a per-game basis.
 
 ### Manual (ZIP)
 
@@ -148,9 +150,11 @@ The layer does the math in tan-space (the pixel ↔ angle mapping of
 perspective projection), so the bar lands at the configured percentage
 to the pixel — regardless of the HMD's native FOV or eye offset.
 
-**To activate the FOV crop**, flip `"enabled": false` to `"enabled": true`
-either:
-- in `settings.json` — applies to every **future** game you launch, or
+**The FOV crop is on by default** in the shipped template. To
+**disable** it (or re-enable it after disabling), flip the
+`"enabled"` field:
+- in `settings.json` — applies to every **future** game you launch
+  (existing per-app files are not touched), or
 - in a specific `<app>_settings.json` — applies to that game only.
 
 The helmet overlay is independent and follows the same rule with
