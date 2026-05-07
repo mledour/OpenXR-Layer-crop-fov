@@ -1,6 +1,7 @@
 # XR_APILAYER_MLEDOUR_fov_crop
 
-An OpenXR API layer for Windows with two opt-in features:
+An OpenXR API layer for Windows with two features, both **enabled
+by default** in the shipped template:
 
 1. **FOV crop** — narrows the effective field of view and swapchain
    resolution. Your game renders fewer pixels per frame, every frame
@@ -37,8 +38,9 @@ headset modification required.
    OpenXR loader.
 4. A default `settings.json` is dropped in
    `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\`. **The layer is
-   disabled by default** — see [Configuration](#configuration) below
-   to turn it on.
+   enabled by default** for every new game — see
+   [Configuration](#configuration) below to tune the crop ratios or
+   disable it on a per-game basis.
 
 ### Manual (ZIP)
 
@@ -100,30 +102,30 @@ have their own file.
 
 ```json
 {
-  "enabled": false,
-  "crop_left_percent": 10,
-  "crop_right_percent": 10,
-  "crop_top_percent": 15,
-  "crop_bottom_percent": 20,
+  "enabled": true,
+  "crop_left_percent": 6,
+  "crop_right_percent": 6,
+  "crop_top_percent": 40,
+  "crop_bottom_percent": 32,
   "live_edit": false,
   "helmet_overlay": {
-    "enabled": false,
-    "image": "helmet_visor.png",
-    "distance_m": 0.5,
-    "horizontal_fov_deg": 130,
-    "vertical_offset_deg": 0.0,
-    "brightness": 1.0
+    "enabled": true,
+    "image": "helmet-F1_medium.png",
+    "distance_m": 0.25,
+    "horizontal_fov_deg": 115,
+    "vertical_offset_deg": -8,
+    "brightness": 0.25
   }
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | Master switch for the FOV crop — the crop is **opt-in** and a no-op until you flip this to `true`. The helmet overlay below has its own `enabled` flag and runs independently. |
-| `crop_left_percent` | float | `10` | Percentage of the image covered by the black bar on the left edge (0-50). |
-| `crop_right_percent` | float | `10` | Percentage of the image covered by the black bar on the right edge (0-50). |
-| `crop_top_percent` | float | `15` | Percentage of the image covered by the black bar on the top edge (0-50). |
-| `crop_bottom_percent` | float | `20` | Percentage of the image covered by the black bar on the bottom edge (0-50). |
+| `enabled` | bool | `true` | Master switch for the FOV crop. The shipped default is `true`, so the crop is active out of the box for any new game; flip to `false` to disable it for that game. The helmet overlay below has its own `enabled` flag and runs independently. |
+| `crop_left_percent` | float | `6` | Percentage of the image covered by the black bar on the left edge (0-50). |
+| `crop_right_percent` | float | `6` | Percentage of the image covered by the black bar on the right edge (0-50). |
+| `crop_top_percent` | float | `40` | Percentage of the image covered by the black bar on the top edge (0-50). |
+| `crop_bottom_percent` | float | `32` | Percentage of the image covered by the black bar on the bottom edge (0-50). |
 | `live_edit` | bool | `false` | When true, the layer re-reads the config every ~1 second so you can tune values in-game. Picks up changes to crop percentages and to `helmet_overlay.distance_m` / `helmet_overlay.horizontal_fov_deg` / `helmet_overlay.vertical_offset_deg`. Set back to false once you're happy. |
 | `helmet_overlay` | object | (see below) | Helmet overlay configuration. See [Helmet overlay](#helmet-overlay). |
 
@@ -148,9 +150,11 @@ The layer does the math in tan-space (the pixel ↔ angle mapping of
 perspective projection), so the bar lands at the configured percentage
 to the pixel — regardless of the HMD's native FOV or eye offset.
 
-**To activate the FOV crop**, flip `"enabled": false` to `"enabled": true`
-either:
-- in `settings.json` — applies to every **future** game you launch, or
+**The FOV crop is on by default** in the shipped template. To
+**disable** it (or re-enable it after disabling), flip the
+`"enabled"` field:
+- in `settings.json` — applies to every **future** game you launch
+  (existing per-app files are not touched), or
 - in a specific `<app>_settings.json` — applies to that game only.
 
 The helmet overlay is independent and follows the same rule with
@@ -164,7 +168,8 @@ through and what they don't — the typical content is "opaque foam
 all around, transparent rectangle in front of the eyes for the
 visor", which gives the perception of being inside a real helmet.
 
-A starter `helmet_visor.png` (3:2, 2048×1365) ships with the
+Three starter helmet PNGs (`helmet-F1_thin.png`,
+`helmet-F1_medium.png`, `helmet-F1_large.png`) ship with the
 installer. The overlay loads PNGs from the user-writable directory
 
 ```
@@ -184,9 +189,9 @@ needed to add or swap helmets.
 ### Upgrade policy
 
 - **Bundled filenames are canonical.** The installer **overwrites**
-  same-named PNGs on every upgrade, so a fix or refresh of
-  `helmet_visor.png` in the build propagates automatically. If you
-  edit `helmet_visor.png` in place, your changes will be wiped on
+  same-named PNGs on every upgrade, so a fix or refresh of any
+  bundled `helmet-F1_*.png` in the build propagates automatically.
+  If you edit a bundled PNG in place, your changes will be wiped on
   the next install.
 - **User-added PNGs (different filenames) are never touched.**
   Drop `arai_full_face.png`, `kart_open.png`, anything you like —
@@ -212,27 +217,27 @@ just by changing the `image` field.
 
 ```json
 "helmet_overlay": {
-  "enabled": false,
-  "image": "helmet_visor.png",
-  "distance_m": 0.5,
-  "horizontal_fov_deg": 130,
-  "vertical_offset_deg": 0.0,
-  "brightness": 1.0
+  "enabled": true,
+  "image": "helmet-F1_medium.png",
+  "distance_m": 0.25,
+  "horizontal_fov_deg": 115,
+  "vertical_offset_deg": -8,
+  "brightness": 0.25
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | Master switch for the helmet overlay. |
-| `image` | string | `helmet_visor.png` | Filename of the PNG to load, resolved relative to `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\`. Change this to switch between several PNGs you keep in that folder side by side. |
-| `distance_m` | float | `0.5` | **Depth-feel knob**: distance from the eye to the quad's plane, in meters. Controls the stereo disparity, i.e. how "close to your face" the helmet feels. Try `0.15` for "right against the face" (real helmet feel), `0.3` for "close but not claustrophobic", `0.5` for "TV-in-front-of-you". Live-tunable. |
-| `horizontal_fov_deg` | float | `130` | **Coverage knob**: angular width of the quad in your view, in degrees. Clamped to `[10°, 270°]`. The physical quad width is derived as `2 × distance_m × tan(fov/2)`, so changing `distance_m` no longer also changes coverage — these two parameters are orthogonal and can be tuned independently. Try `90°` for "tight visor", `130°` for "moderate wraparound", `180°` for "ear-to-ear". Quad height follows the PNG aspect ratio so the image is never stretched. Live-tunable. |
-| `vertical_offset_deg` | float | `0.0` | **Position knob**: shifts the quad up (`+`) or down (`-`) by an angle in your view, in degrees. Clamped to `[-30°, +30°]`. Decoupled from `distance_m` — at any distance, "+5°" always shifts the helmet up by 5° in your FOV. Useful when the helmet sits slightly above or below your gaze line because of HMD lens placement or asymmetric `crop_top` / `crop_bottom`. Try `+2°` (helmet up) or `-2°` (helmet down) and adjust to taste. Live-tunable. |
-| `brightness` | float | `1.0` | RGB multiplier applied at load time, clamped to `[0.0, 1.0]`. `1.0` = pristine PNG, `0.5` = half luminance, `0.0` = pure black. Useful when studio-lit photos look cramée on a bright VR HMD in a dim cockpit. Alpha is never multiplied so the visor cutout stays transparent at any value. **Not** live-tunable — changing it requires a session restart (the texture is uploaded once at session start). |
+| `enabled` | bool | `true` | Master switch for the helmet overlay. |
+| `image` | string | `helmet-F1_medium.png` | Filename of the PNG to load, resolved relative to `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\`. Change this to switch between several PNGs you keep in that folder side by side. |
+| `distance_m` | float | `0.25` | **Depth-feel knob**: distance from the eye to the quad's plane, in meters. Controls the stereo disparity, i.e. how "close to your face" the helmet feels. Try `0.15` for "right against the face" (real helmet feel), `0.25` for "close but not claustrophobic" (default), `0.5` for "TV-in-front-of-you". Live-tunable. |
+| `horizontal_fov_deg` | float | `115` | **Coverage knob**: angular width of the quad in your view, in degrees. Clamped to `[10°, 270°]`. The physical quad width is derived as `2 × distance_m × tan(fov/2)`, so changing `distance_m` no longer also changes coverage — these two parameters are orthogonal and can be tuned independently. Try `90°` for "tight visor", `115°` for "moderate wraparound" (default), `180°` for "ear-to-ear". Quad height follows the PNG aspect ratio so the image is never stretched. Live-tunable. |
+| `vertical_offset_deg` | float | `-8` | **Position knob**: shifts the quad up (`+`) or down (`-`) by an angle in your view, in degrees. Clamped to `[-30°, +30°]`. Decoupled from `distance_m` — at any distance, "+5°" always shifts the helmet up by 5° in your FOV. Useful when the helmet sits slightly above or below your gaze line because of HMD lens placement or asymmetric `crop_top` / `crop_bottom`. The default `-8°` drops the helmet slightly below the gaze line to clear the cockpit horizon; tune in 1° steps from there. Live-tunable. |
+| `brightness` | float | `0.25` | RGB multiplier applied at load time, clamped to `[0.0, 1.0]`. `1.0` = pristine PNG, `0.5` = half luminance, `0.0` = pure black. The default `0.25` keeps the F1 cockpit photo readable but dim enough to not wash out the game in a bright HMD; raise toward `0.5` if your HMD or cockpit is darker. Alpha is never multiplied so the visor cutout stays transparent at any value. **Not** live-tunable — changing it requires a session restart (the texture is uploaded once at session start). |
 
 ### Custom PNG: requirements
 
-A drop-in replacement for `helmet_visor.png` must be:
+A drop-in replacement for a bundled `helmet-F1_*.png` must be:
 
 - **PNG with an alpha channel (RGBA)**. JPG won't work — no alpha.
   Indexed-color PNGs are converted on load but it's safer to stay in
@@ -277,13 +282,13 @@ render:
    becomes a checkerboard.
 6. **Deselect**: `Select → None` (`Shift+Ctrl+A`).
 7. **Export** (not Save, which produces a `.xcf`): `File → Export As
-   → helmet_visor.png`. The default PNG settings work but are not
+   → my_helmet.png`. The default PNG settings work but are not
    optimal for our pipeline — see [GIMP export settings](#gimp-export-settings)
    below for the right checkboxes.
 
 Drop the resulting PNG into
 `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\` (overwriting
-the bundled `helmet_visor.png` to replace the default, or saving
+the bundled `helmet-F1_medium.png` to replace the default, or saving
 under another name to add a new skin you select via the `image`
 field) and restart the game.
 
@@ -351,7 +356,7 @@ for that:
 
 ```bash
 pip install pillow
-python tools/cylinder_warp.py source.png helmet_visor.png --angle 130
+python tools/cylinder_warp.py source.png helmet-F1_medium.png --angle 130
 ```
 
 The output drops in at the layer's install path the same way as a

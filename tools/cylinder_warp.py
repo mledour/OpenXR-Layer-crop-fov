@@ -5,7 +5,7 @@ XrCompositionLayerQuad as if it had been projected onto a cylinder.
 
 Why this exists
 ---------------
-The helmet overlay renders helmet_visor.png on a head-locked flat quad.
+The helmet overlay renders the bundled helmet PNG on a head-locked flat quad.
 That works on every OpenXR runtime, but a real helmet's foam wraps
 around the user's head — flat-quad rendering is geometrically wrong
 at the edges. The "right" fix is XR_KHR_composition_layer_cylinder,

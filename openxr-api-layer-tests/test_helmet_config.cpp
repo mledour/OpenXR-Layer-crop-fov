@@ -34,7 +34,7 @@ using openxr_api_layer::parseHelmetConfig;
 TEST_CASE("parseHelmetConfig: empty JSON object returns disabled defaults") {
     const auto hc = parseHelmetConfig("{}");
     CHECK(hc.enabled == false);
-    CHECK(hc.imageRelativePath == "helmet_visor.png");
+    CHECK(hc.imageRelativePath == "helmet-F1_medium.png");
     CHECK(hc.distance_m == doctest::Approx(0.5f));
     CHECK(hc.horizontal_fov_deg == doctest::Approx(130.0f));
     CHECK(hc.vertical_offset_deg == doctest::Approx(0.0f));
@@ -202,7 +202,7 @@ TEST_CASE("parseHelmetConfig: non-string image leaves default name in place") {
     const auto hc = parseHelmetConfig(R"({
         "helmet_overlay": {"image": 123}
     })");
-    CHECK(hc.imageRelativePath == "helmet_visor.png");
+    CHECK(hc.imageRelativePath == "helmet-F1_medium.png");
 }
 
 TEST_CASE("parseHelmetConfig: extra unknown fields are ignored gracefully") {

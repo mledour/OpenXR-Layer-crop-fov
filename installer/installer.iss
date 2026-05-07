@@ -85,13 +85,14 @@ Source: "default_settings.json"; DestDir: "{localappdata}\{#MyAppName}"; \
 ; Bundled helmet PNGs. Policy:
 ;   - ignoreversion         : always overwrite same-named files in the
 ;                             user's helmets dir on upgrade. The build's
-;                             helmet_visor.png is canonical; if the user
-;                             customized that exact filename, they will
-;                             lose their edits on the next install (they
-;                             should rename their custom PNG instead and
-;                             reference it via the helmet_overlay.image
-;                             field — that name is never bundled, so it
-;                             survives upgrades).
+;                             helmet-F1_*.png set is canonical; if the
+;                             user customized one of those exact
+;                             filenames, they will lose their edits on
+;                             the next install (they should rename their
+;                             custom PNG instead and reference it via
+;                             the helmet_overlay.image field — that
+;                             name is never bundled, so it survives
+;                             upgrades).
 ;   - uninsneveruninstall   : leave PNGs on disk on uninstall. User-added
 ;                             PNGs (different names) live alongside the
 ;                             bundled ones and would be orphaned if we
