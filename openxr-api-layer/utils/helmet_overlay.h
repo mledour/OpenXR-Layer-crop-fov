@@ -36,6 +36,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 // Header is self-sufficient regarding OpenXR types: pulled in here so
 // translation units that include this without going through pch.h
@@ -119,8 +120,10 @@ namespace openxr_api_layer {
         // Effect rule of thumb: at distance_m=0.15, ~3 cm gives a soft
         // wrap; ~10 cm pushes the edges noticeably toward the face.
         // At distance_m=0.5, you typically need 10–20 cm to get a
-        // perceptible effect. Set at init; not live-tunable (would
-        // require destroying and recreating the static-image swapchain).
+        // perceptible effect.
+        // Live-tunable: a change re-bakes the SBS texture into the
+        // standby swapchain and atomically swaps it in place — no
+        // session restart needed (see HelmetOverlay::rebakeStereoTexture).
         // Clamped to [0, 0.5] m by the parser. Ignored when stereo_sbs
         // is false.
         float stereo_depth_amplitude_m = 0.05f;
@@ -172,19 +175,25 @@ namespace openxr_api_layer {
         size_t appendLayers(XrTime displayTime,
                             const XrCompositionLayerBaseHeader** outLayers);
 
-        // Apply a live-edit reload of settings.json. Only fields safe
-        // to change without rebuilding swapchain/textures are honoured:
-        //   - distance_m            (re-poses the quad in view space)
-        //   - horizontal_fov_deg    (resizes the quad's apparent FOV;
-        //                            physical width is recomputed from
-        //                            distance_m × tan(fov/2))
-        //   - vertical_offset_deg   (shifts the quad up/down by an
-        //                            angle in the user's view; world-
-        //                            space Y is recomputed from
-        //                            distance_m × tan(deg))
-        // Toggling enabled, replacing the PNG, or changing brightness
-        // still requires a session restart — those would need swapchain
-        // / staging-texture reallocation and a fresh initialize() call.
+        // Apply a live-edit reload of settings.json. Honoured fields:
+        //   - distance_m                  (re-poses the quad; in stereo
+        //                                  SBS mode also re-bakes the
+        //                                  texture so the disparity
+        //                                  matches the new geometry)
+        //   - horizontal_fov_deg          (resizes the quad's apparent
+        //                                  FOV; in stereo SBS mode also
+        //                                  re-bakes since quadW changes)
+        //   - vertical_offset_deg         (shifts the quad up/down by
+        //                                  an angle in the user's view)
+        //   - stereo_depth_amplitude_m    (re-bakes the SBS texture
+        //                                  with the new disparity
+        //                                  amplitude — stereo mode only)
+        // The stereo re-bake uses a double-buffered swapchain pair
+        // (active + standby) so the swap is atomic and visually
+        // glitch-free at the next xrEndFrame.
+        // Toggling enabled, replacing the PNG, switching stereo_sbs
+        // on/off, or changing brightness still requires a session
+        // restart — those would need a fresh initialize() call.
         // No-op if the overlay is not armed.
         void updateLiveTunables(const HelmetOverlayConfig& newConfig);
 
@@ -199,6 +208,54 @@ namespace openxr_api_layer {
         // the XrCompositionLayerQuad on top of those.
         bool createSwapchainFromPng(const uint8_t* pngPixels, int pngWidth, int pngHeight);
         bool tryInitQuad(int pngWidth, int pngHeight);
+
+        // Forward decl for size_t / pointer types in helper signatures.
+        // (uint8_t / size_t come in via pch.h on the .cpp side; the
+        // header doesn't pull <cstdint>, but `unsigned char*` is fine.)
+
+        // Create one XR swapchain handle of the given dimensions. When
+        // staticImage is true the runtime is told the image will be
+        // written exactly once (mono path); when false the image can
+        // be re-acquired and overwritten (stereo path with live re-bake).
+        bool createBackingSwapchain(XrSwapchain* outSwapchain,
+                                    uint32_t width, uint32_t height,
+                                    bool staticImage);
+
+        // Acquire / wait / CopyResource(staging→swapchain) / release for
+        // a single full-image upload. Caller-supplied bytes must match
+        // width × height × 4 (RGBA8). Returns true on success; on
+        // failure the swapchain image is released best-effort to avoid
+        // wedging the runtime on a phantom in-flight image.
+        bool uploadBufferToSwapchain(XrSwapchain swapchain,
+                                     uint32_t width, uint32_t height,
+                                     const unsigned char* bytes);
+
+        // Apply m_impl->config.brightness to RGB channels of the buffer
+        // in-place. Alpha is left untouched (visor cutout stays
+        // transparent at brightness=0). No-op when brightness ≥ ~1.0.
+        void applyBrightness(std::vector<unsigned char>& buffer);
+
+        // Build a full upload buffer (2W × H RGBA8) by baking stereo
+        // SBS disparity from the saved mono pixels with the given
+        // (distance_m, depth_amplitude_m), then applying brightness.
+        // Used both at init and on live re-bake.
+        void buildStereoUploadBuffer(float distanceM, float depthAmpM,
+                                     std::vector<unsigned char>& outBuffer);
+
+        // Bake the SBS texture for the given (distance_m,
+        // depth_amplitude_m) into the given swapchain handle. Used at
+        // init to fill the active swapchain, and again at runtime to
+        // fill the standby swapchain on live-edit.
+        bool uploadStereoToSwapchain(XrSwapchain swapchain,
+                                     float distanceM,
+                                     float depthAmpM);
+
+        // On live-edit of distance_m or stereo_depth_amplitude_m: bake a
+        // new texture into the standby swapchain, then atomically swap
+        // the active/standby pointers and update both quads to reference
+        // the new active swapchain. Returns false on upload failure
+        // (caller leaves the active swapchain unchanged).
+        bool rebakeStereoTexture(float newDistanceM, float newDepthAmpM);
 
         struct Impl;
         std::unique_ptr<Impl> m_impl;

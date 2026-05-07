@@ -133,13 +133,31 @@ namespace openxr_api_layer {
 
         OpenXrApi* api = nullptr;
         XrSession session = XR_NULL_HANDLE;
-        // Static-image swapchain — written once in createSwapchainFromPng,
-        // composited every frame by the runtime without our help. Only
-        // the handle is kept alive for the session lifetime; the
-        // staging texture and the swapchain image pointer are released
-        // at the end of the init function.
+        // Composition swapchain.
+        //
+        // Mono mode: a single STATIC_IMAGE_BIT swapchain — written once
+        // in createSwapchainFromPng, composited every frame by the
+        // runtime without our help. swapchainStandby stays NULL.
+        //
+        // Stereo SBS mode: two regular (non-static) swapchains so we
+        // can re-bake the disparity texture when the user live-edits
+        // distance_m or stereo_depth_amplitude_m. The active one is
+        // referenced by both quads' subImage.swapchain; the standby
+        // is the next destination of a re-bake. On rebake we acquire/
+        // wait/copy/release the standby, swap pointers, and the next
+        // xrEndFrame composites from the new texture without any
+        // visible flash (the previously-active swapchain remains
+        // valid — it just stops being referenced by any layer).
         XrSwapchain swapchain = XR_NULL_HANDLE;
+        XrSwapchain swapchainStandby = XR_NULL_HANDLE;
         XrSpace viewSpace = XR_NULL_HANDLE;
+
+        // Mono PNG pixels retained for live re-baking. Empty in mono
+        // mode (no need — the texture is static). Owned by Impl
+        // (std::vector); released at shutdown.
+        std::vector<uint8_t> monoPixelsRgba8;
+        int monoPngWidth = 0;
+        int monoPngHeight = 0;
 
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
@@ -414,167 +432,263 @@ namespace openxr_api_layer {
     // controls horizontal_fov_deg + distance_m, both width and height
     // follow automatically.
 
-    // Shared swapchain + staging-texture setup used by both backends.
-    // Creates the XrSwapchain (single static image — see
-    // XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) at PNG dimensions and
-    // uploads the PNG bytes (with brightness multiplier applied) into
-    // it ONCE. After this, the runtime composites that one image every
-    // frame on its own — the layer never touches the swapchain again,
-    // so the per-frame hot path drops the acquire/wait/copy/release
-    // dance entirely. Both staging and the swapchain image pointer
-    // are released at the end of the function; only the XrSwapchain
-    // handle survives, shared by both per-eye quads' subImage.swapchain.
-    bool HelmetOverlay::createSwapchainFromPng(const uint8_t* pngPixels, int pngWidth, int pngHeight) {
-        if (!pngPixels || pngWidth <= 0 || pngHeight <= 0) {
-            Log("HelmetOverlay: createSwapchainFromPng called with invalid PNG\n");
-            return false;
-        }
+    // ---- Per-swapchain helpers (declared in helmet_overlay.h) -------
 
-        // Stereo SBS: allocate a swapchain twice as wide as the mono
-        // input. The bake step below produces a 2W × H buffer with
-        // per-eye disparity baked into each half. The composition
-        // layers (built in tryInitQuad) then read each half via a
-        // half-swapchain imageRect with EYE_VISIBILITY_LEFT / RIGHT.
-        const bool sbs = m_impl->config.stereo_sbs;
-        const uint32_t texW = static_cast<uint32_t>(sbs ? 2 * pngWidth : pngWidth);
-        const uint32_t texH = static_cast<uint32_t>(pngHeight);
-
+    bool HelmetOverlay::createBackingSwapchain(XrSwapchain* outSwapchain,
+                                               uint32_t width, uint32_t height,
+                                               bool staticImage) {
         XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-        // STATIC_IMAGE_BIT: runtime allocates a single image, we acquire
-        // it once below, write it, and release it. Subsequent frames
-        // never re-acquire — the runtime keeps using the same image.
-        sci.createFlags = XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
-        sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        sci.createFlags = staticImage ? XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT : 0;
+        sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                         XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
         sci.format = m_impl->swapchainFormat;
         sci.sampleCount = 1;
-        sci.width = texW;
-        sci.height = texH;
+        sci.width = width;
+        sci.height = height;
         sci.faceCount = 1;
         sci.arraySize = 1;
         sci.mipCount = 1;
-        if (XR_FAILED(m_impl->api->xrCreateSwapchain(m_impl->session, &sci, &m_impl->swapchain))) {
+        if (XR_FAILED(m_impl->api->xrCreateSwapchain(m_impl->session, &sci, outSwapchain))) {
             Log("HelmetOverlay: xrCreateSwapchain failed\n");
             return false;
         }
+        return true;
+    }
 
-        // STATIC_IMAGE_BIT guarantees imageCount == 1.
+    bool HelmetOverlay::uploadBufferToSwapchain(XrSwapchain swapchain,
+                                                uint32_t width, uint32_t height,
+                                                const unsigned char* bytes) {
+        if (!bytes || swapchain == XR_NULL_HANDLE) return false;
+
+        // Enumerate the swapchain images. STATIC_IMAGE_BIT swapchains
+        // have imageCount == 1; non-static may have >1, but we always
+        // write to the image whose index xrAcquireSwapchainImage hands
+        // us.
         uint32_t imageCount = 0;
-        if (XR_FAILED(m_impl->api->xrEnumerateSwapchainImages(m_impl->swapchain, 0, &imageCount, nullptr)) ||
+        if (XR_FAILED(m_impl->api->xrEnumerateSwapchainImages(swapchain, 0, &imageCount, nullptr)) ||
             imageCount == 0) {
             Log("HelmetOverlay: xrEnumerateSwapchainImages returned 0\n");
             return false;
         }
         std::vector<XrSwapchainImageD3D11KHR> images(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
         if (XR_FAILED(m_impl->api->xrEnumerateSwapchainImages(
-                m_impl->swapchain, imageCount, &imageCount,
+                swapchain, imageCount, &imageCount,
                 reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())))) {
             Log("HelmetOverlay: xrEnumerateSwapchainImages (second call) failed\n");
             return false;
         }
-        ID3D11Texture2D* swapchainImage = images[0].texture; // not AddRef'd, runtime owns it
 
-        // Build the source pixel buffer we own and can mutate (so the
-        // brightness multiplier below can run without touching
-        // stb_image's internal allocation).
-        //
-        // Mono path: uploadBytes is a straight copy of pngPixels.
-        // Stereo SBS path: uploadBytes is a 2W × H buffer with the
-        // per-eye disparity baked in by bakeStereoSbsBuffer (see
-        // anonymous-namespace helper above for the math). Both paths
-        // produce a buffer matching texW × texH, so the rest of the
-        // function (brightness, staging texture, CopyResource) stays
-        // the same.
-        const size_t pixelBytes = static_cast<size_t>(texW) * texH * 4u;
-        std::vector<uint8_t> uploadBytes;
-        if (sbs) {
-            constexpr float kPi = 3.14159265358979323846f;
-            const float halfFov = m_impl->config.horizontal_fov_deg * 0.5f * kPi / 180.0f;
-            const float quadWMeters =
-                2.0f * m_impl->config.distance_m * std::tan(halfFov);
-            bakeStereoSbsBuffer(pngPixels, pngWidth, pngHeight,
-                                m_impl->config.stereo_depth_amplitude_m,
-                                m_impl->config.distance_m,
-                                quadWMeters,
-                                uploadBytes);
-            Log(fmt::format("HelmetOverlay: baked stereo SBS texture "
-                            "(amp={:.3f} m, IPD=64 mm, quadW={:.2f} m)\n",
-                            m_impl->config.stereo_depth_amplitude_m, quadWMeters));
-        } else {
-            uploadBytes.resize(pixelBytes);
-            std::memcpy(uploadBytes.data(), pngPixels, pixelBytes);
+        // Acquire / wait. On any failure here we release best-effort
+        // before returning, so the runtime doesn't end up with a
+        // phantom in-flight image.
+        XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        uint32_t imageIndex = 0;
+        if (XR_FAILED(m_impl->api->xrAcquireSwapchainImage(swapchain, &ai, &imageIndex))) {
+            Log("HelmetOverlay: xrAcquireSwapchainImage failed\n");
+            return false;
+        }
+        XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        wi.timeout = XR_INFINITE_DURATION;
+        if (XR_FAILED(m_impl->api->xrWaitSwapchainImage(swapchain, &wi))) {
+            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            m_impl->api->xrReleaseSwapchainImage(swapchain, &ri);
+            Log("HelmetOverlay: xrWaitSwapchainImage failed\n");
+            return false;
         }
 
-        // Apply brightness multiplier on RGB before upload. Alpha is
-        // left untouched so the visor cutout stays transparent even at
-        // brightness=0. Skipped when the multiplier is ~1.0 (saves
-        // ~50 ms on a 6K image).
-        const float bright = m_impl->config.brightness;
-        if (bright < 0.999f) {
-            for (size_t i = 0; i + 3 < uploadBytes.size(); i += 4) {
-                uploadBytes[i + 0] = static_cast<uint8_t>(uploadBytes[i + 0] * bright);
-                uploadBytes[i + 1] = static_cast<uint8_t>(uploadBytes[i + 1] * bright);
-                uploadBytes[i + 2] = static_cast<uint8_t>(uploadBytes[i + 2] * bright);
-            }
-            Log(fmt::format("HelmetOverlay: applied brightness={:.2f} to texture\n", bright));
-        }
-
+        // Build a transient staging texture from the CPU buffer and
+        // CopyResource into the swapchain image. Staging is destroyed
+        // when the ComPtr goes out of scope below — the runtime owns
+        // the only copy that matters (the swapchain image).
         D3D11_TEXTURE2D_DESC td{};
-        td.Width = texW;
-        td.Height = texH;
+        td.Width = width;
+        td.Height = height;
         td.MipLevels = 1;
         td.ArraySize = 1;
-        // Match the swapchain's format family so CopyResource stays
-        // a pure byte-level copy. SRGB and UNORM share the same
-        // R8G8B8A8_TYPELESS family.
         td.Format = m_impl->d3dFormat;
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_IMMUTABLE;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        td.CPUAccessFlags = 0;
-        td.MiscFlags = 0;
 
         D3D11_SUBRESOURCE_DATA sd{};
-        sd.pSysMem = uploadBytes.data();
-        sd.SysMemPitch = texW * 4u;
-        sd.SysMemSlicePitch = 0;
+        sd.pSysMem = bytes;
+        sd.SysMemPitch = width * 4u;
 
         ComPtr<ID3D11Texture2D> staging;
         const HRESULT hr = m_impl->device->CreateTexture2D(&td, &sd, &staging);
         if (FAILED(hr)) {
+            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            m_impl->api->xrReleaseSwapchainImage(swapchain, &ri);
             Log(fmt::format("HelmetOverlay: CreateTexture2D(staging) failed, hr=0x{:08X}\n",
                             static_cast<uint32_t>(hr)));
             return false;
         }
 
-        // ---- One-shot fill: acquire → wait → copy → release ----------
-        // Per spec, a STATIC_IMAGE swapchain image must be acquired
-        // exactly once. We do it here and never again.
-        XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-        uint32_t imageIndex = 0;
-        if (XR_FAILED(m_impl->api->xrAcquireSwapchainImage(m_impl->swapchain, &ai, &imageIndex))) {
-            Log("HelmetOverlay: one-shot xrAcquireSwapchainImage failed\n");
-            return false;
-        }
-        XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-        wi.timeout = XR_INFINITE_DURATION;
-        if (XR_FAILED(m_impl->api->xrWaitSwapchainImage(m_impl->swapchain, &wi))) {
-            // Try to release what we acquired so the runtime doesn't
-            // wedge on a phantom in-flight image.
-            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            m_impl->api->xrReleaseSwapchainImage(m_impl->swapchain, &ri);
-            Log("HelmetOverlay: one-shot xrWaitSwapchainImage failed\n");
-            return false;
-        }
-        m_impl->context->CopyResource(swapchainImage, staging.Get());
+        m_impl->context->CopyResource(images[imageIndex].texture, staging.Get());
+
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        if (XR_FAILED(m_impl->api->xrReleaseSwapchainImage(m_impl->swapchain, &ri))) {
-            Log("HelmetOverlay: one-shot xrReleaseSwapchainImage failed\n");
+        if (XR_FAILED(m_impl->api->xrReleaseSwapchainImage(swapchain, &ri))) {
+            Log("HelmetOverlay: xrReleaseSwapchainImage failed\n");
             return false;
         }
-        // staging goes out of scope here → ComPtr releases the GPU
-        // texture. We never need it again because the runtime now
-        // owns the only copy we care about (the static swapchain image).
-        //
+        return true;
+    }
+
+    void HelmetOverlay::applyBrightness(std::vector<unsigned char>& buffer) {
+        const float bright = m_impl->config.brightness;
+        if (bright >= 0.999f) return;
+        for (size_t i = 0; i + 3 < buffer.size(); i += 4) {
+            buffer[i + 0] = static_cast<unsigned char>(buffer[i + 0] * bright);
+            buffer[i + 1] = static_cast<unsigned char>(buffer[i + 1] * bright);
+            buffer[i + 2] = static_cast<unsigned char>(buffer[i + 2] * bright);
+        }
+    }
+
+    void HelmetOverlay::buildStereoUploadBuffer(float distanceM, float depthAmpM,
+                                                std::vector<unsigned char>& outBuffer) {
+        constexpr float kPi = 3.14159265358979323846f;
+        const float halfFov = m_impl->config.horizontal_fov_deg * 0.5f * kPi / 180.0f;
+        const float quadWMeters = 2.0f * distanceM * std::tan(halfFov);
+        bakeStereoSbsBuffer(m_impl->monoPixelsRgba8.data(),
+                            m_impl->monoPngWidth, m_impl->monoPngHeight,
+                            depthAmpM, distanceM, quadWMeters,
+                            outBuffer);
+        applyBrightness(outBuffer);
+    }
+
+    bool HelmetOverlay::uploadStereoToSwapchain(XrSwapchain swapchain,
+                                                float distanceM, float depthAmpM) {
+        std::vector<unsigned char> bytes;
+        buildStereoUploadBuffer(distanceM, depthAmpM, bytes);
+        return uploadBufferToSwapchain(swapchain,
+                                       static_cast<uint32_t>(2 * m_impl->monoPngWidth),
+                                       static_cast<uint32_t>(m_impl->monoPngHeight),
+                                       bytes.data());
+    }
+
+    bool HelmetOverlay::rebakeStereoTexture(float newDistanceM, float newDepthAmpM) {
+        if (m_impl->swapchainStandby == XR_NULL_HANDLE) {
+            Log("HelmetOverlay: rebakeStereoTexture called but standby swapchain is null "
+                "(stereo_sbs not active or init failed)\n");
+            return false;
+        }
+        if (m_impl->monoPixelsRgba8.empty()) {
+            Log("HelmetOverlay: rebakeStereoTexture called but mono pixels are not retained\n");
+            return false;
+        }
+
+        // Bake into the standby swapchain. On failure we leave the
+        // active swapchain untouched — the user keeps seeing the
+        // previous (correct) texture rather than a partial / black one.
+        if (!uploadStereoToSwapchain(m_impl->swapchainStandby, newDistanceM, newDepthAmpM)) {
+            Log("HelmetOverlay: rebake upload failed; keeping previous active swapchain\n");
+            return false;
+        }
+
+        // Atomic swap: standby is now the new active. Both quads start
+        // referencing the new active swapchain on the next xrEndFrame —
+        // since appendLayers() returns the existing quad pointers and
+        // those quads' subImage.swapchain is updated here in-place.
+        std::swap(m_impl->swapchain, m_impl->swapchainStandby);
+        m_impl->quadLeft.subImage.swapchain = m_impl->swapchain;
+        if (m_impl->numQuads >= 2) {
+            m_impl->quadRight.subImage.swapchain = m_impl->swapchain;
+        }
+
+        constexpr float kPi = 3.14159265358979323846f;
+        const float halfFov = m_impl->config.horizontal_fov_deg * 0.5f * kPi / 180.0f;
+        const float quadWMeters = 2.0f * newDistanceM * std::tan(halfFov);
+        Log(fmt::format("HelmetOverlay: rebaked stereo SBS (amp={:.3f} m, "
+                        "distance={:.2f} m, quadW={:.2f} m)\n",
+                        newDepthAmpM, newDistanceM, quadWMeters));
+        return true;
+    }
+
+    // ---- One-shot init driver. Owns the high-level branching:
+    //   * Mono mode: single STATIC_IMAGE_BIT swapchain, runtime can
+    //     optimize it as a never-changes-after-init asset; the layer
+    //     never re-acquires.
+    //   * Stereo SBS mode: two regular (non-static) swapchains so live-
+    //     edit of distance_m / stereo_depth_amplitude_m can re-bake
+    //     into the standby and atomically swap. Initial bake fills
+    //     both swapchains with the same texture so the standby is
+    //     already in a known-good state if the first re-bake fails.
+    bool HelmetOverlay::createSwapchainFromPng(const uint8_t* pngPixels, int pngWidth, int pngHeight) {
+        if (!pngPixels || pngWidth <= 0 || pngHeight <= 0) {
+            Log("HelmetOverlay: createSwapchainFromPng called with invalid PNG\n");
+            return false;
+        }
+
+        const bool sbs = m_impl->config.stereo_sbs;
+        const uint32_t texW = static_cast<uint32_t>(sbs ? 2 * pngWidth : pngWidth);
+        const uint32_t texH = static_cast<uint32_t>(pngHeight);
+
+        // Stereo path retains a copy of the mono pixels for live re-bake.
+        // Mono path doesn't need them — the texture is permanent.
+        if (sbs) {
+            const size_t monoBytes = static_cast<size_t>(pngWidth) * pngHeight * 4u;
+            m_impl->monoPixelsRgba8.assign(pngPixels, pngPixels + monoBytes);
+            m_impl->monoPngWidth = pngWidth;
+            m_impl->monoPngHeight = pngHeight;
+        }
+
+        // Active swapchain: STATIC_IMAGE for mono, regular for stereo.
+        if (!createBackingSwapchain(&m_impl->swapchain, texW, texH, /*staticImage=*/!sbs)) {
+            return false;
+        }
+        // Standby swapchain (stereo only). Always non-static — its whole
+        // job is to be re-acquired on each live-edit.
+        if (sbs) {
+            if (!createBackingSwapchain(&m_impl->swapchainStandby, texW, texH,
+                                        /*staticImage=*/false)) {
+                return false;
+            }
+        }
+
+        // Build the upload buffer once, share it between active and
+        // standby (stereo) or use it once (mono). Brightness is applied
+        // here so the loaded mono pixels in monoPixelsRgba8 stay
+        // unmodified — re-bakes use the original brightness=1 source
+        // and re-apply the (potentially new) brightness multiplier.
+        std::vector<unsigned char> uploadBytes;
+        if (sbs) {
+            buildStereoUploadBuffer(m_impl->config.distance_m,
+                                    m_impl->config.stereo_depth_amplitude_m,
+                                    uploadBytes);
+            constexpr float kPi = 3.14159265358979323846f;
+            const float halfFov = m_impl->config.horizontal_fov_deg * 0.5f * kPi / 180.0f;
+            const float quadWMeters = 2.0f * m_impl->config.distance_m * std::tan(halfFov);
+            Log(fmt::format("HelmetOverlay: baked stereo SBS texture "
+                            "(amp={:.3f} m, IPD=64 mm, quadW={:.2f} m)\n",
+                            m_impl->config.stereo_depth_amplitude_m, quadWMeters));
+        } else {
+            const size_t monoBytes = static_cast<size_t>(pngWidth) * pngHeight * 4u;
+            uploadBytes.resize(monoBytes);
+            std::memcpy(uploadBytes.data(), pngPixels, monoBytes);
+            applyBrightness(uploadBytes);
+        }
+
+        // Upload to active swapchain.
+        if (!uploadBufferToSwapchain(m_impl->swapchain, texW, texH, uploadBytes.data())) {
+            Log("HelmetOverlay: initial upload to active swapchain failed\n");
+            return false;
+        }
+        // Stereo: also seed standby with the same initial bake. Means
+        // the very first live re-bake fails-safe to a correct image
+        // even if the rebake itself errors out partway.
+        if (sbs) {
+            if (!uploadBufferToSwapchain(m_impl->swapchainStandby, texW, texH, uploadBytes.data())) {
+                Log("HelmetOverlay: initial upload to standby swapchain failed; "
+                    "live re-bake will not work this session\n");
+                // Don't fail init — the active swapchain is fine, the
+                // user just won't be able to live-tune until next run.
+                if (m_impl->swapchainStandby != XR_NULL_HANDLE) {
+                    m_impl->api->xrDestroySwapchain(m_impl->swapchainStandby);
+                    m_impl->swapchainStandby = XR_NULL_HANDLE;
+                }
+            }
+        }
+
         // pngAspectRatio is set in tryInitQuad() because it depends on
         // whether the PNG is interpreted as mono or as side-by-side
         // stereo (per-eye width = full vs half).
@@ -681,11 +795,14 @@ namespace openxr_api_layer {
             std::abs(m_impl->config.horizontal_fov_deg - newConfig.horizontal_fov_deg) < 1e-3f;
         const bool sameVOffset =
             std::abs(m_impl->config.vertical_offset_deg - newConfig.vertical_offset_deg) < 1e-3f;
-        if (sameDistance && sameFov && sameVOffset) return;
+        const bool sameDepthAmp =
+            std::abs(m_impl->config.stereo_depth_amplitude_m - newConfig.stereo_depth_amplitude_m) < 1e-4f;
+        if (sameDistance && sameFov && sameVOffset && sameDepthAmp) return;
 
-        m_impl->config.distance_m            = newConfig.distance_m;
-        m_impl->config.horizontal_fov_deg    = newConfig.horizontal_fov_deg;
-        m_impl->config.vertical_offset_deg   = newConfig.vertical_offset_deg;
+        m_impl->config.distance_m                = newConfig.distance_m;
+        m_impl->config.horizontal_fov_deg        = newConfig.horizontal_fov_deg;
+        m_impl->config.vertical_offset_deg       = newConfig.vertical_offset_deg;
+        m_impl->config.stereo_depth_amplitude_m  = newConfig.stereo_depth_amplitude_m;
 
         constexpr float kPi = 3.14159265358979323846f;
         const float halfFov = newConfig.horizontal_fov_deg * 0.5f * kPi / 180.0f;
@@ -711,6 +828,16 @@ namespace openxr_api_layer {
                         "v_offset={:+.1f}°, size={:.2f}x{:.2f}m\n",
                         newConfig.distance_m, newConfig.horizontal_fov_deg,
                         newConfig.vertical_offset_deg, quadW, quadH));
+
+        // Stereo SBS: re-bake the texture if any input to the disparity
+        // formula changed (distance_m, depth_amp, or quadW which
+        // depends on horizontal_fov_deg and distance_m).
+        // Brightness is captured at re-bake time too — if the user
+        // changes distance and brightness in the same edit, both apply.
+        if (m_impl->config.stereo_sbs && (!sameDistance || !sameFov || !sameDepthAmp)) {
+            rebakeStereoTexture(newConfig.distance_m,
+                                newConfig.stereo_depth_amplitude_m);
+        }
     }
 
     void HelmetOverlay::shutdown() {
@@ -724,7 +851,17 @@ namespace openxr_api_layer {
                 m_impl->api->xrDestroySwapchain(m_impl->swapchain);
                 m_impl->swapchain = XR_NULL_HANDLE;
             }
+            if (m_impl->swapchainStandby != XR_NULL_HANDLE) {
+                m_impl->api->xrDestroySwapchain(m_impl->swapchainStandby);
+                m_impl->swapchainStandby = XR_NULL_HANDLE;
+            }
         }
+        // Drop the retained mono pixels (~10 MB on a 2K helmet PNG)
+        // — only relevant for stereo SBS sessions.
+        m_impl->monoPixelsRgba8.clear();
+        m_impl->monoPixelsRgba8.shrink_to_fit();
+        m_impl->monoPngWidth = 0;
+        m_impl->monoPngHeight = 0;
         m_impl->context.Reset();
         m_impl->device.Reset();
         m_impl->session = XR_NULL_HANDLE;
