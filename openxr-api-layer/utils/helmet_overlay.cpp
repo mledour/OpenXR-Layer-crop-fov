@@ -370,19 +370,29 @@ namespace openxr_api_layer {
         std::vector<uint8_t> uploadBytes(pixelBytes);
         std::memcpy(uploadBytes.data(), pngPixels, pixelBytes);
 
-        // Apply brightness multiplier on RGB before upload. Alpha is
-        // left untouched so the visor cutout stays transparent even at
-        // brightness=0. Skipped when the multiplier is ~1.0 (saves
-        // ~50 ms on a 6K image).
+        // Premultiply alpha into RGB and apply the brightness multiplier
+        // in the same pass. Premultiplication is what kills the white
+        // fringe around the visor cutout: PNG exporters leave RGB
+        // undefined (often 255,255,255) on fully-transparent pixels,
+        // and the compositor's bilinear sampler interpolates that white
+        // into the visor edge during blending. After this pass, every
+        // transparent pixel has RGB=0, so the bilinear taps stay neutral.
+        // Done in sRGB-encoded space (not linearized first): visually
+        // indistinguishable from gamma-correct premul on photo content
+        // and saves a per-pixel sRGB↔linear round-trip.
+        // Alpha is preserved as-is so the cutout still reads as
+        // transparent in the compositor. Brightness=0 still produces a
+        // pure-black opaque mask (alpha untouched), matching the prior
+        // contract.
         const float bright = m_impl->config.brightness;
-        if (bright < 0.999f) {
-            for (size_t i = 0; i + 3 < uploadBytes.size(); i += 4) {
-                uploadBytes[i + 0] = static_cast<uint8_t>(uploadBytes[i + 0] * bright);
-                uploadBytes[i + 1] = static_cast<uint8_t>(uploadBytes[i + 1] * bright);
-                uploadBytes[i + 2] = static_cast<uint8_t>(uploadBytes[i + 2] * bright);
-            }
-            Log(fmt::format("HelmetOverlay: applied brightness={:.2f} to texture\n", bright));
+        for (size_t i = 0; i + 3 < uploadBytes.size(); i += 4) {
+            const float a = uploadBytes[i + 3] / 255.0f;
+            const float scale = a * bright;
+            uploadBytes[i + 0] = static_cast<uint8_t>(uploadBytes[i + 0] * scale);
+            uploadBytes[i + 1] = static_cast<uint8_t>(uploadBytes[i + 1] * scale);
+            uploadBytes[i + 2] = static_cast<uint8_t>(uploadBytes[i + 2] * scale);
         }
+        Log(fmt::format("HelmetOverlay: premultiplied alpha + brightness={:.2f} into texture\n", bright));
 
         D3D11_TEXTURE2D_DESC td{};
         td.Width = texW;
@@ -461,8 +471,13 @@ namespace openxr_api_layer {
 
         m_impl->quadLayer.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
         m_impl->quadLayer.next = nullptr;
-        m_impl->quadLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
-                                       XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+        // BLEND_TEXTURE_SOURCE_ALPHA only — no UNPREMULTIPLIED_ALPHA_BIT.
+        // The texture is premultiplied at upload (see
+        // createSwapchainFromPng), so we tell the compositor it can use
+        // the canonical "src + dst*(1-srcA)" path. This eliminates the
+        // white halo that straight-alpha sampling produces around the
+        // visor cutout when the bilinear tap straddles the alpha edge.
+        m_impl->quadLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
         m_impl->quadLayer.space = m_impl->viewSpace;
         m_impl->quadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         m_impl->quadLayer.subImage.swapchain = m_impl->swapchain;
