@@ -43,7 +43,7 @@ namespace openxr_api_layer {
     // HelmetOverlayConfig captured by its "helmet_overlay" object.
     // Defaults match the documented values in helmet_overlay.h:
     //   enabled              = false
-    //   image                = "helmet_visor.png"
+    //   image                = "helmet-F1_medium.png"
     //   distance_m           = 0.5
     //   horizontal_fov_deg   = 130   (clamped to [10, 270])
     //   vertical_offset_deg  = 0     (clamped to [-30, +30])

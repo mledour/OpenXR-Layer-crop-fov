@@ -102,19 +102,19 @@ namespace openxr_api_layer {
             out << "  \"_comment\": \"Auto-generated per-app config for '" << appName
                 <<                "'. Set \\\"enabled\\\" to true to activate the layer for this game.\",\n";
         }
-        out << "  \"enabled\": false,\n"
-            << "  \"crop_left_percent\": 0,\n"
-            << "  \"crop_right_percent\": 0,\n"
-            << "  \"crop_top_percent\": 40,\n"
-            << "  \"crop_bottom_percent\": 30,\n"
-            << "  \"live_edit\": true,\n"
+        out << "  \"enabled\": true,\n"
+            << "  \"crop_left_percent\": 5,\n"
+            << "  \"crop_right_percent\": 5,\n"
+            << "  \"crop_top_percent\": 28,\n"
+            << "  \"crop_bottom_percent\": 29,\n"
+            << "  \"live_edit\": false,\n"
             << "  \"helmet_overlay\": {\n"
             << "    \"enabled\": true,\n"
-            << "    \"image\": \"helmet_visor.png\",\n"
-            << "    \"distance_m\": 0.15,\n"
-            << "    \"brightness\": 0.25,\n"
-            << "    \"horizontal_fov_deg\": 120,\n"
-            << "    \"vertical_offset_deg\": -10\n"
+            << "    \"image\": \"helmet-F1_medium.png\",\n"
+            << "    \"distance_m\": 0.25,\n"
+            << "    \"brightness\": 0.20,\n"
+            << "    \"horizontal_fov_deg\": 115,\n"
+            << "    \"vertical_offset_deg\": -8\n"
             << "  }\n"
             << "}\n";
         return out.good();

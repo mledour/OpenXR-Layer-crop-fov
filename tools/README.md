@@ -15,11 +15,12 @@ the curvature is baked into the asset offline with this script.
 
 ```bash
 pip install pillow
-python tools/cylinder_warp.py path/to/source.png path/to/helmet_visor.png --angle 130
+python tools/cylinder_warp.py path/to/source.png path/to/helmet-F1_medium.png --angle 130
 ```
 
 The output drops in next to `XR_APILAYER_MLEDOUR_fov_crop.dll` as
-`helmet_visor.png` (replacing the default ellipse-shipped asset).
+one of the bundled `helmet-F1_*.png` filenames (replacing the
+default shipped asset).
 
 Iterate on `--angle` until the curvature feels right (`90` is subtle,
 `130` is moderate, `180` is strong wraparound). The DLL doesn't need

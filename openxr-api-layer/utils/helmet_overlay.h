@@ -54,7 +54,7 @@ namespace openxr_api_layer {
     // User-facing configuration, mirrored from settings.json.
     struct HelmetOverlayConfig {
         bool enabled = false;
-        std::string imageRelativePath = "helmet_visor.png";
+        std::string imageRelativePath = "helmet-F1_medium.png";
 
         // distance_m: distance from the eye to the quad's plane, in
         // meters. Controls the depth-feel (stereo disparity) — at

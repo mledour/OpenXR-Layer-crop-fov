@@ -108,7 +108,7 @@ have their own file.
   "live_edit": false,
   "helmet_overlay": {
     "enabled": false,
-    "image": "helmet_visor.png",
+    "image": "helmet-F1_medium.png",
     "distance_m": 0.5,
     "horizontal_fov_deg": 130,
     "vertical_offset_deg": 0.0,
@@ -164,7 +164,8 @@ through and what they don't — the typical content is "opaque foam
 all around, transparent rectangle in front of the eyes for the
 visor", which gives the perception of being inside a real helmet.
 
-A starter `helmet_visor.png` (3:2, 2048×1365) ships with the
+Three starter helmet PNGs (`helmet-F1_thin.png`,
+`helmet-F1_medium.png`, `helmet-F1_large.png`) ship with the
 installer. The overlay loads PNGs from the user-writable directory
 
 ```
@@ -184,9 +185,9 @@ needed to add or swap helmets.
 ### Upgrade policy
 
 - **Bundled filenames are canonical.** The installer **overwrites**
-  same-named PNGs on every upgrade, so a fix or refresh of
-  `helmet_visor.png` in the build propagates automatically. If you
-  edit `helmet_visor.png` in place, your changes will be wiped on
+  same-named PNGs on every upgrade, so a fix or refresh of any
+  bundled `helmet-F1_*.png` in the build propagates automatically.
+  If you edit a bundled PNG in place, your changes will be wiped on
   the next install.
 - **User-added PNGs (different filenames) are never touched.**
   Drop `arai_full_face.png`, `kart_open.png`, anything you like —
@@ -213,7 +214,7 @@ just by changing the `image` field.
 ```json
 "helmet_overlay": {
   "enabled": false,
-  "image": "helmet_visor.png",
+  "image": "helmet-F1_medium.png",
   "distance_m": 0.5,
   "horizontal_fov_deg": 130,
   "vertical_offset_deg": 0.0,
@@ -224,7 +225,7 @@ just by changing the `image` field.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Master switch for the helmet overlay. |
-| `image` | string | `helmet_visor.png` | Filename of the PNG to load, resolved relative to `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\`. Change this to switch between several PNGs you keep in that folder side by side. |
+| `image` | string | `helmet-F1_medium.png` | Filename of the PNG to load, resolved relative to `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\`. Change this to switch between several PNGs you keep in that folder side by side. |
 | `distance_m` | float | `0.5` | **Depth-feel knob**: distance from the eye to the quad's plane, in meters. Controls the stereo disparity, i.e. how "close to your face" the helmet feels. Try `0.15` for "right against the face" (real helmet feel), `0.3` for "close but not claustrophobic", `0.5` for "TV-in-front-of-you". Live-tunable. |
 | `horizontal_fov_deg` | float | `130` | **Coverage knob**: angular width of the quad in your view, in degrees. Clamped to `[10°, 270°]`. The physical quad width is derived as `2 × distance_m × tan(fov/2)`, so changing `distance_m` no longer also changes coverage — these two parameters are orthogonal and can be tuned independently. Try `90°` for "tight visor", `130°` for "moderate wraparound", `180°` for "ear-to-ear". Quad height follows the PNG aspect ratio so the image is never stretched. Live-tunable. |
 | `vertical_offset_deg` | float | `0.0` | **Position knob**: shifts the quad up (`+`) or down (`-`) by an angle in your view, in degrees. Clamped to `[-30°, +30°]`. Decoupled from `distance_m` — at any distance, "+5°" always shifts the helmet up by 5° in your FOV. Useful when the helmet sits slightly above or below your gaze line because of HMD lens placement or asymmetric `crop_top` / `crop_bottom`. Try `+2°` (helmet up) or `-2°` (helmet down) and adjust to taste. Live-tunable. |
@@ -232,7 +233,7 @@ just by changing the `image` field.
 
 ### Custom PNG: requirements
 
-A drop-in replacement for `helmet_visor.png` must be:
+A drop-in replacement for a bundled `helmet-F1_*.png` must be:
 
 - **PNG with an alpha channel (RGBA)**. JPG won't work — no alpha.
   Indexed-color PNGs are converted on load but it's safer to stay in
@@ -277,13 +278,13 @@ render:
    becomes a checkerboard.
 6. **Deselect**: `Select → None` (`Shift+Ctrl+A`).
 7. **Export** (not Save, which produces a `.xcf`): `File → Export As
-   → helmet_visor.png`. The default PNG settings work but are not
+   → my_helmet.png`. The default PNG settings work but are not
    optimal for our pipeline — see [GIMP export settings](#gimp-export-settings)
    below for the right checkboxes.
 
 Drop the resulting PNG into
 `%LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets\` (overwriting
-the bundled `helmet_visor.png` to replace the default, or saving
+the bundled `helmet-F1_medium.png` to replace the default, or saving
 under another name to add a new skin you select via the `image`
 field) and restart the game.
 
@@ -351,7 +352,7 @@ for that:
 
 ```bash
 pip install pillow
-python tools/cylinder_warp.py source.png helmet_visor.png --angle 130
+python tools/cylinder_warp.py source.png helmet-F1_medium.png --angle 130
 ```
 
 The output drops in at the layer's install path the same way as a
