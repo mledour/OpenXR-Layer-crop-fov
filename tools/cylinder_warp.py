@@ -41,23 +41,37 @@ source lines remain horizontal in the output.
 Sphere / dome mode (--mode sphere)
 ----------------------------------
 2-D warp combining the cylinder horizontal pass with a vertical
-correction that depends on horizontal position. Goal: make a
-rectangular visor opening appear cushion-shaped (smaller at the
-corners than at the center) when displayed on the flat quad — the
-"helmet wraps around the face at the temples" look.
+correction that depends on horizontal position. Goal: simulate a
+concave dome wrapping around the user's face — the "helmet padding
+visible at the temples and forehead" look you actually see inside
+a real helmet.
 
-For the desired cushion shape, the vertical sample at column u is
-*expanded* by 1/cos(θ_h(u)), so the source's top/bottom rows fall
-beyond [0, 1] at the edges and source-edge content is replicated
-across the output's top/bottom corners:
+The geometry: a point on a unit sphere at angles (θ_h, θ_v) projects
+onto a flat quad at distance D as:
+    x_quad = D · tan(θ_h)
+    y_quad = D · tan(θ_v) / cos(θ_h)
+
+The 1/cos(θ_h) factor on the y-axis means a horizontal source line
+(constant θ_v) bows AWAY from the quad's vertical centre at the
+edges — i.e. the visor opening appears WIDER at the corners than at
+the centre. That's the sign of a real helmet seen from the inside:
+the padding wraps around your jaw and temples, exposing more visor
+area at the periphery rather than less.
+
+Inverting the back-projection gives the per-pixel sample:
     cos_th = cos(atan((u_warped − 0.5) × 2 × tan(Θ_h/2)))
-    v_src = atan((v_warped − 0.5) × 2 × tan(Θ_v/2) / cos_th) / Θ_v + 0.5
-    v_src = clip(v_src, 0, 1)
+    v_src = atan((v_warped − 0.5) × 2 × tan(Θ_v/2) × cos_th) / Θ_v + 0.5
 
-The clipping is generally invisible because helmet PNG corners are
-uniform padding. If you have rich content near the source corners,
-expect a faint banding artifact — tame it by lowering --vertical-angle
-or post-feathering the corners of the source.
+This is the default, helmet-correct direction (positive
+--vertical-angle). For the rare opposite case (concave-from-outside,
+or "lens cushion" effect where the opening shrinks at the corners),
+pass a negative --vertical-angle: the cos_th factor is replaced by
+1/cos_th and the source's top/bottom rows are clamped at the corner
+bands.
+
+Sign convention matches --angle for cylinder mode: positive =
+helmet-correct (concave-from-inside) direction, negative = opposite
+direction useful only for testing.
 
 Usage
 -----
@@ -149,26 +163,29 @@ def build_mesh_sphere(width, height,
     Combines the cylinder horizontal mapping with a vertical correction
     that depends on horizontal position:
 
-    - Positive vertical_angle (cushion): vertical sample inflated by
-      1/cos(θ_h) at the edges. Source horizontal lines bow toward
-      v=0.5 at the output's edges → rectangular visor opening appears
-      cushion-shaped (smaller at corners). Matches a real helmet seen
-      from inside.
+    - Positive vertical_angle (default, helmet-correct): vertical sample
+      multiplied by cos(θ_h) at the edges. This is the geometrically
+      correct projection of an equirectangular sphere onto a flat quad
+      (y_quad = D · tan θ_v / cos θ_h). Source horizontal lines bow
+      AWAY from v=0.5 at the output's edges → the visor opening appears
+      WIDER at the corners. That's the "real helmet seen from inside"
+      look — the padding wraps around the temples and exposes more
+      visor at the periphery rather than less.
 
-    - Negative vertical_angle (barrel/fish-eye): vertical sample
-      compressed by cos(θ_h) at the edges. Source horizontal lines bow
-      AWAY from v=0.5 at the output's edges → rectangular visor
-      opening appears barrel-shaped (bigger at corners). Useful when
-      you want a "porthole" feel where the opening bulges outward.
+    - Negative vertical_angle (inverse / cushion): vertical sample
+      multiplied by 1/cos(θ_h) at the edges. Source horizontal lines bow
+      TOWARD v=0.5 at the output's edges → the visor opening appears
+      narrower at the corners (lens cushion / pincushion). Useful only
+      for testing or non-helmet content.
 
-    Same convention as --angle for the horizontal: positive = forward,
-    negative = inverse direction.
+    Same convention as --angle for the horizontal cylinder pass:
+    positive = helmet-correct (concave from inside), negative = inverse.
 
     The vertical sample is clamped to [0, 1] so the source's top and
     bottom rows are replicated across the output's corner bands when
     the warped v_src would otherwise leave the source.
     """
-    inverse_v = vertical_angle_deg < 0
+    helmet_inverse = vertical_angle_deg < 0
     theta_h = math.radians(horizontal_angle_deg)
     theta_v = math.radians(abs(vertical_angle_deg))
     half_tan_h = math.tan(theta_h / 2.0)
@@ -179,9 +196,11 @@ def build_mesh_sphere(width, height,
         th = math.atan((u - 0.5) * 2.0 * half_tan_h)
         cos_th = max(math.cos(th), 0.01)  # belt-and-braces against θ→90°.
         # Vertical inflation factor:
-        #   cushion (positive vertical_angle): divide by cos_th
-        #   barrel  (negative vertical_angle): multiply by cos_th
-        scale = cos_th if inverse_v else (1.0 / cos_th)
+        #   helmet-correct (positive vertical_angle): multiply by cos_th
+        #     — geometric sphere projection, opening grows at corners
+        #   inverse / cushion (negative vertical_angle): divide by cos_th
+        #     — opening shrinks at corners, for testing only
+        scale = (1.0 / cos_th) if helmet_inverse else cos_th
         tv_arg = (v - 0.5) * 2.0 * half_tan_v * scale
         tv = math.atan(tv_arg)
         u_src = th / theta_h + 0.5
@@ -238,8 +257,8 @@ def warp_image(input_path, output_path,
     out_size_mb = os.path.getsize(output_path) / 1024 / 1024
     print(f"output: {output_path}: {w}x{h}, {out_size_mb:.1f} MB")
     if mode == "sphere":
-        v_dir = "barrel/fish-eye (opening BIGGER at corners)" if vertical_angle_deg < 0 \
-                else "cushion (opening SMALLER at corners)"
+        v_dir = "inverse / cushion (opening SMALLER at corners)" if vertical_angle_deg < 0 \
+                else "helmet-correct (opening BIGGER at corners, dome-from-inside)"
         print(f"mode:   sphere (h={abs(central_angle_deg):.1f}°, "
               f"v={vertical_angle_deg:+.1f}° → {v_dir}, mesh: {n_strips}×{n_v})")
     else:
@@ -249,7 +268,7 @@ def warp_image(input_path, output_path,
 
     # Sanity sample so the user can sanity-check the mapping
     if mode == "sphere":
-        inverse_v = vertical_angle_deg < 0
+        helmet_inverse = vertical_angle_deg < 0
         theta_h = math.radians(abs(central_angle_deg))
         theta_v = math.radians(abs(vertical_angle_deg))
         half_tan_h = math.tan(theta_h / 2.0)
@@ -260,16 +279,16 @@ def warp_image(input_path, output_path,
             for u in (0.0, 0.5, 1.0):
                 th = math.atan((u - 0.5) * 2.0 * half_tan_h)
                 cos_th = max(math.cos(th), 0.01)
-                scale = cos_th if inverse_v else (1.0 / cos_th)
+                scale = (1.0 / cos_th) if helmet_inverse else cos_th
                 tv = math.atan((v - 0.5) * 2.0 * half_tan_v * scale)
                 u_src = th / theta_h + 0.5
                 v_src = max(0.0, min(1.0, tv / theta_v + 0.5))
                 row.append(f"({u_src:.2f},{v_src:.2f})")
             print(f"    v_w={v:.2f}: " + " | ".join(row))
-        if inverse_v:
-            print(f"    (barrel: v_w=0 maps to v_src closer to 0.5 at edges)")
-        else:
+        if helmet_inverse:
             print(f"    (cushion: top-row clamp at edges if source corners are not uniform)")
+        else:
+            print(f"    (helmet-correct: v_w=0 maps to v_src closer to 0.5 at edges → opening WIDER)")
     else:
         inverse = central_angle_deg < 0
         theta = math.radians(abs(central_angle_deg))
@@ -299,8 +318,13 @@ def main():
     p.add_argument("--vertical-angle", type=float, default=None,
                    help="vertical central angle in degrees, sphere mode only "
                         "(default = horizontal_angle × pngH/pngW). "
-                        "Positive = cushion direction (visor opening smaller at corners, real-helmet look). "
-                        "Negative = barrel/fish-eye direction (visor opening bigger at corners, porthole look). "
+                        "Positive = helmet-correct direction (concave dome from inside; "
+                        "geometrically correct sphere projection — visor opening WIDER at "
+                        "corners, padding wraps around the temples). "
+                        "Negative = inverse / cushion (opening narrower at corners, "
+                        "useful only for testing). "
+                        "Sign convention matches --angle for the cylinder pass: positive = "
+                        "concave-from-inside, negative = inverse. "
                         "|value| controls strength: smaller = subtler, larger = more pronounced.")
     p.add_argument("--strips", type=int, default=256,
                    help="mesh subdivision count along width (default 256; lower = faster but visible seams). "
