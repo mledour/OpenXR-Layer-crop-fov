@@ -27,13 +27,17 @@
 // %LOCALAPPDATA% to a temp dir per test, and use the same handful of
 // resolved entry points. Keeping this in one header keeps the boot recipe
 // in one place.
-//
-// Including TU must include <doctest/doctest.h> first (REQUIRE expands to
-// doctest macros) and have the mock_runtime header in scope.
 
 #include "mock_runtime.h"
 
 #include <layer.h>
+
+// REQUIRE() in boot() expands to a doctest assertion, so the fixture
+// header pulls doctest in itself rather than relying on the including
+// TU to do it in the right order. The header is heavy (~6000 lines)
+// but every consumer of this fixture is a doctest TU that would
+// include doctest anyway, so this is an order-fix, not a new cost.
+#include <doctest/doctest.h>
 
 #include <cstring>
 #include <filesystem>
