@@ -395,15 +395,23 @@ TEST_CASE("integration: asymmetric WMR-style FOV narrows per-edge in xrLocateVie
 }
 
 // ---------------------------------------------------------------------------
-// Live-edit: layer picks up settings.json changes after kLiveEditCheckInterval
-// xrLocateViews calls (hard-coded to 90 in layer.cpp). We run that many
-// frames, touch the file, and verify the next frame observes the new config.
+// Live-edit: a background watcher thread polls settings.json at a fixed
+// cadence (1 s in production, shortened here so the test doesn't have to
+// sleep a full second). We boot the layer, change the per-app file, and
+// confirm a subsequent xrLocateViews picks up the new factor.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
+    // Shorten the watcher's poll period so the test stays fast. setLiveEditPollIntervalForTesting
+    // must be called before boot() — the watcher captures its first interval
+    // when xrCreateInstance spawns the thread, but it re-reads the atomic on
+    // every wait_for so a later override would still take effect.
+    constexpr auto kPoll = std::chrono::milliseconds(50);
+    openxr_api_layer::setLiveEditPollIntervalForTesting(kPoll);
+
     LayerFixture fx;
 
-    // Initial: 10% left crop -> factor 0.9.
+    // Initial: 10% left crop -> factor 0.8 (1 - 10/50).
     fx.writeSettings(R"({
         "enabled": true,
         "live_edit": true,
@@ -431,19 +439,22 @@ TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
         return views[0];
     };
 
-    // First 89 frames: counter goes 1..89, no poll fires (90%90==0 is the
-    // trigger). Config stays at factor 0.8 (percent 10 -> 1 - 10/50 = 0.8).
+    // Initial state: a few frames at the original factor with no spurious
+    // reload. We can't run the old "89 frames before, 1 frame after" loop
+    // anymore because the trigger is wall-clock, not frame-counted —
+    // running 89 cheap frames takes microseconds and the watcher won't
+    // have polled even once yet.
     const float expectedBefore = std::atan(std::tan(fov.angleLeft) * 0.8f);
-    for (int i = 0; i < 89; ++i) {
+    for (int i = 0; i < 5; ++i) {
         const auto v = locateFrame();
         CHECK(v.fov.angleLeft == doctest::Approx(expectedBefore));
     }
 
-    // Rewrite the per-app file (not the settings.json template — the watcher
-    // only monitors the per-app file) to 30% left crop -> factor 0.7. Sleep
-    // a hair so the mtime tick is observable; Windows NTFS mtime has ~100ns
-    // resolution but file-write APIs can coalesce same-second writes under
-    // load.
+    // Rewrite the per-app file (the watcher monitors the per-app file, not
+    // the settings.json template). 30% left crop -> factor 0.4
+    // (1 - 30/50). The 50 ms pre-sleep ensures the rewritten file gets a
+    // distinct mtime from the per-app file boot() bootstrapped — Windows
+    // file-write APIs can coalesce same-tick writes under load.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     fx.writePerAppSettings(R"({
         "enabled": true,
@@ -454,12 +465,27 @@ TEST_CASE("integration: live_edit reloads settings.json at the poll interval") {
         "crop_bottom_percent": 10
     })");
 
-    // Frame 90: counter hits 90, 90%90==0, poll fires, mtime changed -> reload.
-    // The reload runs BEFORE the narrowFov call in xrLocateViews, so this
-    // frame already sees the new factor (percent 30 -> 1 - 30/50 = 0.4).
+    // Wait for the watcher to detect + parse + stage the reload. Then poll
+    // xrLocateViews until the FOV swap takes effect, with a deadline so a
+    // genuine regression still fails the test (rather than hanging). At
+    // 50 ms poll cadence, 1 s budget allows ~20 watcher wake-ups — plenty
+    // of slack on slow CI.
     const float expectedAfter = std::atan(std::tan(fov.angleLeft) * 0.4f);
-    const auto v = locateFrame();
-    CHECK(v.fov.angleLeft == doctest::Approx(expectedAfter));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    bool observed = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const auto v = locateFrame();
+        if (v.fov.angleLeft == doctest::Approx(expectedAfter)) {
+            observed = true;
+            break;
+        }
+    }
+    CHECK(observed);
+
+    // Restore the production default so later test cases that happen to
+    // exercise live_edit don't inherit the shortened cadence.
+    openxr_api_layer::setLiveEditPollIntervalForTesting(std::chrono::milliseconds(1000));
 }
 
 // ---------------------------------------------------------------------------

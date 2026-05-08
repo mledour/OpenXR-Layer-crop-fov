@@ -51,4 +51,13 @@ namespace openxr_api_layer {
     extern const std::vector<std::string> blockedExtensions;
     extern const std::vector<std::string> implicitExtensions;
 
+    // Live-edit poll interval (in milliseconds). The watcher thread spawned
+    // when live_edit=true wakes at this cadence to stat the per-app config
+    // file. Default is 1000 ms; only the integration tests need to tweak it
+    // (real users edit settings.json at human timescale, so the default is
+    // fine in production). Reads/writes are atomic so the watcher can pick
+    // up changes mid-run without locking.
+    void setLiveEditPollIntervalForTesting(std::chrono::milliseconds interval);
+    std::chrono::milliseconds getLiveEditPollInterval();
+
 } // namespace openxr_api_layer

@@ -40,6 +40,22 @@ namespace openxr_api_layer {
 
     using namespace log;
 
+    // Live-edit watcher poll interval. Default 1 s in production; the
+    // integration tests shorten it to ~50 ms via setLiveEditPollIntervalForTesting
+    // so they don't have to sleep a full second per assertion. The watcher
+    // re-reads this on every wait_for tick so a mid-run change takes effect
+    // on the next iteration.
+    static std::atomic<int64_t> g_liveEditPollIntervalMs{1000};
+
+    void setLiveEditPollIntervalForTesting(std::chrono::milliseconds interval) {
+        const int64_t ms = interval.count() > 0 ? interval.count() : 1;
+        g_liveEditPollIntervalMs.store(ms, std::memory_order_relaxed);
+    }
+
+    std::chrono::milliseconds getLiveEditPollInterval() {
+        return std::chrono::milliseconds(g_liveEditPollIntervalMs.load(std::memory_order_relaxed));
+    }
+
     // Our API layer implement these extensions, and their specified version.
     const std::vector<std::pair<std::string, uint32_t>> advertisedExtensions = {};
 
@@ -294,7 +310,15 @@ namespace openxr_api_layer {
     class OpenXrLayer : public openxr_api_layer::OpenXrApi {
       public:
         OpenXrLayer() = default;
-        ~OpenXrLayer() = default;
+
+        // Stops and joins the live-edit watcher thread (if started) before
+        // any base-class teardown runs. The watcher only ever touches
+        // m_configFilePath / m_appName (set once before the thread starts)
+        // and the m_pendingLiveEdit* members it owns under m_liveEditMutex,
+        // so it's safe to keep it alive until destruction.
+        ~OpenXrLayer() override {
+            stopLiveEditWatcher();
+        }
 
         // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrGetInstanceProcAddr
         XrResult xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) override {
@@ -380,14 +404,17 @@ namespace openxr_api_layer {
                 m_bypassApiLayer = true;
             }
 
-            // If live_edit is on, record the per-app config's mtime so
-            // xrLocateViews can detect changes without recomputing the path
-            // each frame.
-            if (m_config.liveEdit) {
-                try {
-                    m_configLastWriteTime = std::filesystem::last_write_time(m_configFilePath);
-                } catch (...) {}
-                Log(fmt::format("Live-edit enabled, watching {}\n", m_configFilePath.string()));
+            // If live_edit is on, spin up a background watcher thread that
+            // polls the config file at 1 Hz. The frame thread (xrLocateViews)
+            // never touches the filesystem — it only does an atomic check
+            // and, when the watcher signals a change, swaps in the freshly
+            // parsed config under a brief mutex.
+            //
+            // We start the watcher only when the layer is not being bypassed:
+            // a bypassed layer will short-circuit xrLocateViews anyway, so
+            // the thread would be doing nothing useful.
+            if (m_config.liveEdit && !m_bypassApiLayer) {
+                startLiveEditWatcher();
             }
 
             if (m_bypassApiLayer) {
@@ -640,31 +667,27 @@ namespace openxr_api_layer {
                                uint32_t viewCapacityInput,
                                uint32_t* viewCountOutput,
                                XrView* views) override {
-            // ---- Live-edit: periodic config reload --------------------------
-            // xrLocateViews is the hot path — called ~once per frame. Wrap the
-            // poll here (rather than a dedicated xrEndFrame override) so the
-            // user can tune the crop factors mid-session without restarting
-            // the game. Swapchain dims stay fixed (allocated at session start)
-            // so live_edit only affects the per-frame FOV narrowing.
-            if (m_config.liveEdit && ++m_liveEditFrameCounter % kLiveEditCheckInterval == 0) {
-                try {
-                    const auto mtime = std::filesystem::last_write_time(m_configFilePath);
-                    if (mtime != m_configLastWriteTime) {
-                        m_configLastWriteTime = mtime;
-                        m_config = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
-                        m_helmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
-                        // Push the new helmet tunables into the live
-                        // overlay so distance_m / horizontal_fov_deg
-                        // changes are visible without a session restart.
-                        // Toggling enabled, replacing the PNG, or
-                        // changing brightness still requires a restart —
-                        // those would need swapchain / staging-texture
-                        // reallocation (see HelmetOverlay::updateLiveTunables).
-                        m_helmetOverlay.updateLiveTunables(m_helmetConfig);
-                        ++m_configGen;
-                    }
-                } catch (...) {
-                    // File mid-write, locked, or deleted. Skip, try next interval.
+            // ---- Live-edit: pick up any config the watcher prepared --------
+            // xrLocateViews is the hot path — called ~once per frame. The
+            // filesystem polling now lives on m_liveEditThread (1 Hz, real
+            // time, not frame-counted), so the frame thread does ZERO file
+            // I/O here: just an atomic load. Only when the watcher signals
+            // a change do we briefly take m_liveEditMutex to swap in the
+            // pre-parsed CropConfig + HelmetOverlayConfig.
+            //
+            // updateLiveTunables() stays on the frame thread: the watcher
+            // only prepares CPU-side data, while the overlay's runtime-
+            // mutable parameters (distance_m / horizontal_fov_deg /
+            // vertical_offset_deg) get pushed into the renderer here so
+            // there is no cross-thread access to the D3D side.
+            if (m_pendingLiveEditReady.load(std::memory_order_acquire)) {
+                std::lock_guard<std::mutex> lock(m_liveEditMutex);
+                if (m_pendingLiveEditReady.load(std::memory_order_relaxed)) {
+                    m_config = std::move(m_pendingLiveEditConfig);
+                    m_helmetConfig = std::move(m_pendingLiveEditHelmetConfig);
+                    m_pendingLiveEditReady.store(false, std::memory_order_relaxed);
+                    m_helmetOverlay.updateLiveTunables(m_helmetConfig);
+                    ++m_configGen;
                 }
             }
 
@@ -730,6 +753,95 @@ namespace openxr_api_layer {
             return systemId == m_systemId;
         }
 
+        // Spawns m_liveEditThread. Must be called once, after m_configFilePath
+        // and m_appName are set and before any frame-thread work begins
+        // (i.e. from xrCreateInstance). Idempotent: a second call is a no-op.
+        void startLiveEditWatcher() {
+            if (m_liveEditThread.joinable()) return;
+            try {
+                m_configLastWriteTime = std::filesystem::last_write_time(m_configFilePath);
+            } catch (...) {
+                m_configLastWriteTime = {};
+            }
+            Log(fmt::format("Live-edit watcher starting (1 Hz), watching {}\n",
+                            m_configFilePath.string()));
+            m_liveEditStop.store(false, std::memory_order_relaxed);
+            m_liveEditThread = std::thread([this]() { liveEditWatcherLoop(); });
+        }
+
+        // Signals the watcher to exit and joins it. Safe to call multiple
+        // times and from the destructor: a never-started watcher is a no-op.
+        void stopLiveEditWatcher() {
+            if (!m_liveEditThread.joinable()) return;
+            {
+                std::lock_guard<std::mutex> lock(m_liveEditMutex);
+                m_liveEditStop.store(true, std::memory_order_relaxed);
+            }
+            m_liveEditCv.notify_all();
+            m_liveEditThread.join();
+        }
+
+        // Watcher thread body. Wakes once per second (or earlier if
+        // notified for shutdown), stats m_configFilePath, and on mtime
+        // change parses a fresh CropConfig + HelmetOverlayConfig and
+        // hands them to the frame thread via m_pendingLiveEdit*.
+        // Runs entirely off the frame thread — no OpenXR calls, no D3D.
+        void liveEditWatcherLoop() {
+            // Drop priority so the scheduler never preempts the frame
+            // thread (which runs at NORMAL) to give us a slot. A failure
+            // here is non-fatal — the watcher just keeps running at
+            // NORMAL, which is the pre-fix behaviour. Nothing in the
+            // loop blocks long enough that BELOW_NORMAL would cause it
+            // to miss its 1 Hz cadence in any meaningful way.
+            if (!::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)) {
+                Log(fmt::format("Live-edit watcher: SetThreadPriority(BELOW_NORMAL) failed, GetLastError={}\n",
+                                ::GetLastError()));
+            }
+
+            while (true) {
+                {
+                    // Re-read the interval each iteration so tests can
+                    // override it (and so a future config-driven knob would
+                    // take effect without restarting the layer).
+                    const auto pollInterval = getLiveEditPollInterval();
+                    std::unique_lock<std::mutex> lock(m_liveEditMutex);
+                    m_liveEditCv.wait_for(lock, pollInterval, [this]() {
+                        return m_liveEditStop.load(std::memory_order_relaxed);
+                    });
+                    if (m_liveEditStop.load(std::memory_order_relaxed)) return;
+                }
+
+                std::filesystem::file_time_type mtime;
+                try {
+                    mtime = std::filesystem::last_write_time(m_configFilePath);
+                } catch (...) {
+                    // File mid-write, locked, or deleted. Try again next tick.
+                    continue;
+                }
+                if (mtime == m_configLastWriteTime) continue;
+                m_configLastWriteTime = mtime;
+
+                CropConfig newConfig;
+                HelmetOverlayConfig newHelmetConfig;
+                try {
+                    newConfig = openxr_api_layer::loadConfig(m_configFilePath, m_appName);
+                    newHelmetConfig = openxr_api_layer::loadHelmetConfig(m_configFilePath);
+                } catch (...) {
+                    // Parse error or transient I/O failure. Skip this
+                    // change; the frame thread keeps using the last good
+                    // config. Next tick will retry if mtime moves again.
+                    continue;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(m_liveEditMutex);
+                    m_pendingLiveEditConfig = std::move(newConfig);
+                    m_pendingLiveEditHelmetConfig = std::move(newHelmetConfig);
+                    m_pendingLiveEditReady.store(true, std::memory_order_release);
+                }
+            }
+        }
+
         bool m_bypassApiLayer{false};
         XrSystemId m_systemId{XR_NULL_SYSTEM_ID};
 
@@ -737,15 +849,43 @@ namespace openxr_api_layer {
         CropConfig m_config;
         bool m_fovLogged{false};
 
-        // Live-edit: poll the config file for changes every kLiveEditCheckInterval
-        // calls to xrLocateViews (~1 s at 90 Hz). Only active when m_config.liveEdit
-        // is true. Swapchain dimensions stay fixed (xrEnumerateViewConfigurationViews
-        // runs once at session start), so live_edit only picks up FOV factor changes.
-        static constexpr uint32_t kLiveEditCheckInterval = 90u;
-        uint32_t m_liveEditFrameCounter{0};
+        // Live-edit: a background thread polls the config file at 1 Hz
+        // (real time, not frame-counted, so this is independent of the
+        // application's framerate). Swapchain dimensions stay fixed
+        // (xrEnumerateViewConfigurationViews runs once at session start),
+        // so live_edit only picks up FOV factor changes and the helmet
+        // overlay's runtime-mutable tunables.
+        //
+        // Threading contract:
+        //  - m_configFilePath / m_appName: set once in xrCreateInstance
+        //    before the watcher starts; never modified afterwards. Both
+        //    threads read them lock-free.
+        //  - m_configLastWriteTime: only the watcher thread reads/writes
+        //    it. The frame thread never touches it.
+        //  - m_pendingLiveEdit*: written by the watcher, read+consumed by
+        //    the frame thread, both under m_liveEditMutex. m_pendingLiveEditReady
+        //    is the lock-free fast-path flag the frame thread checks first.
         std::filesystem::path m_configFilePath;
         std::filesystem::file_time_type m_configLastWriteTime{};
         std::string m_appName;
+        std::thread m_liveEditThread;
+        std::mutex m_liveEditMutex;
+        std::condition_variable m_liveEditCv;
+        std::atomic<bool> m_liveEditStop{false};
+        // alignas(64) puts m_pendingLiveEditReady on its own 64-byte cache
+        // line, isolated from m_liveEditMutex / m_liveEditCv / m_liveEditStop
+        // above. Without this, the watcher's per-tick mutex+cv writes (every
+        // poll interval, even when the file hasn't changed) would invalidate
+        // the cache line that the frame thread loads on every xrLocateViews —
+        // classic false sharing. The bench shows ~+37 % missed-frames residual
+        // on top of v0.3.0 even after moving the syscall off-thread; this
+        // padding is the cheap experiment to see how much of that was cache
+        // contention vs. inherent cost of running an extra thread.
+        // 64 is the destructive-interference size on every x86_64 CPU (and on
+        // ARM big cores / Apple Silicon); the build target is Windows x64.
+        alignas(64) std::atomic<bool> m_pendingLiveEditReady{false};
+        CropConfig m_pendingLiveEditConfig;
+        HelmetOverlayConfig m_pendingLiveEditHelmetConfig;
 
         // Per-view cache for narrowFov(). xrLocateViews is externally
         // synchronized (OpenXR spec), so no locking is needed. 4 covers every
