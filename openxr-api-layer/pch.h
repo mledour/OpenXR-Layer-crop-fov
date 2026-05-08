@@ -71,15 +71,29 @@ using namespace std::chrono_literals;
 // references) and the d3d11.dll / d3dcompiler_47.dll DLLs are delay-loaded
 // at link time so they are not mapped into host processes that never
 // exercise the overlay.
+//
+// D3D12 + d3d11on12 are pulled in for the same overlay path on D3D12
+// hosts (MSFS et al). We never call D3D12 entry points directly — we
+// only consume the ID3D12Device / ID3D12CommandQueue the application
+// hands us through XrGraphicsBindingD3D12KHR, then bridge them to
+// ID3D11Device via D3D11On12CreateDevice (which is exported by
+// d3d11.dll, already delay-loaded). So no extra DLL ends up loaded
+// in non-D3D12 host processes.
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <d3d12.h>
+#include <d3d11on12.h>
 
 using Microsoft::WRL::ComPtr;
 
-// OpenXR + Windows-specific definitions.
+// OpenXR + Windows-specific definitions. Both D3D11 and D3D12
+// graphics-API switches are enabled so <openxr_platform.h> exposes
+// XrGraphicsBindingD3D{11,12}KHR + XrSwapchainImageD3D{11,12}KHR. The
+// switches only enable type definitions; nothing is linked.
 #define XR_NO_PROTOTYPES
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_GRAPHICS_API_D3D12
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 

@@ -79,11 +79,20 @@
 // Bringing it back later is just a matter of restoring the implicit
 // extension request and a tryInitEquirect2() that reuses the PNG.
 //
-// The session's graphics binding must be D3D11; other bindings
-// bypass silently (see CLAUDE.md — never crash the host). D3D11
-// entry points are delay-loaded at link time so a Vulkan-only game
-// that never enables the overlay never pulls d3d11.dll into its
-// process.
+// The session's graphics binding must be D3D11 OR D3D12. On D3D12
+// hosts (MSFS, newer Forza, etc.) we bridge through D3D11On12 so the
+// rest of this file stays written in plain D3D11 — the wrapper is
+// created at session init and used only for the one-shot
+// CopyResource into the static-image swapchain, so the per-frame
+// hot path remains exactly zero work on either backend. Other
+// bindings (Vulkan, OpenGL) bypass silently (see CLAUDE.md — never
+// crash the host).
+//
+// D3D11 + D3D12 entry points are delay-loaded at link time so a
+// Vulkan-only game that never enables the overlay never pulls
+// d3d11.dll / d3d12.dll into its process. D3D11On12CreateDevice
+// itself lives in d3d11.dll, so the D3D12-host path needs no
+// additional DLL beyond what the native D3D11 path already pulls.
 
 namespace openxr_api_layer {
 
@@ -143,6 +152,16 @@ namespace openxr_api_layer {
 
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
+        // D3D11on12 bridge — populated only when the host session is
+        // bound to D3D12 (MSFS, newer Forza, etc.). Lets us keep the
+        // entire texture-upload path written in plain D3D11 above this
+        // line, while wrapping the runtime's D3D12 swapchain images
+        // through CreateWrappedResource() at upload time. Null on
+        // native D3D11 hosts. Held by the Impl so AcquireWrappedResources
+        // / ReleaseWrappedResources see the same instance that
+        // D3D11On12CreateDevice produced.
+        ComPtr<ID3D11On12Device> d3d11on12;
+        bool isD3D12Host = false;
 
         // Composition layer kept stable between appendLayer() calls so
         // the pointer we hand back to layer.cpp remains valid through
@@ -212,19 +231,76 @@ namespace openxr_api_layer {
             return false;
         }
 
-        // ---- Common: locate the app's D3D11 binding and device. -------
+        // ---- Locate the app's graphics binding. -----------------------
+        // Two paths produce a usable ID3D11Device + ID3D11DeviceContext:
+        //   1. Native D3D11 host — take the device straight from
+        //      XrGraphicsBindingD3D11KHR. The whole upload path below
+        //      runs against the app's own device.
+        //   2. D3D12 host (e.g. MSFS) — create a D3D11On12 bridge
+        //      around the app's D3D12 device + command queue. The
+        //      resulting ID3D11Device shares the underlying GPU
+        //      resources with D3D12, so swapchain images allocated by
+        //      the runtime as D3D12 resources can be wrapped as D3D11
+        //      textures via ID3D11On12Device::CreateWrappedResource()
+        //      at upload time. Per-frame cost is identical to the
+        //      native D3D11 path: zero, because we use
+        //      XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT and only upload
+        //      once.
+        // Vulkan / OpenGL hosts fall through and the overlay does not
+        // arm — never crash the host (best-practices rule 9).
         const auto* d3d11Binding = reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(
             findInNextChain(sessionCreateInfoNextChain, XR_TYPE_GRAPHICS_BINDING_D3D11_KHR));
-        if (!d3d11Binding || !d3d11Binding->device) {
-            Log("HelmetOverlay: session is not D3D11 (Vulkan or D3D12 host?), "
-                "overlay will not run. Future versions will add a D3D11on12 "
-                "path for D3D12 hosts.\n");
-            return false;
-        }
-        m_impl->device = d3d11Binding->device;
-        m_impl->device->GetImmediateContext(&m_impl->context);
-        if (!m_impl->context) {
-            ErrorLog("HelmetOverlay: ID3D11Device had no immediate context\n");
+        const auto* d3d12Binding = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(
+            findInNextChain(sessionCreateInfoNextChain, XR_TYPE_GRAPHICS_BINDING_D3D12_KHR));
+
+        if (d3d11Binding && d3d11Binding->device) {
+            m_impl->isD3D12Host = false;
+            m_impl->device = d3d11Binding->device;
+            m_impl->device->GetImmediateContext(&m_impl->context);
+            if (!m_impl->context) {
+                ErrorLog("HelmetOverlay: ID3D11Device had no immediate context\n");
+                return false;
+            }
+            Log("HelmetOverlay: native D3D11 host detected\n");
+        } else if (d3d12Binding && d3d12Binding->device && d3d12Binding->queue) {
+            // D3D11On12CreateDevice lives in d3d11.dll; the layer DLL
+            // delay-loads d3d11.dll, so this is the moment that DLL is
+            // actually mapped into the host process — exactly like the
+            // native D3D11 path on the previous branch.
+            //
+            // Passing nullptr for pFeatureLevels + 0 for FeatureLevels
+            // lets D3D11on12 inherit the D3D12 device's feature level,
+            // which is always at least 11_0 (D3D12 minimum). The single-
+            // queue path is what every D3D12 game uses.
+            ID3D12CommandQueue* queues[] = { d3d12Binding->queue };
+            const HRESULT hr = D3D11On12CreateDevice(
+                d3d12Binding->device,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                /*pFeatureLevels=*/ nullptr,
+                /*FeatureLevels=*/ 0,
+                reinterpret_cast<IUnknown* const*>(queues),
+                /*NumQueues=*/ 1,
+                /*NodeMask=*/ 0,
+                m_impl->device.GetAddressOf(),
+                m_impl->context.GetAddressOf(),
+                /*pChosenFeatureLevel=*/ nullptr);
+            if (FAILED(hr) || !m_impl->device || !m_impl->context) {
+                Log(fmt::format("HelmetOverlay: D3D11On12CreateDevice failed, hr=0x{:08X} — overlay will not arm\n",
+                                static_cast<uint32_t>(hr)));
+                return false;
+            }
+            // QueryInterface for the ID3D11On12Device facet so
+            // createSwapchainFromPng() can later CreateWrappedResource
+            // around the runtime's D3D12 swapchain images.
+            if (FAILED(m_impl->device.As(&m_impl->d3d11on12)) || !m_impl->d3d11on12) {
+                Log("HelmetOverlay: ID3D11On12Device QueryInterface failed — overlay will not arm\n");
+                return false;
+            }
+            m_impl->isD3D12Host = true;
+            Log("HelmetOverlay: D3D12 host detected, using D3D11On12 bridge\n");
+        } else {
+            Log("HelmetOverlay: session is neither D3D11 nor D3D12 (Vulkan / OpenGL host), "
+                "overlay will not run\n");
             return false;
         }
 
@@ -347,21 +423,70 @@ namespace openxr_api_layer {
             return false;
         }
 
-        // STATIC_IMAGE_BIT guarantees imageCount == 1.
+        // STATIC_IMAGE_BIT guarantees imageCount == 1. We still query
+        // the count first for spec compliance.
         uint32_t imageCount = 0;
         if (XR_FAILED(m_impl->api->xrEnumerateSwapchainImages(m_impl->swapchain, 0, &imageCount, nullptr)) ||
             imageCount == 0) {
             Log("HelmetOverlay: xrEnumerateSwapchainImages returned 0\n");
             return false;
         }
-        std::vector<XrSwapchainImageD3D11KHR> images(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
-        if (XR_FAILED(m_impl->api->xrEnumerateSwapchainImages(
-                m_impl->swapchain, imageCount, &imageCount,
-                reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())))) {
-            Log("HelmetOverlay: xrEnumerateSwapchainImages (second call) failed\n");
-            return false;
+
+        // Two paths to obtain a writable ID3D11Texture2D pointing at the
+        // runtime-owned swapchain image:
+        //   - D3D11 host: enumerate as XrSwapchainImageD3D11KHR; the
+        //     `texture` field is the ID3D11Texture2D directly.
+        //   - D3D12 host: enumerate as XrSwapchainImageD3D12KHR (an
+        //     ID3D12Resource*), then wrap it through
+        //     ID3D11On12Device::CreateWrappedResource so D3D11
+        //     CopyResource can target it.
+        // The ComPtr `wrappedSwapchainImage` is only populated on the
+        // D3D12 path; on D3D11 it stays empty and we use the raw runtime
+        // pointer directly. Both paths converge on `swapchainImage`
+        // (a non-owning ID3D11Texture2D*) for the CopyResource below.
+        ID3D11Texture2D* swapchainImage = nullptr;
+        ComPtr<ID3D11Texture2D> wrappedSwapchainImage;
+
+        if (!m_impl->isD3D12Host) {
+            std::vector<XrSwapchainImageD3D11KHR> images(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+            if (XR_FAILED(m_impl->api->xrEnumerateSwapchainImages(
+                    m_impl->swapchain, imageCount, &imageCount,
+                    reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())))) {
+                Log("HelmetOverlay: xrEnumerateSwapchainImages (D3D11) failed\n");
+                return false;
+            }
+            swapchainImage = images[0].texture; // not AddRef'd, runtime owns it
+        } else {
+            std::vector<XrSwapchainImageD3D12KHR> images(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+            if (XR_FAILED(m_impl->api->xrEnumerateSwapchainImages(
+                    m_impl->swapchain, imageCount, &imageCount,
+                    reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())))) {
+                Log("HelmetOverlay: xrEnumerateSwapchainImages (D3D12) failed\n");
+                return false;
+            }
+
+            // CreateWrappedResource gives us a D3D11 view of the same
+            // GPU memory the D3D12 swapchain image occupies. The state
+            // we declare on input/output is the OpenXR D3D12 convention:
+            // the runtime hands us swapchain images in RENDER_TARGET
+            // state, and expects them back in RENDER_TARGET state at
+            // xrReleaseSwapchainImage time. D3D11on12 inserts whatever
+            // internal transitions it needs between those two endpoints.
+            D3D11_RESOURCE_FLAGS flags11{};
+            flags11.BindFlags = D3D11_BIND_RENDER_TARGET;
+            const HRESULT hr = m_impl->d3d11on12->CreateWrappedResource(
+                images[0].texture,                 // ID3D12Resource*
+                &flags11,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, // InState
+                D3D12_RESOURCE_STATE_RENDER_TARGET, // OutState
+                IID_PPV_ARGS(wrappedSwapchainImage.GetAddressOf()));
+            if (FAILED(hr) || !wrappedSwapchainImage) {
+                Log(fmt::format("HelmetOverlay: ID3D11On12Device::CreateWrappedResource failed, hr=0x{:08X}\n",
+                                static_cast<uint32_t>(hr)));
+                return false;
+            }
+            swapchainImage = wrappedSwapchainImage.Get();
         }
-        ID3D11Texture2D* swapchainImage = images[0].texture; // not AddRef'd, runtime owns it
 
         // Build the source pixel buffer we own and can mutate (so the
         // brightness multiplier below can run without touching
@@ -441,7 +566,25 @@ namespace openxr_api_layer {
             Log("HelmetOverlay: one-shot xrWaitSwapchainImage failed\n");
             return false;
         }
-        m_impl->context->CopyResource(swapchainImage, staging.Get());
+        // On D3D12 hosts, the wrapped resource needs an
+        // AcquireWrappedResources / ReleaseWrappedResources bracket
+        // around any D3D11 use, so D3D11on12 can transition the
+        // underlying D3D12 resource into and back out of the state
+        // we declared in CreateWrappedResource. The trailing Flush()
+        // ensures the D3D11 commands have been submitted to the D3D12
+        // command queue before xrReleaseSwapchainImage hands the
+        // resource back to the OpenXR runtime — without it, the
+        // runtime might composite an empty image on the first frame.
+        // On native D3D11, both calls are no-ops we don't issue.
+        if (m_impl->isD3D12Host) {
+            ID3D11Resource* wrapped[] = { swapchainImage };
+            m_impl->d3d11on12->AcquireWrappedResources(wrapped, 1);
+            m_impl->context->CopyResource(swapchainImage, staging.Get());
+            m_impl->d3d11on12->ReleaseWrappedResources(wrapped, 1);
+            m_impl->context->Flush();
+        } else {
+            m_impl->context->CopyResource(swapchainImage, staging.Get());
+        }
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         if (XR_FAILED(m_impl->api->xrReleaseSwapchainImage(m_impl->swapchain, &ri))) {
             Log("HelmetOverlay: one-shot xrReleaseSwapchainImage failed\n");
@@ -559,8 +702,16 @@ namespace openxr_api_layer {
                 m_impl->swapchain = XR_NULL_HANDLE;
             }
         }
+        // ComPtr release order matters: the D3D11On12 facet holds a
+        // reference back to the D3D11 device, and the D3D11 context
+        // holds one to the device too. Release them in dependency
+        // order (most-derived → least-derived) so refcounts unwind
+        // cleanly. On native D3D11 hosts d3d11on12 is already null,
+        // so the .Reset() is a no-op.
+        m_impl->d3d11on12.Reset();
         m_impl->context.Reset();
         m_impl->device.Reset();
+        m_impl->isD3D12Host = false;
         m_impl->session = XR_NULL_HANDLE;
         m_impl->api = nullptr;
         m_impl->mode = HelmetOverlayMode::Disabled;
