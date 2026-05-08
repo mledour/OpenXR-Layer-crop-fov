@@ -40,6 +40,22 @@ namespace openxr_api_layer {
 
     using namespace log;
 
+    // Live-edit watcher poll interval. Default 1 s in production; the
+    // integration tests shorten it to ~50 ms via setLiveEditPollIntervalForTesting
+    // so they don't have to sleep a full second per assertion. The watcher
+    // re-reads this on every wait_for tick so a mid-run change takes effect
+    // on the next iteration.
+    static std::atomic<int64_t> g_liveEditPollIntervalMs{1000};
+
+    void setLiveEditPollIntervalForTesting(std::chrono::milliseconds interval) {
+        const int64_t ms = interval.count() > 0 ? interval.count() : 1;
+        g_liveEditPollIntervalMs.store(ms, std::memory_order_relaxed);
+    }
+
+    std::chrono::milliseconds getLiveEditPollInterval() {
+        return std::chrono::milliseconds(g_liveEditPollIntervalMs.load(std::memory_order_relaxed));
+    }
+
     // Our API layer implement these extensions, and their specified version.
     const std::vector<std::pair<std::string, uint32_t>> advertisedExtensions = {};
 
@@ -771,11 +787,14 @@ namespace openxr_api_layer {
         // hands them to the frame thread via m_pendingLiveEdit*.
         // Runs entirely off the frame thread — no OpenXR calls, no D3D.
         void liveEditWatcherLoop() {
-            constexpr auto kPollInterval = std::chrono::seconds(1);
             while (true) {
                 {
+                    // Re-read the interval each iteration so tests can
+                    // override it (and so a future config-driven knob would
+                    // take effect without restarting the layer).
+                    const auto pollInterval = getLiveEditPollInterval();
                     std::unique_lock<std::mutex> lock(m_liveEditMutex);
-                    m_liveEditCv.wait_for(lock, kPollInterval, [this]() {
+                    m_liveEditCv.wait_for(lock, pollInterval, [this]() {
                         return m_liveEditStop.load(std::memory_order_relaxed);
                     });
                     if (m_liveEditStop.load(std::memory_order_relaxed)) return;
