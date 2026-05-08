@@ -861,7 +861,18 @@ namespace openxr_api_layer {
         std::mutex m_liveEditMutex;
         std::condition_variable m_liveEditCv;
         std::atomic<bool> m_liveEditStop{false};
-        std::atomic<bool> m_pendingLiveEditReady{false};
+        // alignas(64) puts m_pendingLiveEditReady on its own 64-byte cache
+        // line, isolated from m_liveEditMutex / m_liveEditCv / m_liveEditStop
+        // above. Without this, the watcher's per-tick mutex+cv writes (every
+        // poll interval, even when the file hasn't changed) would invalidate
+        // the cache line that the frame thread loads on every xrLocateViews —
+        // classic false sharing. The bench shows ~+37 % missed-frames residual
+        // on top of v0.3.0 even after moving the syscall off-thread; this
+        // padding is the cheap experiment to see how much of that was cache
+        // contention vs. inherent cost of running an extra thread.
+        // 64 is the destructive-interference size on every x86_64 CPU (and on
+        // ARM big cores / Apple Silicon); the build target is Windows x64.
+        alignas(64) std::atomic<bool> m_pendingLiveEditReady{false};
         CropConfig m_pendingLiveEditConfig;
         HelmetOverlayConfig m_pendingLiveEditHelmetConfig;
 
