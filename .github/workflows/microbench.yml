@@ -1,0 +1,173 @@
+name: Microbench
+
+# Per-PR microbenchmark: build the test binary on PR head, run the
+# microbench TEST_CASEs, build the same binary on main, run there too,
+# compare PR vs main on the SAME runner so per-runner CPU variance is
+# eliminated by construction.
+#
+# Threshold (10 %) intentionally above the typical 2-5 % intra-job noise
+# floor on shared GitHub-hosted Azure VMs. Tighten only on a self-hosted
+# runner with a dedicated CPU.
+#
+# Only runs on PRs targeting main; not on push-to-main (no PR baseline)
+# and not on tag pushes (release builds, no perf gate needed).
+on:
+  pull_request:
+    branches: [main]
+
+# We only need read access to repo contents (no release assets, no
+# secrets, no PR comments yet).
+permissions:
+  contents: read
+
+jobs:
+  microbench:
+    name: Microbench (PR vs main)
+    runs-on: windows-2022
+
+    steps:
+      # We need both the PR head AND main, on the same runner, in
+      # sequence. Checking out the PR head with full history lets us
+      # `git checkout origin/main` later without a second fetch.
+      - name: Checkout PR (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore "XR_APILAYER_MLEDOUR_fov_crop.sln"
+
+      # ---- PR build + bench -----------------------------------------------
+      #
+      # We build only the test binary's project to skip the layer's
+      # signing path and the installer path that the main "Build and
+      # Release" workflow exercises. /t:openxr-api-layer-tests targets
+      # just the test project; MSBuild still pulls in the layer .vcxproj
+      # because the test project lists it as ProjectReference.
+      - name: Build test binary (PR)
+        run: >-
+          msbuild "XR_APILAYER_MLEDOUR_fov_crop.sln"
+          /p:Configuration=Release
+          /p:Platform=x64
+          /t:openxr-api-layer-tests
+          /m
+          /verbosity:minimal
+          /nologo
+
+      # Run only the microbench TEST_CASEs (filtered by the leading
+      # "microbench:" segment of their names). Capture stdout to a file —
+      # compare_bench.py greps for MICROBENCH:* lines and ignores the
+      # rest of the doctest output mixed in.
+      #
+      # Setting the process priority to High reduces scheduler jitter
+      # from other Azure-hosted VMs sharing the same hardware. Empirical
+      # benchmark suite tooling (rustc-perf, LLVM) does the same.
+      - name: Run microbench (PR)
+        shell: pwsh
+        run: |
+          $exe = "bin\x64\Release\openxr-api-layer-tests.exe"
+          if (-not (Test-Path $exe)) { throw "Test binary not found at $exe" }
+          $proc = Start-Process -FilePath $exe `
+                                -ArgumentList @('--test-case=microbench:*') `
+                                -RedirectStandardOutput 'pr_bench.txt' `
+                                -PassThru -NoNewWindow
+          # Bump priority class for the duration of the bench.
+          $proc.PriorityClass = 'High'
+          $proc.WaitForExit()
+          if ($proc.ExitCode -ne 0) {
+            Get-Content pr_bench.txt
+            throw "PR microbench exited with $($proc.ExitCode)"
+          }
+          Write-Host "--- PR bench output ---"
+          Get-Content pr_bench.txt
+
+      # ---- main build + bench --------------------------------------------
+      #
+      # Switch the working tree to main, rebuild the same test project,
+      # rerun the bench. If main predates the bench (the bootstrap PR
+      # case), main's binary won't have any microbench TEST_CASEs and
+      # main_bench.txt will have no MICROBENCH:* lines — compare_bench.py
+      # treats that as a soft-pass and just reports the PR numbers.
+      - name: Checkout main into worktree
+        run: |
+          git fetch origin main --depth=1
+          git checkout origin/main -- .
+          # Submodules can drift between PR and main; refresh them so the
+          # main rebuild sees its own pinned commits, not the PR's.
+          git submodule update --init --recursive
+
+      # Use Rebuild rather than Build for the main pass: the PR build
+      # left intermediate .obj / .pdb files behind, and the source-file
+      # set may differ between PR and main (the bootstrap PR adds
+      # test_microbench.cpp). Forcing a clean compile sidesteps any
+      # stale-incremental-build edge case at minimal cost (~30 s).
+      - name: Build test binary (main, force rebuild)
+        run: >-
+          msbuild "XR_APILAYER_MLEDOUR_fov_crop.sln"
+          /p:Configuration=Release
+          /p:Platform=x64
+          /t:openxr-api-layer-tests:Rebuild
+          /m
+          /verbosity:minimal
+          /nologo
+
+      - name: Run microbench (main)
+        shell: pwsh
+        run: |
+          $exe = "bin\x64\Release\openxr-api-layer-tests.exe"
+          if (-not (Test-Path $exe)) { throw "Test binary not found at $exe" }
+          $proc = Start-Process -FilePath $exe `
+                                -ArgumentList @('--test-case=microbench:*') `
+                                -RedirectStandardOutput 'main_bench.txt' `
+                                -PassThru -NoNewWindow
+          $proc.PriorityClass = 'High'
+          $proc.WaitForExit()
+          # Note: we don't fail on a non-zero exit here. main may not
+          # have the microbench TEST_CASEs at all (bootstrap PR), in
+          # which case the binary still exits 0 (no failed cases), but
+          # main_bench.txt will be empty of MICROBENCH:* lines.
+          Write-Host "--- main bench output ---"
+          Get-Content main_bench.txt
+
+      # ---- Compare + report -----------------------------------------------
+      #
+      # Restore the PR's tools/compare_bench.py — we just overwrote the
+      # working tree with main's checkout, which on the bootstrap PR
+      # doesn't have the script yet. Easiest fix: pull just that file
+      # back from the PR ref.
+      - name: Restore PR compare script
+        run: git checkout ${{ github.event.pull_request.head.sha }} -- tools/compare_bench.py
+
+      - name: Compare PR vs main
+        run: >-
+          python tools/compare_bench.py
+          main_bench.txt
+          pr_bench.txt
+          --threshold 0.10
+          --summary microbench_summary.md
+
+      # Always upload the captures + summary, even on failure, so a
+      # human can inspect the numbers behind the verdict.
+      - name: Upload bench artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: microbench-${{ github.event.pull_request.number }}
+          path: |
+            pr_bench.txt
+            main_bench.txt
+            microbench_summary.md
+          if-no-files-found: warn
+          retention-days: 14

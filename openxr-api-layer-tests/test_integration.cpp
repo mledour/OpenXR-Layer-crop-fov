@@ -35,6 +35,7 @@
 #include "pch.h"
 
 #include "mock_runtime.h"
+#include "test_fixture.h"
 
 #include <layer.h>
 #include <utils/crop_math.h>
@@ -52,114 +53,7 @@
 
 using openxr_api_layer::GetInstance;
 using openxr_api_layer::OpenXrApi;
-
-namespace {
-
-// Every TEST_CASE creates a fresh layer singleton + mock state, so tests are
-// order-independent. We also isolate %LOCALAPPDATA% to a unique temp dir per
-// test so settings.json handling is deterministic on CI where the real
-// %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\ might exist with user data.
-struct LayerFixture {
-    std::filesystem::path configDir;
-
-    LayerFixture() {
-        mock::reset();
-        openxr_api_layer::ResetInstance();
-
-        // Unique temp dir avoids clashes if tests run in parallel one day.
-        std::random_device rd;
-        auto suffix = std::to_string(rd());
-        configDir = std::filesystem::temp_directory_path() /
-                    ("openxr-layer-test-" + suffix);
-        std::filesystem::create_directories(configDir);
-        openxr_api_layer::localAppData = configDir;
-        openxr_api_layer::dllHome = configDir;
-    }
-
-    ~LayerFixture() {
-        openxr_api_layer::ResetInstance();
-        std::error_code ec;
-        std::filesystem::remove_all(configDir, ec);
-    }
-
-    // Writes the global settings.json template into the fixture's
-    // localAppData. On the next boot(), the layer bootstraps the per-app
-    // config (test_settings.json) from this file. Pass empty string to skip
-    // (layer will use defaults or whatever a previous writePerAppSettings
-    // put in place).
-    void writeSettings(const std::string& json) {
-        if (json.empty()) return;
-        std::ofstream f(configDir / "settings.json");
-        f << json;
-    }
-
-    // Writes directly to the per-app config file (test_settings.json) that
-    // the fixture's boot() will use (applicationName = "test" -> slug
-    // "test"). Use this for post-boot mutations that need the live-edit
-    // watcher to observe the change — writeSettings() targets the template,
-    // which the watcher does not monitor.
-    void writePerAppSettings(const std::string& json) {
-        if (json.empty()) return;
-        std::ofstream f(configDir / "test_settings.json");
-        f << json;
-    }
-
-    // Brings the layer up the same way xrCreateApiLayerInstance would:
-    // wire GIPA -> call xrCreateInstance -> resolve every function we plan to
-    // exercise (so the m_xrFoo pointers in OpenXrApi are populated via the
-    // generated xrGetInstanceProcAddrInternal path).
-    OpenXrApi* boot() {
-        OpenXrApi* layer = GetInstance();
-        REQUIRE(layer != nullptr);
-
-        // XrInstance here is a fake handle — the layer never dereferences it,
-        // just threads it back to the mock via m_xrGetInstanceProcAddr.
-        XrInstance fakeInstance = reinterpret_cast<XrInstance>(static_cast<uintptr_t>(0xBEEF));
-        layer->SetGetInstanceProcAddr(&mock::xrGetInstanceProcAddr, fakeInstance);
-
-        XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
-        std::strncpy(ici.applicationInfo.applicationName, "test", XR_MAX_APPLICATION_NAME_SIZE - 1);
-        ici.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
-
-        REQUIRE(layer->xrCreateInstance(&ici) == XR_SUCCESS);
-
-        // Resolve the entry points the tests will call. This is what the
-        // loader does after xrCreateApiLayerInstance: each of these calls
-        // populates m_xrFoo inside OpenXrApi via the generated
-        // xrGetInstanceProcAddrInternal. We never use the returned function
-        // pointers — we go through the virtual methods instead.
-        //
-        // We explicitly target OpenXrApi::xrGetInstanceProcAddr (the base,
-        // non-bypassed implementation). The OpenXrLayer override short-circuits
-        // to raw runtime pointers when m_bypassApiLayer is true, which skips
-        // the m_xrFoo population and would leave the test calling null in
-        // bypass-enabled test cases. Going through the base always populates
-        // the dispatch table so subsequent virtual calls are safe to make;
-        // the override's enabled-check still governs whether the layer
-        // mutates results.
-        auto resolve = [&](const char* name) {
-            PFN_xrVoidFunction fn = nullptr;
-            REQUIRE(layer->OpenXrApi::xrGetInstanceProcAddr(fakeInstance, name, &fn) == XR_SUCCESS);
-        };
-        resolve("xrGetSystem");
-        resolve("xrCreateSession");
-        resolve("xrEnumerateViewConfigurationViews");
-        resolve("xrLocateViews");
-
-        return layer;
-    }
-};
-
-constexpr float kDefaultLeftAngle = -0.90f;
-constexpr float kDefaultRightAngle = 0.90f;
-constexpr float kDefaultUpAngle = 0.70f;
-constexpr float kDefaultDownAngle = -0.70f;
-
-XrFovf defaultFov() {
-    return XrFovf{kDefaultLeftAngle, kDefaultRightAngle, kDefaultUpAngle, kDefaultDownAngle};
-}
-
-} // namespace
+using namespace test_fixture;
 
 // ---------------------------------------------------------------------------
 // xrEnumerateViewConfigurationViews: recommended dims shrink per config
