@@ -39,6 +39,14 @@ namespace openxr_api_layer::log {
 
     namespace {
 
+        // Serializes access to logStream and reopenLogFile. The fov_crop
+        // layer's live-edit watcher runs config reloads on a background
+        // thread and emits Log() calls from there; without this lock those
+        // would race against the frame thread's own Log() calls.
+        // OutputDebugStringA is documented as serialized by the kernel,
+        // so it stays outside the lock to keep the critical section short.
+        std::mutex g_logMutex;
+
         // Utility logging function.
         void InternalLog(const char* fmt, va_list va) {
             const std::time_t now = std::time(nullptr);
@@ -47,6 +55,7 @@ namespace openxr_api_layer::log {
             size_t offset = std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %z: ", std::localtime(&now));
             vsnprintf_s(buf + offset, sizeof(buf) - offset, _TRUNCATE, fmt, va);
             OutputDebugStringA(buf);
+            std::lock_guard<std::mutex> lock(g_logMutex);
             if (logStream.is_open()) {
                 logStream << buf;
                 logStream.flush();
@@ -55,6 +64,7 @@ namespace openxr_api_layer::log {
     } // namespace
 
     void reopenLogFile(const std::filesystem::path& path) {
+        std::lock_guard<std::mutex> lock(g_logMutex);
         if (logStream.is_open()) {
             logStream.flush();
             logStream.close();

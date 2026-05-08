@@ -37,6 +37,9 @@
 // Standard library.
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstring>
 #include <ctime>
@@ -52,6 +55,7 @@
 #include <string>
 #include <memory>
 #include <optional>
+#include <thread>
 #include <unordered_map>
 
 using namespace std::chrono_literals;
