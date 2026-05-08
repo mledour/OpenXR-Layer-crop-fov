@@ -44,6 +44,9 @@
     <ClInclude Include="utils\helmet_overlay.h">
       <Filter>Utilities</Filter>
     </ClInclude>
+    <ClInclude Include="utils\helmet_graphics_binding.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
     <ClInclude Include="utils\name_utils.h">
       <Filter>Utilities</Filter>
     </ClInclude>

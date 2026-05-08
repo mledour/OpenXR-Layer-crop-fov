@@ -23,6 +23,7 @@
 #include "pch.h"
 
 #include "helmet_overlay.h"
+#include "helmet_graphics_binding.h"
 
 #include <framework/dispatch.gen.h>
 #include <log.h>
@@ -232,28 +233,22 @@ namespace openxr_api_layer {
         }
 
         // ---- Locate the app's graphics binding. -----------------------
-        // Two paths produce a usable ID3D11Device + ID3D11DeviceContext:
-        //   1. Native D3D11 host — take the device straight from
-        //      XrGraphicsBindingD3D11KHR. The whole upload path below
-        //      runs against the app's own device.
-        //   2. D3D12 host (e.g. MSFS) — create a D3D11On12 bridge
-        //      around the app's D3D12 device + command queue. The
-        //      resulting ID3D11Device shares the underlying GPU
-        //      resources with D3D12, so swapchain images allocated by
-        //      the runtime as D3D12 resources can be wrapped as D3D11
-        //      textures via ID3D11On12Device::CreateWrappedResource()
-        //      at upload time. Per-frame cost is identical to the
-        //      native D3D11 path: zero, because we use
-        //      XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT and only upload
-        //      once.
-        // Vulkan / OpenGL hosts fall through and the overlay does not
-        // arm — never crash the host (best-practices rule 9).
-        const auto* d3d11Binding = reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(
-            findInNextChain(sessionCreateInfoNextChain, XR_TYPE_GRAPHICS_BINDING_D3D11_KHR));
-        const auto* d3d12Binding = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(
-            findInNextChain(sessionCreateInfoNextChain, XR_TYPE_GRAPHICS_BINDING_D3D12_KHR));
-
-        if (d3d11Binding && d3d11Binding->device) {
+        // Detection priority is in detectGraphicsBindingType() (see
+        // helmet_graphics_binding.h, unit-tested in
+        // test_helmet_graphics_binding.cpp). The switch below is just
+        // the wiring: turn the detected type into a usable
+        // ID3D11Device + ID3D11DeviceContext, either native (D3D11
+        // host) or via D3D11On12 bridge (D3D12 host). Vulkan / OpenGL
+        // hosts return None and the overlay degrades to bypass per
+        // best-practices rule 9 — never crash the host.
+        switch (detectGraphicsBindingType(sessionCreateInfoNextChain)) {
+        case GraphicsBindingType::D3D11: {
+            const auto* d3d11Binding = reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(
+                findInNextChain(sessionCreateInfoNextChain, XR_TYPE_GRAPHICS_BINDING_D3D11_KHR));
+            if (!d3d11Binding || !d3d11Binding->device) {
+                Log("HelmetOverlay: D3D11 binding had null device, overlay will not arm\n");
+                return false;
+            }
             m_impl->isD3D12Host = false;
             m_impl->device = d3d11Binding->device;
             m_impl->device->GetImmediateContext(&m_impl->context);
@@ -262,7 +257,15 @@ namespace openxr_api_layer {
                 return false;
             }
             Log("HelmetOverlay: native D3D11 host detected\n");
-        } else if (d3d12Binding && d3d12Binding->device && d3d12Binding->queue) {
+            break;
+        }
+        case GraphicsBindingType::D3D12: {
+            const auto* d3d12Binding = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(
+                findInNextChain(sessionCreateInfoNextChain, XR_TYPE_GRAPHICS_BINDING_D3D12_KHR));
+            if (!d3d12Binding || !d3d12Binding->device || !d3d12Binding->queue) {
+                Log("HelmetOverlay: D3D12 binding had null device or queue, overlay will not arm\n");
+                return false;
+            }
             // D3D11On12CreateDevice lives in d3d11.dll; the layer DLL
             // delay-loads d3d11.dll, so this is the moment that DLL is
             // actually mapped into the host process — exactly like the
@@ -298,7 +301,10 @@ namespace openxr_api_layer {
             }
             m_impl->isD3D12Host = true;
             Log("HelmetOverlay: D3D12 host detected, using D3D11On12 bridge\n");
-        } else {
+            break;
+        }
+        case GraphicsBindingType::None:
+        default:
             Log("HelmetOverlay: session is neither D3D11 nor D3D12 (Vulkan / OpenGL host), "
                 "overlay will not run\n");
             return false;

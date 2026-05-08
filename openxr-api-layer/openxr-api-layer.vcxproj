@@ -326,6 +326,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)\scripts\Gene
     <ClInclude Include="pch.h" />
     <ClInclude Include="utils\crop_math.h" />
     <ClInclude Include="utils\helmet_overlay.h" />
+    <ClInclude Include="utils\helmet_graphics_binding.h" />
     <ClInclude Include="utils\name_utils.h" />
   </ItemGroup>
   <ItemGroup>

@@ -124,8 +124,65 @@ placeholder into `XR_APILAYER_MLEDOUR_fov_crop.json`, so the layer name
 always tracks the `.sln` filename.
 
 The test binary `openxr-api-layer-tests.exe` is built alongside the DLL
-and runs unit tests (`crop_math`, `name_utils` helpers) plus integration
-tests against an in-process mock OpenXR runtime.
+and runs unit tests (`crop_math`, `name_utils`, `helmet_config_parser`,
+`helmet_graphics_binding` helpers) plus integration tests against an
+in-process mock OpenXR runtime.
+
+## Helmet overlay graphics backend
+
+The helmet overlay needs to upload a PNG into an OpenXR-managed
+swapchain image, which means it has to know what graphics API the
+host application is using. Two paths are supported:
+
+| Host renderer | Backend                                      | Path in `helmet_overlay.cpp`             |
+|---------------|----------------------------------------------|------------------------------------------|
+| D3D11         | Native D3D11                                 | `GraphicsBindingType::D3D11` branch      |
+| D3D12         | D3D11 layered on top of D3D12 (D3D11On12)    | `GraphicsBindingType::D3D12` branch      |
+| Vulkan / GL   | None — overlay degrades to bypass            | `GraphicsBindingType::None` branch       |
+
+The D3D11 path is the historical one: take the device straight from
+`XrGraphicsBindingD3D11KHR`, allocate a staging texture, `CopyResource`
+into the swapchain image once at session init, done. Used by the
+overwhelming majority of sim racing / cockpit OpenXR titles
+(rFactor, ISI, Madness, Source 2-D3D11 engines).
+
+The D3D12 path was added for MSFS, Assetto Corsa Rally (UE5), and the
+growing set of newer titles that picked D3D12 as their renderer.
+Calling `D3D11On12CreateDevice` with the application's `ID3D12Device`
++ `ID3D12CommandQueue` produces an `ID3D11Device` that shares the
+underlying GPU memory, so the rest of the upload path stays written
+in plain D3D11 above the binding-detection switch. The
+`ID3D11On12Device` facet is then used at swapchain-image upload time
+to wrap the runtime-owned `ID3D12Resource` as a D3D11 texture
+(`CreateWrappedResource` → `AcquireWrappedResources` → `CopyResource`
+→ `ReleaseWrappedResources` → `Flush`).
+
+Per-frame cost is identical on either backend — the swapchain is
+created with `XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT` and written
+exactly once at session init. The runtime's compositor reads the
+image straight from VRAM every frame with no help from us. The
+D3D11On12 translation overhead therefore only applies to the
+one-shot upload path; the hot loop is zero work in both cases.
+
+**Tested end-to-end against:**
+- `hello_xr -G D3D11` (Pimax OpenXR, SteamVR) — the default sim
+  racing path.
+- `hello_xr -G D3D12` (Pimax OpenXR, SteamVR) — exercises the bridge
+  with the OpenXR sample app.
+- Le Mans Ultimate, DiRT Rally, iRacing, AMS2 — D3D11 hosts on
+  Pimax Crystal Light.
+- Star Wars Squadrons — D3D11 on Pimax Crystal Light.
+- Assetto Corsa Rally (UE5, D3D12) — real D3D12 host on Pimax
+  Crystal Light, helmet rendered correctly with no visual
+  regression vs the D3D11 path.
+
+**Unit-tested in `test_helmet_graphics_binding.cpp`:**
+the priority ordering of `detectGraphicsBindingType()` (D3D11 wins
+over D3D12, regardless of chain order; unknown structs are skipped;
+`nullptr` is safe). This locks in the priority decision so a future
+refactor cannot silently flip it — D3D12 hosts that contain a stray
+D3D11 binding in their next-chain (defensively expected, forbidden
+by the OpenXR spec) must continue to take the simpler native path.
 
 ## Releases
 
