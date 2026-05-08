@@ -47,8 +47,17 @@ namespace openxr_api_layer::log {
         // so it stays outside the lock to keep the critical section short.
         std::mutex g_logMutex;
 
-        // Utility logging function.
-        void InternalLog(const char* fmt, va_list va) {
+        // Writes a timestamped line through the framework log pipeline.
+        // forceFlush=true persists the line to disk immediately — used by
+        // ErrorLog so a post-error crash still leaves the message on disk.
+        // forceFlush=false leaves the line in the std::ofstream buffer (a
+        // few KB) and lets the OS persist on the next overflow or on
+        // process exit (logStream's destructor flushes when it closes).
+        // The init burst — xrCreateInstance fires ~15 Log() calls in
+        // sequence — used to be ~15 forced fsyncs; with forceFlush=false
+        // it's now one buffered write per call and a single implicit
+        // flush at shutdown.
+        void InternalLog(const char* fmt, va_list va, bool forceFlush) {
             const std::time_t now = std::time(nullptr);
 
             char buf[1024];
@@ -58,7 +67,9 @@ namespace openxr_api_layer::log {
             std::lock_guard<std::mutex> lock(g_logMutex);
             if (logStream.is_open()) {
                 logStream << buf;
-                logStream.flush();
+                if (forceFlush) {
+                    logStream.flush();
+                }
             }
         }
     } // namespace
@@ -78,7 +89,7 @@ namespace openxr_api_layer::log {
     void Log(const char* fmt, ...) {
         va_list va;
         va_start(va, fmt);
-        InternalLog(fmt, va);
+        InternalLog(fmt, va, /*forceFlush=*/false);
         va_end(va);
     }
 
@@ -86,7 +97,10 @@ namespace openxr_api_layer::log {
         if (g_globalErrorCount++ < k_maxLoggedErrors) {
             va_list va;
             va_start(va, fmt);
-            InternalLog(fmt, va);
+            // Errors flush immediately: if the host crashes shortly after
+            // (which is often why an error fired in the first place), the
+            // message must already be on disk for post-mortem debugging.
+            InternalLog(fmt, va, /*forceFlush=*/true);
             va_end(va);
             if (g_globalErrorCount == k_maxLoggedErrors) {
                 Log("Maximum number of errors logged. Going silent.");
@@ -98,7 +112,7 @@ namespace openxr_api_layer::log {
 #ifdef _DEBUG
         va_list va;
         va_start(va, fmt);
-        InternalLog(fmt, va);
+        InternalLog(fmt, va, /*forceFlush=*/false);
         va_end(va);
 #endif
     }

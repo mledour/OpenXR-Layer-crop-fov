@@ -49,7 +49,20 @@ namespace openxr_api_layer::log {
     // us an XrApplicationInfo.
     void reopenLogFile(const std::filesystem::path& path);
 
-    // General logging function.
+    // General logging function. Writes a timestamped line to OutputDebugString
+    // and to the per-app log file (buffered; flushed on shutdown or on the
+    // next ErrorLog).
+    //
+    // **Do not call from frame-thread hot paths.** Each call costs a few
+    // microseconds for formatting plus a kernel transition for
+    // OutputDebugStringA — and several hundred microseconds when a debugger
+    // (DebugView, Visual Studio) is attached. This function is for init,
+    // session-scoped diagnostics, and once-per-event guarded reporting (see
+    // m_fovLogged / m_strippedAppLayerLogged in layer.cpp for the pattern).
+    //
+    // For per-frame instrumentation, use TraceLoggingWrite (ETW): ~50 ns
+    // per event in steady state, no disk I/O, and the bench harness in this
+    // repo already consumes the resulting traces.
     void Log(const char* fmt, ...);
     static inline void Log(const std::string_view& str) {
         Log(str.data());
@@ -61,7 +74,9 @@ namespace openxr_api_layer::log {
         Log(str.data());
     }
 
-    // Error logging function. Goes silent after too many errors.
+    // Error logging function. Flushes to disk immediately (a post-error
+    // crash must not lose the message). Self-rate-limits after 100 calls
+    // per process so a misbehaving caller can't fill the log file.
     void ErrorLog(const char* fmt, ...);
     static inline void ErrorLog(const std::string_view& str) {
         Log(str.data());
