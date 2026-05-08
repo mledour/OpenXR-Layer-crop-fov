@@ -71,27 +71,21 @@ jobs:
       # compare_bench.py greps for MICROBENCH:* lines and ignores the
       # rest of the doctest output mixed in.
       #
-      # Setting the process priority to High reduces scheduler jitter
-      # from other Azure-hosted VMs sharing the same hardware. Empirical
-      # benchmark suite tooling (rustc-perf, LLVM) does the same.
+      # No process priority elevation: the relative comparison (PR vs
+      # main on the same runner, same minutes) already cancels per-VM
+      # CPU variance, and a Start-Process priority bump races with the
+      # bench's own exit (the binary is ~1-2 s end-to-end, faster than
+      # PowerShell can reliably set the property on the returned process
+      # handle).
       - name: Run microbench (PR)
         shell: pwsh
         run: |
           $exe = "bin\x64\Release\openxr-api-layer-tests.exe"
           if (-not (Test-Path $exe)) { throw "Test binary not found at $exe" }
-          $proc = Start-Process -FilePath $exe `
-                                -ArgumentList @('--test-case=microbench:*') `
-                                -RedirectStandardOutput 'pr_bench.txt' `
-                                -PassThru -NoNewWindow
-          # Bump priority class for the duration of the bench.
-          $proc.PriorityClass = 'High'
-          $proc.WaitForExit()
-          if ($proc.ExitCode -ne 0) {
-            Get-Content pr_bench.txt
-            throw "PR microbench exited with $($proc.ExitCode)"
+          & $exe --test-case=microbench:* | Tee-Object -FilePath 'pr_bench.txt'
+          if ($LASTEXITCODE -ne 0) {
+            throw "PR microbench exited with $LASTEXITCODE"
           }
-          Write-Host "--- PR bench output ---"
-          Get-Content pr_bench.txt
 
       # ---- main build + bench --------------------------------------------
       #
@@ -128,18 +122,11 @@ jobs:
         run: |
           $exe = "bin\x64\Release\openxr-api-layer-tests.exe"
           if (-not (Test-Path $exe)) { throw "Test binary not found at $exe" }
-          $proc = Start-Process -FilePath $exe `
-                                -ArgumentList @('--test-case=microbench:*') `
-                                -RedirectStandardOutput 'main_bench.txt' `
-                                -PassThru -NoNewWindow
-          $proc.PriorityClass = 'High'
-          $proc.WaitForExit()
           # Note: we don't fail on a non-zero exit here. main may not
           # have the microbench TEST_CASEs at all (bootstrap PR), in
           # which case the binary still exits 0 (no failed cases), but
           # main_bench.txt will be empty of MICROBENCH:* lines.
-          Write-Host "--- main bench output ---"
-          Get-Content main_bench.txt
+          & $exe --test-case=microbench:* | Tee-Object -FilePath 'main_bench.txt'
 
       # ---- Compare + report -----------------------------------------------
       #
