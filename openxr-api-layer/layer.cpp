@@ -787,6 +787,17 @@ namespace openxr_api_layer {
         // hands them to the frame thread via m_pendingLiveEdit*.
         // Runs entirely off the frame thread — no OpenXR calls, no D3D.
         void liveEditWatcherLoop() {
+            // Drop priority so the scheduler never preempts the frame
+            // thread (which runs at NORMAL) to give us a slot. A failure
+            // here is non-fatal — the watcher just keeps running at
+            // NORMAL, which is the pre-fix behaviour. Nothing in the
+            // loop blocks long enough that BELOW_NORMAL would cause it
+            // to miss its 1 Hz cadence in any meaningful way.
+            if (!::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)) {
+                Log(fmt::format("Live-edit watcher: SetThreadPriority(BELOW_NORMAL) failed, GetLastError={}\n",
+                                ::GetLastError()));
+            }
+
             while (true) {
                 {
                     // Re-read the interval each iteration so tests can
