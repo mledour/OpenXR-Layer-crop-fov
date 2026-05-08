@@ -69,7 +69,15 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>kernel32.lib;user32.lib;advapi32.lib;ole32.lib;oleaut32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- d3d11.lib is required because helmet_overlay.cpp calls
+           D3D11On12CreateDevice (a free function exported by d3d11.dll,
+           NOT an interface method — vtable calls don't need an import
+           lib but free-function calls do). The mock-runtime tests never
+           actually drive the helmet path so the function is never called
+           at runtime; delay-loading d3d11.dll keeps the test binary's
+           startup unchanged. delayimp.lib pairs with DelayLoadDLLs. -->
+      <AdditionalDependencies>kernel32.lib;user32.lib;advapi32.lib;ole32.lib;oleaut32.lib;uuid.lib;d3d11.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>d3d11.dll</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -89,7 +97,15 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>kernel32.lib;user32.lib;advapi32.lib;ole32.lib;oleaut32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- d3d11.lib is required because helmet_overlay.cpp calls
+           D3D11On12CreateDevice (a free function exported by d3d11.dll,
+           NOT an interface method — vtable calls don't need an import
+           lib but free-function calls do). The mock-runtime tests never
+           actually drive the helmet path so the function is never called
+           at runtime; delay-loading d3d11.dll keeps the test binary's
+           startup unchanged. delayimp.lib pairs with DelayLoadDLLs. -->
+      <AdditionalDependencies>kernel32.lib;user32.lib;advapi32.lib;ole32.lib;oleaut32.lib;uuid.lib;d3d11.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>d3d11.dll</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
   <!-- Order-only dependency on the layer project. We compile layer.cpp /
@@ -112,6 +128,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="test_crop_math.cpp" />
     <ClCompile Include="test_helmet_config.cpp" />
+    <ClCompile Include="test_helmet_graphics_binding.cpp" />
     <ClCompile Include="test_integration.cpp" />
     <ClCompile Include="mock_runtime.cpp" />
     <ClCompile Include="test_stubs.cpp" />
