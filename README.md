@@ -22,6 +22,31 @@ modification required.
 > — even a signed one — when loaded into a hooked game. CI flow and
 > verification commands: [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md#code-signing).
 
+## Tested on
+
+End-to-end on real games and runtimes:
+
+| Game | Renderer | HMD | Runtime | Notes |
+|------|----------|-----|---------|-------|
+| Le Mans Ultimate | D3D11 | Pimax Crystal Light | Pimax OpenXR | Online tested, no anti-cheat issues |
+| DiRT Rally 2.0 | D3D11 | Pimax Crystal Light | Pimax OpenXR | |
+| Star Wars Squadrons | D3D11 | Pimax Crystal Light | Pimax OpenXR | |
+| Assetto Corsa Rally | D3D12 | Pimax Crystal Light | Pimax OpenXR | UE5; helmet routed through the D3D11On12 bridge |
+
+Plus the conformance bar:
+
+- `hello_xr -G D3D11` and `hello_xr -G D3D12` from the OpenXR-SDK
+  samples — both pass with the layer loaded.
+- OpenXR Conformance Test Suite (CTS) green on Pimax OpenXR and
+  SteamVR.
+
+The FOV crop is graphics-API-agnostic and the helmet overlay
+supports both D3D11 and D3D12 hosts, so combinations not in the
+table above are likely to work too. Looking for testers on other
+Pimax models (full Crystal, 8KX, 5K Super) and other runtimes
+(SteamVR, WMR, Oculus, Virtual Desktop) — feedback either way at
+[GitHub Issues](../../issues).
+
 ## Installing
 
 ### Installer (recommended)
