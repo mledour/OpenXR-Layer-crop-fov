@@ -130,7 +130,7 @@ underscores — `Le Mans Ultimate` → `le_mans_ultimate_settings.json`,
 | `crop_right_percent` | float | `6` | Same, right edge. |
 | `crop_top_percent` | float | `40` | Same, top edge. |
 | `crop_bottom_percent` | float | `32` | Same, bottom edge. |
-| `live_edit` | bool | `false` | Re-read this file every ~1 s so you can tune in-game. Crop and helmet `distance_m`/`horizontal_fov_deg`/`vertical_offset_deg` pick up changes; turn back off when satisfied. |
+| `live_edit` | bool | `false` | Re-read this file every ~1 s so you can tune in-game. Crop and helmet `distance_m`/`horizontal_fov_deg`/`vertical_offset_deg` pick up changes; turn back off when satisfied (see [Live-edit cost](#live-edit-cost) below). |
 | `helmet_overlay` | object | see below | Helmet overlay block — see [Helmet overlay](#helmet-overlay). |
 
 Each `crop_*_percent` is the fraction of the image covered by a black
@@ -143,6 +143,37 @@ To disable a feature without uninstalling, set `"enabled": false`
 either in `settings.json` (affects future games) or in the per-app
 file (one game). The helmet overlay has its own independent
 `enabled` flag.
+
+### Live-edit cost
+
+`live_edit: true` spawns a background watcher thread that polls the
+config file at 1 Hz on `BELOW_NORMAL` priority. The frame thread does
+zero filesystem I/O — it just consumes a pre-parsed config the
+watcher prepares off-thread.
+
+Measured on Pimax Crystal Light + Pimax OpenXR + LMU at 90 Hz, six
+runs of ~76 s each, `live_edit` ON vs OFF on the same binary
+(interleaved):
+
+| Metric | OFF | ON | Delta |
+|---|---:|---:|---|
+| Frame time median | 11.13 ms | 11.12 ms | identical |
+| GPU median | 5.56 ms | 5.55 ms | identical |
+| Stutter rate | 0.05 % | 0.06 % | noise |
+| Jitter rate | 0.41 % | 0.41 % | identical |
+| Jitter P99 | 1.71 ms | 1.71 ms | identical |
+| Missed frames | 0.16 % | 0.23 % | +0.07 % abs |
+
+User-visible smoothness (stutter, jitter) is statistically
+indistinguishable. The only metric that ticks up is the
+"missed frames" counter, by ~0.07 % absolute — about one frame
+every 17 seconds — which is below the VR perception threshold and
+does not translate into a stutter event.
+
+Bottom line: leaving `live_edit` on is fine for day-to-day driving
+if you want the option to tweak mid-session. Flip it to `false` for
+benchmarking, replays, or any session where you've already settled
+on your numbers and don't want any extra threads in the process.
 
 ## Helmet overlay
 
