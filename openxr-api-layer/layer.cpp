@@ -123,6 +123,8 @@ namespace openxr_api_layer {
             << "  \"crop_right_percent\": 6,\n"
             << "  \"crop_top_percent\": 40,\n"
             << "  \"crop_bottom_percent\": 32,\n"
+            << "  \"crop_left_right_percent\": 32,\n"
+            << "  \"crop_right_left_percent\": 32,\n"
             << "  \"live_edit\": false,\n"
             << "  \"helmet_overlay\": {\n"
             << "    \"enabled\": true,\n"
@@ -262,17 +264,31 @@ namespace openxr_api_layer {
         const float rightPct = readJsonFloat(doc, "crop_right_percent", 10.0f);
         const float topPct = readJsonFloat(doc, "crop_top_percent", 15.0f);
         const float bottomPct = readJsonFloat(doc, "crop_bottom_percent", 20.0f);
+        // Per-eye inner edges (binocular-overlap zone). Default to the
+        // matching outer-edge percent if missing from the JSON: a config
+        // file written before this feature shipped continues to produce a
+        // symmetric per-eye crop identical to the old single-pair model
+        // (left eye's inner = right outer percent, right eye's inner =
+        // left outer percent).
+        const float leftRightPct = readJsonFloat(doc, "crop_left_right_percent", rightPct);
+        const float rightLeftPct = readJsonFloat(doc, "crop_right_left_percent", leftPct);
         const bool liveEdit = readJsonBool(doc, "live_edit", false);
 
         config.enabled = enabled;
         config.cropLeftFactor = clampFactor(leftPct);
         config.cropRightFactor = clampFactor(rightPct);
+        config.cropLeftRightFactor = clampFactor(leftRightPct);
+        config.cropRightLeftFactor = clampFactor(rightLeftPct);
         config.cropTopFactor = clampFactor(topPct);
         config.cropBottomFactor = clampFactor(bottomPct);
         config.liveEdit = liveEdit;
 
-        Log(fmt::format("Crop config: enabled={}, left={:.1f}, right={:.1f}, top={:.1f}, bottom={:.1f}, live_edit={}\n",
-                         config.enabled, leftPct, rightPct, topPct, bottomPct, config.liveEdit));
+        Log(fmt::format("Crop config: enabled={}, left={:.1f}, right={:.1f}, "
+                         "left_right={:.1f}, right_left={:.1f}, "
+                         "top={:.1f}, bottom={:.1f}, live_edit={}\n",
+                         config.enabled, leftPct, rightPct,
+                         leftRightPct, rightLeftPct,
+                         topPct, bottomPct, config.liveEdit));
 
         return config;
     }
@@ -640,7 +656,15 @@ namespace openxr_api_layer {
                     const uint32_t origWidth = views[i].recommendedImageRectWidth;
                     const uint32_t origHeight = views[i].recommendedImageRectHeight;
 
-                    const Extent2D scaled = scaleSwapchainExtents(origWidth, origHeight, m_config);
+                    // Pass the view index as eyeIndex so the per-eye inner-
+                    // edge factors (cropLeftRightFactor / cropRightLeftFactor)
+                    // size the swapchain asymmetrically when the binocular-
+                    // overlap crop is in use. View 0 is the left eye, view 1
+                    // is the right eye in a primary-stereo configuration;
+                    // anything beyond is treated as right-eye-equivalent
+                    // by scaleSwapchainExtents.
+                    const Extent2D scaled = scaleSwapchainExtents(
+                        origWidth, origHeight, m_config, static_cast<int>(i));
 
                     views[i].recommendedImageRectWidth = scaled.width;
                     views[i].recommendedImageRectHeight = scaled.height;
@@ -717,7 +741,11 @@ namespace openxr_api_layer {
                         std::memcmp(&m_fovCache[i].origFov, &origFov, sizeof(XrFovf)) == 0) {
                         narrowed = m_fovCache[i].narrowedFov;
                     } else {
-                        narrowed = narrowFov(origFov, m_config);
+                        // View index doubles as eyeIndex; the FOV cache is
+                        // already per-view (m_fovCache[i]) so the per-eye
+                        // narrowed result lives in its own slot and never
+                        // collides with the other eye's cache entry.
+                        narrowed = narrowFov(origFov, m_config, static_cast<int>(i));
                         if (i < kMaxCachedViews) {
                             m_fovCache[i].origFov = origFov;
                             m_fovCache[i].narrowedFov = narrowed;

@@ -111,6 +111,8 @@ underscores — `Le Mans Ultimate` → `le_mans_ultimate_settings.json`,
   "crop_right_percent": 6,
   "crop_top_percent": 40,
   "crop_bottom_percent": 32,
+  "crop_left_right_percent": 32,
+  "crop_right_left_percent": 32,
   "live_edit": false,
   "helmet_overlay": {
     "enabled": true,
@@ -126,11 +128,13 @@ underscores — `Le Mans Ultimate` → `le_mans_ultimate_settings.json`,
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Master switch for the FOV crop. |
-| `crop_left_percent` | float | `6` | Black bar width on the left edge, as % of image (0–50). |
-| `crop_right_percent` | float | `6` | Same, right edge. |
-| `crop_top_percent` | float | `40` | Same, top edge. |
-| `crop_bottom_percent` | float | `32` | Same, bottom edge. |
-| `live_edit` | bool | `false` | Re-read this file every ~1 s so you can tune in-game. Crop and helmet `distance_m`/`horizontal_fov_deg`/`vertical_offset_deg` pick up changes; turn back off when satisfied (see [Live-edit cost](#live-edit-cost) below). |
+| `crop_left_percent` | float | `6` | Black bar width on the **left eye's left** (outer) edge, as % of image (0–50). |
+| `crop_right_percent` | float | `6` | Same, on the **right eye's right** (outer) edge. |
+| `crop_top_percent` | float | `40` | Top edge, applied uniformly to both eyes. |
+| `crop_bottom_percent` | float | `32` | Bottom edge, applied uniformly to both eyes. |
+| `crop_left_right_percent` | float | `32` | **Left eye's right** (inner / nose-side) edge. Combined with `crop_right_left_percent` below, this trims the binocular-overlap zone — the central area both eyes redundantly render — to claw back GPU on wide-FOV HMDs. Defaults to `crop_right_percent` if the field is absent from the JSON, preserving pre-feature symmetric behavior. |
+| `crop_right_left_percent` | float | `32` | **Right eye's left** (inner / nose-side) edge. Symmetric counterpart to `crop_left_right_percent`. Defaults to `crop_left_percent` if absent. |
+| `live_edit` | bool | `false` | Re-read this file every ~1 s so you can tune in-game. Crop, binocular-overlap and helmet `distance_m`/`horizontal_fov_deg`/`vertical_offset_deg` pick up changes; turn back off when satisfied (see [Live-edit cost](#live-edit-cost) below). |
 | `helmet_overlay` | object | see below | Helmet overlay block — see [Helmet overlay](#helmet-overlay). |
 
 Each `crop_*_percent` is the fraction of the image covered by a black

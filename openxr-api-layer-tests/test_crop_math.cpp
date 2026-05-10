@@ -38,6 +38,20 @@ using openxr_api_layer::resolvePerAppConfigPath;
 using openxr_api_layer::sanitizeForFilename;
 using openxr_api_layer::scaleSwapchainExtents;
 
+// Most tests below pre-date the per-eye binocular-overlap feature and
+// assert symmetric behavior — both eyes get the same crop. The new
+// inner-edge factors (cropLeftRightFactor / cropRightLeftFactor) are
+// independent fields with their own defaults, so those tests must
+// either set them explicitly OR mirror the outer factors onto them.
+// mirrorInnerEdges() does the second: left-eye inner = right outer,
+// right-eye inner = left outer, exactly matching the pre-feature
+// single-pair semantics. New asymmetric tests don't use this helper —
+// they set the four left/right factors independently.
+static inline void mirrorInnerEdges(CropConfig& cfg) {
+    cfg.cropLeftRightFactor = cfg.cropRightFactor;
+    cfg.cropRightLeftFactor = cfg.cropLeftFactor;
+}
+
 // ---------------------------------------------------------------------------
 // clampFactor
 // ---------------------------------------------------------------------------
@@ -82,6 +96,7 @@ TEST_CASE("clampFactor: NaN/infinity policy - infinity is clamped to 0.0") {
 TEST_CASE("scaleSwapchainExtents: factors = 1.0 preserve even dimensions") {
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = cfg.cropTopFactor = cfg.cropBottomFactor = 1.0f;
+    mirrorInnerEdges(cfg);
 
     const Extent2D out = scaleSwapchainExtents(1920, 1080, cfg);
     CHECK(out.width == 1920u);
@@ -92,6 +107,7 @@ TEST_CASE("scaleSwapchainExtents: symmetric 10% crop shrinks both axes by 10%") 
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
+    mirrorInnerEdges(cfg);
 
     const Extent2D out = scaleSwapchainExtents(2000, 2000, cfg);
     CHECK(out.width == 1800u);
@@ -108,6 +124,7 @@ TEST_CASE("scaleSwapchainExtents: asymmetric factors are averaged per axis") {
     cfg.cropRightFactor = 0.8f;
     cfg.cropTopFactor = 0.7f;     // avg(0.7, 0.85) = 0.775 -> 2000 * 0.775 = 1550 -> aligned 1544
     cfg.cropBottomFactor = 0.85f;
+    mirrorInnerEdges(cfg);
 
     const Extent2D out = scaleSwapchainExtents(2000, 2000, cfg);
     CHECK(out.width == 1696u);
@@ -124,6 +141,7 @@ TEST_CASE("scaleSwapchainExtents: factor 0 on a single edge halves the axis (no 
     cfg.cropRightFactor = 1.0f;
     cfg.cropTopFactor = 1.0f;
     cfg.cropBottomFactor = 0.0f;   // bar at middle -> half the axis is content
+    mirrorInnerEdges(cfg);
 
     const Extent2D out = scaleSwapchainExtents(4352, 5102, cfg);
     // Width unchanged (1.0 + 1.0) / 2 = 1.0 -> 4352 (already aligned).
@@ -136,6 +154,7 @@ TEST_CASE("scaleSwapchainExtents: rounds down to the nearest multiple of 8") {
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
+    mirrorInnerEdges(cfg);
 
     // 1111 * 0.9 = 999.9 -> trunc 999 -> aligned down to 992 (= 124 * 8).
     const Extent2D out = scaleSwapchainExtents(1111, 1111, cfg);
@@ -149,6 +168,7 @@ TEST_CASE("scaleSwapchainExtents: enforces the alignment value as floor") {
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 0.5f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 0.5f;
+    mirrorInnerEdges(cfg);
 
     // 1 * 0.5 = 0.5 -> trunc 0 -> floored to 8 (the alignment value).
     const Extent2D out = scaleSwapchainExtents(1, 1, cfg);
@@ -164,6 +184,7 @@ TEST_CASE("scaleSwapchainExtents: result is always aligned to 8 for any reasonab
     cfg.cropRightFactor = 0.87f;  // intermediate widths before alignment
     cfg.cropTopFactor = 0.83f;
     cfg.cropBottomFactor = 0.77f;
+    mirrorInnerEdges(cfg);
 
     for (uint32_t w = 8; w <= 8192; w += 37) {
         for (uint32_t h = 8; h <= 8192; h += 41) {
@@ -190,6 +211,7 @@ TEST_CASE("computeCroppedImageRect: factors = 1.0 yield a full-swapchain rect") 
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 1.0f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 1.0f;
+    mirrorInnerEdges(cfg);
 
     const XrRect2Di rect = computeCroppedImageRect(1920, 1080, kDefaultFov, cfg);
     CHECK(rect.offset.x == 0);
@@ -210,6 +232,7 @@ TEST_CASE("computeCroppedImageRect: symmetric 10% crop at 45° half-FOV (tan-cor
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
+    mirrorInnerEdges(cfg);
 
     const XrRect2Di rect = computeCroppedImageRect(1000, 1000, kDefaultFov, cfg);
     CHECK(rect.offset.x == 73);
@@ -234,6 +257,7 @@ TEST_CASE("computeCroppedImageRect: asymmetric factors at 45° half-FOV") {
     cfg.cropRightFactor = 0.8f;
     cfg.cropTopFactor = 0.8f;
     cfg.cropBottomFactor = 0.6f;
+    mirrorInnerEdges(cfg);
 
     const XrRect2Di rect = computeCroppedImageRect(1000, 1000, kDefaultFov, cfg);
     CHECK(rect.offset.x == 73);
@@ -252,6 +276,7 @@ TEST_CASE("computeCroppedImageRect: narrow FOV converges to linear-in-angle appr
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
+    mirrorInnerEdges(cfg);
 
     const XrRect2Di rect = computeCroppedImageRect(1000, 1000, narrowFovIn, cfg);
     // Accept ±1 pixel: linear approximation differs from tan by a tiny
@@ -266,6 +291,7 @@ TEST_CASE("computeCroppedImageRect: zero swapchain returns zero rect") {
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
+    mirrorInnerEdges(cfg);
 
     const XrRect2Di rect = computeCroppedImageRect(0, 0, kDefaultFov, cfg);
     CHECK(rect.offset.x == 0);
@@ -282,6 +308,7 @@ TEST_CASE("computeCroppedImageRect: degenerate (zero-span) FOV returns zero rect
     CropConfig cfg;
     cfg.cropLeftFactor = cfg.cropRightFactor = 0.9f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 0.9f;
+    mirrorInnerEdges(cfg);
 
     const XrRect2Di rect = computeCroppedImageRect(1920, 1080, zeroFov, cfg);
     CHECK(rect.offset.x == 0);
@@ -311,6 +338,7 @@ TEST_CASE("computeCroppedImageRect: offset + extent always fits inside the swapc
                         cfg.cropRightFactor = clampFactor(rightPct);
                         cfg.cropTopFactor = clampFactor(topPct);
                         cfg.cropBottomFactor = clampFactor(bottomPct);
+                        mirrorInnerEdges(cfg);
 
                         const uint32_t swapW = 1920;
                         const uint32_t swapH = 1080;
@@ -339,6 +367,7 @@ TEST_CASE("narrowFov: factors = 1.0 leave the FOV untouched") {
     CropConfig cfg; // all factors 1.0 after we zero them below
     cfg.cropLeftFactor = cfg.cropRightFactor = 1.0f;
     cfg.cropTopFactor = cfg.cropBottomFactor = 1.0f;
+    mirrorInnerEdges(cfg);
 
     const XrFovf orig = {-0.7f, 0.7f, 0.6f, -0.5f};
     const XrFovf out = narrowFov(orig, cfg);
@@ -358,6 +387,7 @@ TEST_CASE("narrowFov: scales the tangent of each half-angle by its matching fact
     cfg.cropRightFactor = 0.9f;
     cfg.cropTopFactor = 0.7f;
     cfg.cropBottomFactor = 0.6f;
+    mirrorInnerEdges(cfg);
 
     const XrFovf orig = {-1.0f, 1.0f, 1.0f, -1.0f};
     const XrFovf out = narrowFov(orig, cfg);
@@ -377,6 +407,7 @@ TEST_CASE("narrowFov: factor of 0.5 puts each edge at 50%% of the original tange
     cfg.cropRightFactor = 0.5f;
     cfg.cropTopFactor = 0.5f;
     cfg.cropBottomFactor = 0.5f;
+    mirrorInnerEdges(cfg);
 
     const XrFovf orig = {-1.0f, 1.0f, 0.8f, -0.9f};
     const XrFovf out = narrowFov(orig, cfg);
@@ -399,6 +430,7 @@ TEST_CASE("narrowFov: factor = 0 collapses that edge to exactly zero") {
     cfg.cropRightFactor = 0.0f;
     cfg.cropTopFactor = 0.0f;
     cfg.cropBottomFactor = 0.0f;
+    mirrorInnerEdges(cfg);
 
     const XrFovf orig = {-0.95f, 0.85f, 0.70f, -0.60f};
     const XrFovf out = narrowFov(orig, cfg);
@@ -418,6 +450,7 @@ TEST_CASE("narrowFov: negative half-angles become less negative (narrower) under
     cfg.cropRightFactor = 0.5f;
     cfg.cropTopFactor = 0.5f;
     cfg.cropBottomFactor = 0.5f;
+    mirrorInnerEdges(cfg);
 
     const XrFovf orig = {-1.0f, 1.0f, 1.0f, -1.0f};
     const XrFovf out = narrowFov(orig, cfg);
@@ -426,6 +459,128 @@ TEST_CASE("narrowFov: negative half-angles become less negative (narrower) under
     CHECK(out.angleRight < orig.angleRight);
     CHECK(out.angleUp < orig.angleUp);
     CHECK(out.angleDown > orig.angleDown);
+}
+
+// ---------------------------------------------------------------------------
+// Per-eye binocular-overlap crop
+//
+// The inner (nose-side) edge of each eye uses an independent factor:
+//   - Left eye, right edge:  cropLeftRightFactor
+//   - Right eye, left edge:  cropRightLeftFactor
+// Reducing both removes content from the binocular-overlap zone where
+// both eyes redundantly render. The tests here verify that an
+// asymmetric inner-edge crop affects the eye it's supposed to and only
+// that eye, in both narrowFov and scaleSwapchainExtents.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("narrowFov: per-eye inner-edge crop only affects the inner edge of the matching eye") {
+    // Setup: outer factors at 1.0 (no outer crop), top/bottom at 1.0 — so
+    // any difference in the output FOV is attributable to the per-eye
+    // inner-edge factors only.
+    CropConfig cfg;
+    cfg.cropLeftFactor = 1.0f;
+    cfg.cropRightFactor = 1.0f;
+    cfg.cropLeftRightFactor = 0.5f;   // left eye's right edge halved
+    cfg.cropRightLeftFactor = 0.6f;   // right eye's left edge to 60%
+    cfg.cropTopFactor = 1.0f;
+    cfg.cropBottomFactor = 1.0f;
+
+    const XrFovf orig = {-1.0f, 1.0f, 0.7f, -0.7f};
+
+    const XrFovf left  = narrowFov(orig, cfg, /*eyeIndex=*/ 0);
+    const XrFovf right = narrowFov(orig, cfg, /*eyeIndex=*/ 1);
+
+    // Left eye: outer (angleLeft) untouched, inner (angleRight) scaled
+    // by cropLeftRightFactor=0.5.
+    CHECK(left.angleLeft  == doctest::Approx(orig.angleLeft));
+    CHECK(std::tan(left.angleRight) == doctest::Approx(std::tan(orig.angleRight) * 0.5f));
+    // Right eye: outer (angleRight) untouched, inner (angleLeft) scaled
+    // by cropRightLeftFactor=0.6.
+    CHECK(right.angleRight == doctest::Approx(orig.angleRight));
+    CHECK(std::tan(std::abs(right.angleLeft)) ==
+          doctest::Approx(std::tan(std::abs(orig.angleLeft)) * 0.6f));
+    // Top/bottom apply uniformly to both eyes.
+    CHECK(left.angleUp == doctest::Approx(right.angleUp));
+    CHECK(left.angleDown == doctest::Approx(right.angleDown));
+}
+
+TEST_CASE("narrowFov: when inner == outer factor, eye 0 and eye 1 produce the same result") {
+    // This is the legacy / pre-feature behavior, locked in: a config
+    // produced by mirrorInnerEdges() must be invariant under eyeIndex.
+    CropConfig cfg;
+    cfg.cropLeftFactor = 0.85f;
+    cfg.cropRightFactor = 0.75f;
+    cfg.cropTopFactor = 0.65f;
+    cfg.cropBottomFactor = 0.55f;
+    mirrorInnerEdges(cfg);
+
+    const XrFovf orig = {-0.95f, 0.85f, 0.70f, -0.60f};
+    const XrFovf left  = narrowFov(orig, cfg, /*eyeIndex=*/ 0);
+    const XrFovf right = narrowFov(orig, cfg, /*eyeIndex=*/ 1);
+
+    CHECK(left.angleLeft  == doctest::Approx(right.angleLeft));
+    CHECK(left.angleRight == doctest::Approx(right.angleRight));
+    CHECK(left.angleUp    == doctest::Approx(right.angleUp));
+    CHECK(left.angleDown  == doctest::Approx(right.angleDown));
+}
+
+TEST_CASE("scaleSwapchainExtents: per-eye widths differ when inner-edge factors differ") {
+    // Width factor for eye 0 = (cropLeftFactor + cropLeftRightFactor) / 2
+    // Width factor for eye 1 = (cropRightLeftFactor + cropRightFactor) / 2
+    // With identical outer factors but different inner factors, the two
+    // eyes get different widths — that's the whole point of the feature.
+    CropConfig cfg;
+    cfg.cropLeftFactor = 1.0f;        // both outer edges full
+    cfg.cropRightFactor = 1.0f;
+    cfg.cropLeftRightFactor = 0.5f;   // left eye: avg(1.0, 0.5) = 0.75 -> 1500
+    cfg.cropRightLeftFactor = 0.7f;   // right eye: avg(0.7, 1.0) = 0.85 -> 1696 (aligned)
+    cfg.cropTopFactor = 1.0f;
+    cfg.cropBottomFactor = 1.0f;
+
+    const Extent2D leftEye  = scaleSwapchainExtents(2000, 2000, cfg, /*eyeIndex=*/ 0);
+    const Extent2D rightEye = scaleSwapchainExtents(2000, 2000, cfg, /*eyeIndex=*/ 1);
+
+    CHECK(leftEye.width  == 1496u);  // 1500 aligned down to multiple of 8
+    CHECK(rightEye.width == 1696u);  // 1700 aligned down
+    // Heights are eye-invariant (top/bottom uniform across eyes).
+    CHECK(leftEye.height == rightEye.height);
+}
+
+TEST_CASE("scaleSwapchainExtents: when inner == outer, eye 0 and eye 1 widths match") {
+    // Legacy behavior: a mirrored config produces the same width on both
+    // eyes, because the per-eye averages collapse to the original
+    // single-pair average.
+    CropConfig cfg;
+    cfg.cropLeftFactor = 0.9f;
+    cfg.cropRightFactor = 0.8f;
+    cfg.cropTopFactor = 0.85f;
+    cfg.cropBottomFactor = 0.75f;
+    mirrorInnerEdges(cfg);
+
+    const Extent2D leftEye  = scaleSwapchainExtents(2000, 2000, cfg, 0);
+    const Extent2D rightEye = scaleSwapchainExtents(2000, 2000, cfg, 1);
+
+    CHECK(leftEye.width  == rightEye.width);
+    CHECK(leftEye.height == rightEye.height);
+}
+
+TEST_CASE("scaleSwapchainExtents: default eyeIndex is 0 (left eye), backward-compatible callers") {
+    // Callers that pre-date the per-eye argument (now only the unit
+    // tests, but historically every layer.cpp call site) must keep
+    // working unchanged. Default eyeIndex=0 -> left eye width formula.
+    CropConfig cfg;
+    cfg.cropLeftFactor = 0.8f;
+    cfg.cropRightFactor = 0.6f;
+    cfg.cropLeftRightFactor = 0.4f;   // makes left-eye width distinct
+    cfg.cropRightLeftFactor = 0.3f;   // makes right-eye width distinct
+    cfg.cropTopFactor = 1.0f;
+    cfg.cropBottomFactor = 1.0f;
+
+    const Extent2D defaultCall = scaleSwapchainExtents(2000, 2000, cfg);
+    const Extent2D explicitLeft = scaleSwapchainExtents(2000, 2000, cfg, 0);
+
+    CHECK(defaultCall.width  == explicitLeft.width);
+    CHECK(defaultCall.height == explicitLeft.height);
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +627,12 @@ Sample makeSample(std::mt19937& rng) {
     s.cfg.cropRightFactor = factor(rng);
     s.cfg.cropTopFactor = factor(rng);
     s.cfg.cropBottomFactor = factor(rng);
+    // Existing property assertions reference cropLeftFactor / cropRightFactor
+    // for both eyes — so the per-eye inner edges must mirror the outer ones,
+    // exactly the legacy single-pair behavior. New asymmetric per-eye
+    // properties live in their own TEST_CASEs further down the file with
+    // their own generator.
+    mirrorInnerEdges(s.cfg);
     // OpenXR convention: angleLeft, angleDown are negative; angleRight,
     // angleUp are positive. Each side's magnitude is independent — this is
     // what gives WMR/Varjo asymmetric FOVs.

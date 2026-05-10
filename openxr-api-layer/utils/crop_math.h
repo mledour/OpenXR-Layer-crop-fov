@@ -53,8 +53,28 @@ namespace openxr_api_layer {
         // Opt-in by default: the layer is a no-op until the user explicitly
         // sets "enabled": true in their per-app settings file.
         bool enabled = false;
+
+        // Outer edges. cropLeftFactor controls the LEFT eye's LEFT edge
+        // (away from the nose); cropRightFactor controls the RIGHT eye's
+        // RIGHT edge.
         float cropLeftFactor = 0.80f;   // percent 10 -> factor 0.80 (bar is 10% of image)
         float cropRightFactor = 0.80f;  // percent 10 -> factor 0.80
+
+        // Inner (nose-side) edges per eye. These control the binocular-
+        // overlap zone — the central band that both eyes redundantly
+        // render. Trimming it back recovers GPU on wide-FOV HMDs (Pimax
+        // canted, Crystal, Crystal Light, Aero) where not the entire
+        // overlap is needed for stereo depth perception.
+        //   cropLeftRightFactor = LEFT eye's RIGHT (inner) edge.
+        //   cropRightLeftFactor = RIGHT eye's LEFT (inner) edge.
+        // The loader defaults these to mirror cropRightFactor /
+        // cropLeftFactor respectively when the JSON doesn't specify
+        // them, so a settings.json that predates this feature continues
+        // to produce a symmetric per-eye crop identical to the pre-
+        // binocular-overlap implementation.
+        float cropLeftRightFactor = 0.80f;
+        float cropRightLeftFactor = 0.80f;
+
         float cropTopFactor = 0.70f;    // percent 15 -> factor 0.70 (bar is 15% of image)
         float cropBottomFactor = 0.60f; // percent 20 -> factor 0.60 (bar is 20% of image)
 
@@ -94,6 +114,28 @@ namespace openxr_api_layer {
     // Must be a power of two for the bitmask trick below.
     constexpr uint32_t kDimensionAlignment = 8u;
 
+    // Picks the (left-edge, right-edge) factors for the given eye, splitting
+    // the per-eye axis according to outer-vs-inner edges:
+    //   eye 0 (left  eye): outer = cropLeftFactor, inner = cropLeftRightFactor
+    //   eye 1 (right eye): outer = cropRightFactor, inner = cropRightLeftFactor
+    // Anything other than eye 0 is treated as the right eye — defensive
+    // for OpenXR runtimes that report extra views (quad views, foveated
+    // primary stereo) since the FOV crop is meant to be invariant
+    // beyond the canonical pair.
+    struct EyeEdgeFactors {
+        float left;   // factor applied to fov.angleLeft of this eye
+        float right;  // factor applied to fov.angleRight of this eye
+    };
+    inline EyeEdgeFactors eyeEdgeFactors(const CropConfig& cfg, int eyeIndex) {
+        if (eyeIndex == 0) {
+            // Left eye: angleLeft is outer (away from nose), angleRight is
+            // inner (toward nose, into the binocular-overlap zone).
+            return {cfg.cropLeftFactor, cfg.cropLeftRightFactor};
+        }
+        // Right eye: angleLeft is inner, angleRight is outer.
+        return {cfg.cropRightLeftFactor, cfg.cropRightFactor};
+    }
+
     // Applies the crop to the recommended swapchain dimensions returned by
     // xrEnumerateViewConfigurationViews. Uses the **average** of the per-edge
     // factors on each axis — for a roughly-symmetric FOV this matches the
@@ -106,6 +148,12 @@ namespace openxr_api_layer {
     // and the kDimensionAlignment floor below still keeps the output >= 8
     // in that case.
     //
+    // The eyeIndex argument selects which pair of left/right factors to
+    // average for the width axis. Top/bottom are uniform across eyes so
+    // the height factor is independent of eyeIndex. Default eyeIndex=0
+    // (left eye) keeps callers that don't care about per-eye asymmetry
+    // working unchanged.
+    //
     // Note: for strongly asymmetric FOVs (Pimax canted, WMR) combined with
     // strongly asymmetric crops, the simple average can under- or over-
     // provision by up to ~25% vs. a tan-weighted average. That's acceptable
@@ -113,8 +161,10 @@ namespace openxr_api_layer {
     // plumbing the fov into this pure math helper.
     inline Extent2D scaleSwapchainExtents(uint32_t origWidth,
                                           uint32_t origHeight,
-                                          const CropConfig& cfg) {
-        const float widthFactor = (cfg.cropLeftFactor + cfg.cropRightFactor) * 0.5f;
+                                          const CropConfig& cfg,
+                                          int eyeIndex = 0) {
+        const EyeEdgeFactors edges = eyeEdgeFactors(cfg, eyeIndex);
+        const float widthFactor = (edges.left + edges.right) * 0.5f;
         const float heightFactor = (cfg.cropTopFactor + cfg.cropBottomFactor) * 0.5f;
 
         uint32_t newWidth = static_cast<uint32_t>(origWidth * widthFactor);
@@ -154,7 +204,8 @@ namespace openxr_api_layer {
     inline XrRect2Di computeCroppedImageRect(uint32_t swapWidth,
                                              uint32_t swapHeight,
                                              const XrFovf& renderedFov,
-                                             const CropConfig& cfg) {
+                                             const CropConfig& cfg,
+                                             int eyeIndex = 0) {
         // OpenXR convention: angleLeft and angleDown are negative, angleRight
         // and angleUp are positive. Take magnitudes for tan() — safer than
         // relying on tan() being odd when the caller passes weird values.
@@ -169,10 +220,13 @@ namespace openxr_api_layer {
         const float tanD = std::tan(absD);
 
         // Submitted (narrower) half-angles. Multiply the magnitude by the
-        // factor, not the signed angle, so cfg.cropLeftFactor < 1 always
-        // shrinks the FOV regardless of sign conventions.
-        const float tanSubL = std::tan(absL * cfg.cropLeftFactor);
-        const float tanSubR = std::tan(absR * cfg.cropRightFactor);
+        // factor, not the signed angle, so factor < 1 always shrinks the
+        // FOV regardless of sign conventions. Per-eye left/right factors
+        // come from eyeEdgeFactors so an asymmetric inner-edge crop on a
+        // wide-FOV HMD lands the right pixels.
+        const EyeEdgeFactors edges = eyeEdgeFactors(cfg, eyeIndex);
+        const float tanSubL = std::tan(absL * edges.left);
+        const float tanSubR = std::tan(absR * edges.right);
         const float tanSubU = std::tan(absU * cfg.cropTopFactor);
         const float tanSubD = std::tan(absD * cfg.cropBottomFactor);
 
@@ -220,10 +274,16 @@ namespace openxr_api_layer {
     // (angleLeft / angleDown negative, angleRight / angleUp positive) is
     // preserved naturally: tan(-x) * factor = -tan(x) * factor, and
     // atan(-y) = -atan(y).
-    inline XrFovf narrowFov(const XrFovf& origFov, const CropConfig& cfg) {
+    inline XrFovf narrowFov(const XrFovf& origFov, const CropConfig& cfg,
+                            int eyeIndex = 0) {
+        // Pick the per-eye left/right factors so the inner (nose-side) edge
+        // can be cropped independently of the outer edge — see the
+        // CropConfig comment about cropLeftRightFactor / cropRightLeftFactor.
+        // Top/bottom apply uniformly to both eyes.
+        const EyeEdgeFactors edges = eyeEdgeFactors(cfg, eyeIndex);
         XrFovf fov = origFov;
-        fov.angleLeft = std::atan(std::tan(fov.angleLeft) * cfg.cropLeftFactor);
-        fov.angleRight = std::atan(std::tan(fov.angleRight) * cfg.cropRightFactor);
+        fov.angleLeft = std::atan(std::tan(fov.angleLeft) * edges.left);
+        fov.angleRight = std::atan(std::tan(fov.angleRight) * edges.right);
         fov.angleUp = std::atan(std::tan(fov.angleUp) * cfg.cropTopFactor);
         fov.angleDown = std::atan(std::tan(fov.angleDown) * cfg.cropBottomFactor);
         return fov;
