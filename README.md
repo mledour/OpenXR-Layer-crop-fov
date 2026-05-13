@@ -1,4 +1,3 @@
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G2G21Z5SOM)
 # XR_APILAYER_MLEDOUR_fov_crop
 
 An OpenXR API layer for Windows with two features, both **enabled by
