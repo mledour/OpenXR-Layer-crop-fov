@@ -46,6 +46,36 @@ Pimax models (full Crystal, 8KX, 5K Super) and other runtimes
 (SteamVR, WMR, Oculus, Virtual Desktop) — feedback either way at
 [GitHub Issues](../../issues).
 
+## Compatibility notes
+
+**Incompatible with the "OpenXR Toolkit crop2vr" mod by Ohne Speed.**
+That mod also rewrites the per-eye FOV via `xrLocateViews`, so
+running it alongside this layer chains two FOV transforms and breaks
+the geometry the game uses to place its UI. Typical symptom: LMU
+menus and in-game HUD elements displaced several meters in front of
+the centered view point. If you have it installed, uninstall it
+before using `fov_crop` — `fov_crop` covers the same use case, is
+signed, and is the maintained successor.
+
+**Layer load order matters for overlay layers.** OpenXR layers that
+add their own composition overlays — OpenXR Toolkit's FPS counter,
+Racelab Overlay, OpenKneeBoard, … — must be loaded **after**
+`fov_crop` in the chain. If they load before, they end up calling
+`xrLocateViews` through `fov_crop` and see the narrowed FOV, so
+their overlays get sized and positioned inside the cropped zone
+rather than extending across the full HMD view. Loaded after, they
+see the runtime's raw FOV and their overlays show up cleanly
+outside the crop bars.
+
+The OpenXR loader orders implicit layers by alphabetical sort of
+their registry value, so the practical fix is one of:
+
+- Use [`fredemmott/OpenXR-API-Layers-GUI`](https://github.com/fredemmott/OpenXR-API-Layers-GUI)
+  — a small GUI tool that lists and reorders registered OpenXR
+  layers without you having to edit `HKLM` by hand. Recommended.
+- Or manually rename the conflicting layer's registry entry so it
+  sorts alphabetically after `XR_APILAYER_MLEDOUR_fov_crop.json`.
+
 ## Installing
 
 ### Installer (recommended)
