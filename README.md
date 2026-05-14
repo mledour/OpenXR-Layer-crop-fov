@@ -71,21 +71,35 @@ and is the maintained alternative.
 
 **Layer load order matters for overlay layers.** OpenXR layers that
 add their own composition overlays — OpenXR Toolkit's FPS counter,
-Racelab Overlay, OpenKneeBoard, … — must be loaded **after**
-`fov_crop` in the chain. If they load before, they end up calling
-`xrLocateViews` through `fov_crop` and see the narrowed FOV, so
-their overlays get sized and positioned inside the cropped zone
-rather than extending across the full HMD view. Loaded after, they
-see the runtime's raw FOV and their overlays show up cleanly
-outside the crop bars.
+Racelab Overlay, OpenKneeBoard, … — must sit **below**
+`XR_APILAYER_MLEDOUR_fov_crop` in your layer list (i.e. loaded
+later in the OpenXR chain). If they sit above, two visible things
+go wrong:
+
+- **Part of the overlay ends up in the cropped zone.** They call
+  `xrLocateViews` through `fov_crop` and see the narrowed FOV, so
+  any pose / size derived from that FOV gets confined to the
+  cropped area instead of the full HMD view.
+- **Part of the overlay is masked by the helmet.** The OpenXR
+  compositor draws composition layers in submission order — later
+  submissions draw on top. With an overlay layer above us in the
+  chain, its quads are submitted *before* ours, so our helmet
+  draws over wherever the two overlap.
+
+Sitting below `fov_crop`, the overlay layer (a) sees the raw FOV
+when it queries the runtime and (b) submits its quads after ours,
+so they composite cleanly on top of the helmet. Both problems go
+away.
 
 The OpenXR loader orders implicit layers by alphabetical sort of
-their registry value, so the practical fix is one of:
+their registry value name, so the practical fix is one of:
 
 - Use [`fredemmott/OpenXR-API-Layers-GUI`](https://github.com/fredemmott/OpenXR-API-Layers-GUI)
-  — a small GUI tool that lists and reorders registered OpenXR
-  layers without you having to edit `HKLM` by hand. Recommended.
-- Or manually rename the conflicting layer's registry entry so it
+  — a small GUI tool that lists registered OpenXR layers and lets
+  you reorder them without touching `HKLM` by hand. Move your
+  overlay layers **below** `XR_APILAYER_MLEDOUR_fov_crop` in its
+  list. Recommended.
+- Or manually rename the conflicting layer's registry value so it
   sorts alphabetically after `XR_APILAYER_MLEDOUR_fov_crop.json`.
 
 ## Installing
