@@ -48,14 +48,26 @@ Pimax models (full Crystal, 8KX, 5K Super) and other runtimes
 
 ## Compatibility notes
 
-**Incompatible with the "OpenXR Toolkit crop2vr" mod by Ohne Speed.**
-That mod also rewrites the per-eye FOV via `xrLocateViews`, so
-running it alongside this layer chains two FOV transforms and breaks
-the geometry the game uses to place its UI. Typical symptom: LMU
-menus and in-game HUD elements displaced several meters in front of
-the centered view point. If you have it installed, uninstall it
-before using `fov_crop` — `fov_crop` covers the same use case, is
-signed, and is the maintained successor.
+**Incompatible with any other layer that modifies the per-eye FOV**,
+including the "OpenXR Toolkit crop2vr" mod by Ohne Speed or any
+custom layer that rewrites `xrLocateViews`. Running two FOV-modifying
+layers at once chains the transforms, which produces visible
+breakage:
+
+- **UI / HUD displaced.** The game uses the FOV the runtime reports
+  to place its in-game menus and HUD elements. After two
+  consecutive transforms the FOV no longer matches reality, so menus
+  and overlays drift — typical symptom in LMU: menus and in-game
+  HUD elements pushed several meters in front of the centered view
+  point.
+- **Image deformation.** The projection ends up applied through two
+  different FOV maps in sequence; straight lines look bent or
+  the world appears stretched, especially toward the edges of the
+  cropped area.
+
+If you have any FOV-modifying layer installed, uninstall it before
+using `fov_crop` — this layer covers the same use case, is signed,
+and is the maintained alternative.
 
 **Layer load order matters for overlay layers.** OpenXR layers that
 add their own composition overlays — OpenXR Toolkit's FPS counter,
