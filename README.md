@@ -15,6 +15,8 @@ default** in the shipped template:
 Works with any OpenXR application and runtime. No game or headset
 modification required.
 
+![FOV crop + helmet overlay in Le Mans Ultimate — the visor frames the cockpit view, the cropped periphery is hidden behind the helmet padding](./docs/images/helmet-preview.png)
+
 > Release binaries are signed with a **Certum Open Source Code Signing
 > Cloud** certificate. SmartScreen may still warn on early downloads
 > until publisher reputation builds. Anti-cheat can flag any layer DLL
