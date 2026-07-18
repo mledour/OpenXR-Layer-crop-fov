@@ -108,16 +108,18 @@ namespace openxr_api_layer {
         // two ever drift, installer users and ZIP users get different
         // out-of-the-box defaults.
         out << "{\n";
+        // Keep "_comment" SHORT and free of embedded quotes/newlines. It is
+        // parsed as part of the config, so any editor that hard-wraps a long
+        // line or re-saves in a non-UTF8 codepage can corrupt it and take the
+        // whole file down with it. Full documentation lives in the sibling
+        // settings.help.txt (see writeHelpFile), which is never parsed.
         if (appName.empty()) {
-            out << "  \"_comment\": \"Default template. Each OpenXR application "
-                <<                "gets a copy of this file the first time it runs. "
-                <<                "Set \\\"enabled\\\" to true to activate the layer for that game "
-                <<                "(or change the default here to affect every future game). "
-                <<                "Edit crop percentages to taste.\",\n";
+            out << "  \"_comment\": \"See settings.help.txt in this folder for "
+                <<                "what each field does. Set enabled to true to activate the layer.\",\n";
         } else {
-            out << "  \"_comment\": \"Auto-generated per-app config for '"
+            out << "  \"_comment\": \"Per-app config for '"
                 <<                openxr_api_layer::jsonEscape(appName)
-                <<                "'. Set \\\"enabled\\\" to true to activate the layer for this game.\",\n";
+                <<                "'. See settings.help.txt in this folder for documentation.\",\n";
         }
         out << "  \"enabled\": true,\n"
             << "  \"crop_left_percent\": 6,\n"
@@ -139,15 +141,78 @@ namespace openxr_api_layer {
         return out.good();
     }
 
+    // Writes settings.help.txt next to the config files. This is the human
+    // documentation for every field — deliberately kept OUT of the parsed
+    // JSON (see the "_comment" note in writeDefaultConfig) so that a long,
+    // editor-mangle-prone prose blob can never corrupt the config and take
+    // the layer offline. Plain ASCII, no dependency on the JSON at all.
+    // Written only if absent, matching the "bootstrap once, never clobber"
+    // contract of ensureTemplateConfig / ensureHelmetsBootstrapped. Kept in
+    // sync with installer/settings.help.txt (shipped by the Inno installer).
+    static void writeHelpFile(const std::filesystem::path& helpPath) {
+        if (std::filesystem::exists(helpPath)) return;
+        std::ofstream out(helpPath);
+        if (!out) return;
+        out <<
+            "XR_APILAYER_MLEDOUR_fov_crop - settings reference\n"
+            "=================================================\n"
+            "\n"
+            "Edit settings.json (global default for every game) or a per-app\n"
+            "file such as myGame_settings.json (created the first time that game\n"
+            "runs). A per-app file overrides the global default for that game.\n"
+            "\n"
+            "IMPORTANT: settings.json is strict JSON. Edit it with a plain-text\n"
+            "editor and save as UTF-8. Do not add comments or trailing commas -\n"
+            "if the file fails to parse the layer runs with built-in defaults\n"
+            "and writes a *.PARSE_ERROR.txt file next to it explaining why.\n"
+            "\n"
+            "Fields\n"
+            "------\n"
+            "enabled                   true/false. Master switch for this game.\n"
+            "crop_left_percent         % cropped from the LEFT outer edge (0-100).\n"
+            "crop_right_percent        % cropped from the RIGHT outer edge.\n"
+            "crop_top_percent          % cropped from the TOP edge.\n"
+            "crop_bottom_percent       % cropped from the BOTTOM edge.\n"
+            "crop_left_right_percent   % cropped from the LEFT eye's INNER edge\n"
+            "                          (binocular-overlap zone). 0 = use the\n"
+            "                          matching outer value.\n"
+            "crop_right_left_percent   % cropped from the RIGHT eye's INNER edge.\n"
+            "live_edit                 true reloads this file every frame so you\n"
+            "                          can tune crop values with the headset on.\n"
+            "                          Leave false for normal play.\n"
+            "\n"
+            "helmet_overlay (object)\n"
+            "  enabled                 true/false. Draw a helmet visor overlay.\n"
+            "  image                   PNG filename in the helmets/ subfolder.\n"
+            "  distance_m              Overlay distance in metres.\n"
+            "  brightness              0.0 (invisible) to 1.0 (opaque).\n"
+            "  horizontal_fov_deg      Angular width of the overlay in degrees.\n"
+            "  vertical_offset_deg     Vertical placement in degrees (negative =\n"
+            "                          lower).\n"
+            "\n"
+            "To disable the layer entirely without uninstalling, set the\n"
+            "environment variable named in the layer's JSON manifest\n"
+            "(disable_environment) - see the project README.\n";
+        if (out.good()) {
+            Log(fmt::format("Created help file {}\n", helpPath.string()));
+        }
+    }
+
     // Creates the global settings.json template (if absent) so the user has
-    // a single file to edit to change the defaults applied to future games.
-    // Silent no-op if the file already exists (never overwrites the user's
-    // preferences).
+    // a single file to edit to change the defaults applied to future games,
+    // plus the settings.help.txt documentation sidecar. Silent no-op for the
+    // template if it already exists (never overwrites the user's preferences).
     static void ensureTemplateConfig(const std::filesystem::path& configDir) {
         const std::filesystem::path templatePath = configDir / "settings.json";
-        if (std::filesystem::exists(templatePath)) return;
         try {
             std::filesystem::create_directories(configDir);
+            writeHelpFile(configDir / "settings.help.txt");
+        } catch (const std::exception& e) {
+            Log(fmt::format("Could not create config dir {}: {}\n",
+                             configDir.string(), e.what()));
+        }
+        if (std::filesystem::exists(templatePath)) return;
+        try {
             if (writeDefaultConfig(templatePath, "")) {
                 Log(fmt::format("Created template {}\n", templatePath.string()));
             }

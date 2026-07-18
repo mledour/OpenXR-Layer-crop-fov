@@ -79,6 +79,14 @@ Source: "..\bin\x64\Release\{#MyAppName}.json"; DestDir: "{app}"; Flags: ignorev
 Source: "default_settings.json"; DestDir: "{localappdata}\{#MyAppName}"; \
   DestName: "settings.json"; Flags: onlyifdoesntexist uninsneveruninstall
 
+; Human-readable documentation for every settings.json field. Deliberately a
+; separate .txt so the parsed JSON can stay short and mangle-proof (a long
+; prose "_comment" inside the JSON is exactly what editors corrupt). Refreshed
+; on upgrade so docs track the shipped fields; kept in sync with the runtime
+; writeHelpFile() fallback in layer.cpp.
+Source: "settings.help.txt"; DestDir: "{localappdata}\{#MyAppName}"; \
+  Flags: ignoreversion uninsneveruninstall
+
 ; Bundled helmet PNGs. These go NEXT TO THE DLL under {app}\helmets — the
 ; canonical "bundled" location the DLL reads from. On first run the layer's
 ; ensureHelmetsBootstrapped() copies them into the *running* user's

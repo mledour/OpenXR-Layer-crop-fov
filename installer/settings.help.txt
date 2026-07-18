@@ -1,0 +1,39 @@
+XR_APILAYER_MLEDOUR_fov_crop - settings reference
+=================================================
+
+Edit settings.json (global default for every game) or a per-app
+file such as myGame_settings.json (created the first time that game
+runs). A per-app file overrides the global default for that game.
+
+IMPORTANT: settings.json is strict JSON. Edit it with a plain-text
+editor and save as UTF-8. Do not add comments or trailing commas -
+if the file fails to parse the layer runs with built-in defaults
+and writes a *.PARSE_ERROR.txt file next to it explaining why.
+
+Fields
+------
+enabled                   true/false. Master switch for this game.
+crop_left_percent         % cropped from the LEFT outer edge (0-100).
+crop_right_percent        % cropped from the RIGHT outer edge.
+crop_top_percent          % cropped from the TOP edge.
+crop_bottom_percent       % cropped from the BOTTOM edge.
+crop_left_right_percent   % cropped from the LEFT eye's INNER edge
+                          (binocular-overlap zone). 0 = use the
+                          matching outer value.
+crop_right_left_percent   % cropped from the RIGHT eye's INNER edge.
+live_edit                 true reloads this file every frame so you
+                          can tune crop values with the headset on.
+                          Leave false for normal play.
+
+helmet_overlay (object)
+  enabled                 true/false. Draw a helmet visor overlay.
+  image                   PNG filename in the helmets/ subfolder.
+  distance_m              Overlay distance in metres.
+  brightness              0.0 (invisible) to 1.0 (opaque).
+  horizontal_fov_deg      Angular width of the overlay in degrees.
+  vertical_offset_deg     Vertical placement in degrees (negative =
+                          lower).
+
+To disable the layer entirely without uninstalling, set the
+environment variable named in the layer's JSON manifest
+(disable_environment) - see the project README.
