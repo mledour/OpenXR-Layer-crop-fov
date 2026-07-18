@@ -59,9 +59,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; edge case the DLL's first-run logic recreates the template in the correct
 ; place as soon as an OpenXR app actually runs.)
 Name: "{localappdata}\{#MyAppName}"
-; Helmet PNGs the user can swap freely without needing admin elevation.
-; The bundled defaults are dropped here at install time (see [Files] below).
-Name: "{localappdata}\{#MyAppName}\helmets"
 
 [Files]
 ; The DLL and the processed JSON manifest from the Release x64 build.
@@ -82,26 +79,30 @@ Source: "..\bin\x64\Release\{#MyAppName}.json"; DestDir: "{app}"; Flags: ignorev
 Source: "default_settings.json"; DestDir: "{localappdata}\{#MyAppName}"; \
   DestName: "settings.json"; Flags: onlyifdoesntexist uninsneveruninstall
 
-; Bundled helmet PNGs. Policy:
-;   - ignoreversion         : always overwrite same-named files in the
-;                             user's helmets dir on upgrade. The build's
-;                             helmet-F1_*.png set is canonical; if the
-;                             user customized one of those exact
-;                             filenames, they will lose their edits on
-;                             the next install (they should rename their
-;                             custom PNG instead and reference it via
-;                             the helmet_overlay.image field — that
-;                             name is never bundled, so it survives
-;                             upgrades).
-;   - uninsneveruninstall   : leave PNGs on disk on uninstall. User-added
-;                             PNGs (different names) live alongside the
-;                             bundled ones and would be orphaned if we
-;                             swept the directory. Full clean-up is the
-;                             user's responsibility.
+; Bundled helmet PNGs. These go NEXT TO THE DLL under {app}\helmets — the
+; canonical "bundled" location the DLL reads from. On first run the layer's
+; ensureHelmetsBootstrapped() copies them into the *running* user's
+; %LOCALAPPDATA%\{#MyAppName}\helmets (never overwriting user files), which
+; is the writable dir the overlay actually loads from.
+;
+; Why not drop them straight into %LOCALAPPDATA% here? Because the installer
+; runs elevated and {localappdata} resolves to the *installing* account. If
+; that differs from the account that launches the game (UAC with separate
+; admin credentials), the game's user dir would stay empty. Shipping to
+; {app} instead lets the DLL populate the correct user dir at runtime, and
+; also silences the "Bundled helmets dir absent" warning users hit when the
+; DLL looked next to itself and found nothing.
+;
+;   - ignoreversion       : refresh the canonical helmet-F1_*.png set in
+;                           {app} on upgrade (custom PNGs the user dropped
+;                           in their own %LOCALAPPDATA% dir are untouched —
+;                           they live in a different folder entirely).
+;   - uninsneveruninstall : {app} is removed wholesale on uninstall anyway;
+;                           the user's %LOCALAPPDATA% PNGs are never swept.
 ; The build's PostBuildEvent populates bin\x64\Release\helmets\ from
 ; openxr-api-layer\assets\helmets\.
 Source: "..\bin\x64\Release\helmets\*.png"; \
-  DestDir: "{localappdata}\{#MyAppName}\helmets"; \
+  DestDir: "{app}\helmets"; \
   Flags: ignoreversion uninsneveruninstall
 
 [Registry]
