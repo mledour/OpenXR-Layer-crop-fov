@@ -524,8 +524,12 @@ TEST_CASE("integration: settings.json template is auto-created on first boot if 
                         std::istreambuf_iterator<char>());
     CHECK(content.find("\"crop_left_percent\"") != std::string::npos);
     CHECK(content.find("\"enabled\"") != std::string::npos);
-    // Template comment distinguishes it from a per-app file.
-    CHECK(content.find("Default template") != std::string::npos);
+    // The template's short _comment points at the help file and, unlike a
+    // per-app file, does NOT carry a "Per-app config for '<app>'" marker.
+    CHECK(content.find("settings.help.txt") != std::string::npos);
+    CHECK(content.find("Per-app config for") == std::string::npos);
+    // The documentation sidecar is written alongside the template.
+    CHECK(std::filesystem::exists(fx.configDir / "settings.help.txt"));
 }
 
 TEST_CASE("integration: existing settings.json template is not overwritten by boot") {
