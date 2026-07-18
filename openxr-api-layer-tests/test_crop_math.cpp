@@ -23,11 +23,15 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <random>
+#include <system_error>
 
 #include <utils/crop_math.h>
 #include <utils/name_utils.h>
+#include <utils/settings_help_text.h>
 
 using openxr_api_layer::clampFactor;
 using openxr_api_layer::computeCroppedImageRect;
@@ -940,4 +944,55 @@ TEST_CASE("jsonEscape: rejects overlong encodings and surrogates") {
     CHECK(jsonEscape("\xED\xA0\x80") == "???");          // U+D800 surrogate
     CHECK(jsonEscape("\xF4\x90\x80\x80") == "????");     // U+110000, above U+10FFFF
     CHECK(jsonEscape("\xF5\x80\x80\x80") == "????");     // invalid lead 0xF5
+}
+
+// ---------------------------------------------------------------------------
+// settings.help.txt sync
+//
+// The layer DLL writes kSettingsHelpText on first run, and the Inno installer
+// ships a committed installer/settings.help.txt so installed users have the
+// docs before launching a game. Both must stay identical; this test is the
+// enforcement so the two copies can never drift silently. Compared with line
+// endings normalised, because git checks the committed .txt out as CRLF on
+// Windows (core.autocrlf) while the C++ constant is always LF.
+// ---------------------------------------------------------------------------
+
+static std::string stripCarriageReturns(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c != '\r') out.push_back(c);
+    }
+    return out;
+}
+
+// Walk up from the test process's working directory looking for
+// installer/settings.help.txt. On CI the working directory is the repo root
+// (the workflow runs bin\x64\<cfg>\...tests.exe with a relative path), so it
+// is found immediately; the upward walk keeps it working when a developer
+// runs the binary from a build subdirectory.
+static std::filesystem::path findInstallerHelpFile() {
+    std::filesystem::path dir = std::filesystem::current_path();
+    for (int i = 0; i < 8; ++i) {
+        const std::filesystem::path candidate = dir / "installer" / "settings.help.txt";
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec)) return candidate;
+        if (dir.parent_path() == dir) break;  // hit the filesystem root
+        dir = dir.parent_path();
+    }
+    return {};
+}
+
+TEST_CASE("installer/settings.help.txt matches the shared kSettingsHelpText constant") {
+    const std::filesystem::path helpPath = findInstallerHelpFile();
+    REQUIRE_MESSAGE(!helpPath.empty(),
+                    "could not locate installer/settings.help.txt from the working directory");
+
+    std::ifstream in(helpPath, std::ios::binary);
+    REQUIRE(in.is_open());
+    const std::string onDisk((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+
+    // Normalise CRLF -> LF on both sides; the constant is already LF-only.
+    CHECK(stripCarriageReturns(onDisk) == stripCarriageReturns(openxr_api_layer::kSettingsHelpText));
 }

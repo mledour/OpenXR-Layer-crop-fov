@@ -32,6 +32,7 @@
 #include <utils/helmet_config_parser.h>
 #include <utils/helmet_overlay.h>
 #include <utils/name_utils.h>
+#include <utils/settings_help_text.h>
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -145,54 +146,19 @@ namespace openxr_api_layer {
     // documentation for every field — deliberately kept OUT of the parsed
     // JSON (see the "_comment" note in writeDefaultConfig) so that a long,
     // editor-mangle-prone prose blob can never corrupt the config and take
-    // the layer offline. Plain ASCII, no dependency on the JSON at all.
-    // Written only if absent, matching the "bootstrap once, never clobber"
-    // contract of ensureTemplateConfig / ensureHelmetsBootstrapped. Kept in
-    // sync with installer/settings.help.txt (shipped by the Inno installer).
+    // the layer offline. Written only if absent, matching the "bootstrap
+    // once, never clobber" contract of ensureTemplateConfig /
+    // ensureHelmetsBootstrapped.
+    //
+    // The text is the single shared constant kSettingsHelpText
+    // (utils/settings_help_text.h); the Inno installer ships a byte-identical
+    // installer/settings.help.txt, and a unit test asserts the two match so
+    // they cannot drift.
     static void writeHelpFile(const std::filesystem::path& helpPath) {
         if (std::filesystem::exists(helpPath)) return;
         std::ofstream out(helpPath);
         if (!out) return;
-        out <<
-            "XR_APILAYER_MLEDOUR_fov_crop - settings reference\n"
-            "=================================================\n"
-            "\n"
-            "Edit settings.json (global default for every game) or a per-app\n"
-            "file such as myGame_settings.json (created the first time that game\n"
-            "runs). A per-app file overrides the global default for that game.\n"
-            "\n"
-            "IMPORTANT: settings.json is strict JSON. Edit it with a plain-text\n"
-            "editor and save as UTF-8. Do not add comments or trailing commas -\n"
-            "if the file fails to parse the layer runs with built-in defaults\n"
-            "and writes a *.PARSE_ERROR.txt file next to it explaining why.\n"
-            "\n"
-            "Fields\n"
-            "------\n"
-            "enabled                   true/false. Master switch for this game.\n"
-            "crop_left_percent         % cropped from the LEFT outer edge (0-100).\n"
-            "crop_right_percent        % cropped from the RIGHT outer edge.\n"
-            "crop_top_percent          % cropped from the TOP edge.\n"
-            "crop_bottom_percent       % cropped from the BOTTOM edge.\n"
-            "crop_left_right_percent   % cropped from the LEFT eye's INNER edge\n"
-            "                          (binocular-overlap zone). 0 = use the\n"
-            "                          matching outer value.\n"
-            "crop_right_left_percent   % cropped from the RIGHT eye's INNER edge.\n"
-            "live_edit                 true reloads this file every frame so you\n"
-            "                          can tune crop values with the headset on.\n"
-            "                          Leave false for normal play.\n"
-            "\n"
-            "helmet_overlay (object)\n"
-            "  enabled                 true/false. Draw a helmet visor overlay.\n"
-            "  image                   PNG filename in the helmets/ subfolder.\n"
-            "  distance_m              Overlay distance in metres.\n"
-            "  brightness              0.0 (invisible) to 1.0 (opaque).\n"
-            "  horizontal_fov_deg      Angular width of the overlay in degrees.\n"
-            "  vertical_offset_deg     Vertical placement in degrees (negative =\n"
-            "                          lower).\n"
-            "\n"
-            "To disable the layer entirely without uninstalling, set the\n"
-            "environment variable named in the layer's JSON manifest\n"
-            "(disable_environment) - see the project README.\n";
+        out << openxr_api_layer::kSettingsHelpText;
         if (out.good()) {
             Log(fmt::format("Created help file {}\n", helpPath.string()));
         }
@@ -204,13 +170,23 @@ namespace openxr_api_layer {
     // template if it already exists (never overwrites the user's preferences).
     static void ensureTemplateConfig(const std::filesystem::path& configDir) {
         const std::filesystem::path templatePath = configDir / "settings.json";
+        const std::filesystem::path helpPath = configDir / "settings.help.txt";
+        // Steady state (layer already set up): both files present, so return
+        // immediately without touching the filesystem. xrCreateInstance runs
+        // this on every launch; only the very first run does real work.
+        std::error_code ec;
+        if (std::filesystem::exists(templatePath, ec) &&
+            std::filesystem::exists(helpPath, ec)) {
+            return;
+        }
         try {
             std::filesystem::create_directories(configDir);
-            writeHelpFile(configDir / "settings.help.txt");
         } catch (const std::exception& e) {
             Log(fmt::format("Could not create config dir {}: {}\n",
                              configDir.string(), e.what()));
+            return;
         }
+        writeHelpFile(helpPath);
         if (std::filesystem::exists(templatePath)) return;
         try {
             if (writeDefaultConfig(templatePath, "")) {
@@ -325,6 +301,15 @@ namespace openxr_api_layer {
         CropConfig config;
         const std::string configPathStr = configPath.string();
 
+        // Retire any stale PARSE_ERROR marker up front. Every exit path below
+        // that does NOT re-write it (bootstrap failure, missing file, and the
+        // clean-parse case) then correctly leaves no marker on disk — so the
+        // sidecar exists iff THIS load attempt actually failed to parse.
+        // Without this, a user who followed a marker's advice and deleted a
+        // malformed file would still see the (now-lying) marker if bootstrap
+        // then hit a transient error.
+        clearParseErrorSidecar(configPath);
+
         // Bootstrap the per-app file the first time we see this application.
         if (!appName.empty() && !std::filesystem::exists(configPath)) {
             try {
@@ -381,8 +366,9 @@ namespace openxr_api_layer {
             return config;
         }
 
-        // Parsed cleanly — retire any stale error marker from a previous run.
-        clearParseErrorSidecar(configPath);
+        // Parsed cleanly. The stale marker (if any) was already removed at the
+        // top of this function; the parse-error paths above are the only ones
+        // that (re-)create it.
 
         const bool enabled = readJsonBool(doc, "enabled", false);
         const float leftPct = readJsonFloat(doc, "crop_left_percent", 10.0f);
