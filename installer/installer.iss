@@ -101,17 +101,19 @@ Source: "settings.help.txt"; DestDir: "{localappdata}\{#MyAppName}"; \
 ; also silences the "Bundled helmets dir absent" warning users hit when the
 ; DLL looked next to itself and found nothing.
 ;
-;   - ignoreversion       : refresh the canonical helmet-F1_*.png set in
-;                           {app} on upgrade (custom PNGs the user dropped
-;                           in their own %LOCALAPPDATA% dir are untouched —
-;                           they live in a different folder entirely).
-;   - uninsneveruninstall : {app} is removed wholesale on uninstall anyway;
-;                           the user's %LOCALAPPDATA% PNGs are never swept.
+;   - ignoreversion : refresh the canonical helmet-F1_*.png set in {app} on
+;                     upgrade (custom PNGs the user dropped in their own
+;                     %LOCALAPPDATA% dir are untouched — they live in a
+;                     different folder entirely).
+; NOTE: no uninsneveruninstall here. These are bundled program files under
+; {app}, NOT user data — they must be uninstalled normally so Inno can remove
+; {app}\helmets and then {app} itself. (The user's %LOCALAPPDATA% PNGs, which
+; DO carry uninsneveruninstall via settings.json's dir, are never swept.)
 ; The build's PostBuildEvent populates bin\x64\Release\helmets\ from
 ; openxr-api-layer\assets\helmets\.
 Source: "..\bin\x64\Release\helmets\*.png"; \
   DestDir: "{app}\helmets"; \
-  Flags: ignoreversion uninsneveruninstall
+  Flags: ignoreversion
 
 [Registry]
 ; Register the layer as an implicit API layer for the OpenXR 1.x loader.
