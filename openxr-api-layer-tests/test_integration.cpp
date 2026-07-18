@@ -38,6 +38,7 @@
 
 #include <layer.h>
 #include <utils/crop_math.h>
+#include <utils/settings_help_text.h>
 
 #include <doctest/doctest.h>
 
@@ -524,8 +525,64 @@ TEST_CASE("integration: settings.json template is auto-created on first boot if 
                         std::istreambuf_iterator<char>());
     CHECK(content.find("\"crop_left_percent\"") != std::string::npos);
     CHECK(content.find("\"enabled\"") != std::string::npos);
-    // Template comment distinguishes it from a per-app file.
-    CHECK(content.find("Default template") != std::string::npos);
+    // The template's short _comment points at the help file and, unlike a
+    // per-app file, does NOT carry a "Per-app config for '<app>'" marker.
+    CHECK(content.find("settings.help.txt") != std::string::npos);
+    CHECK(content.find("Per-app config for") == std::string::npos);
+    // The documentation sidecar is written alongside the template.
+    CHECK(std::filesystem::exists(fx.configDir / "settings.help.txt"));
+}
+
+// Local CR stripper so help-file comparisons are line-ending-insensitive
+// (the shipped copy may be CRLF; the DLL writes LF).
+static std::string stripCr(const std::string& s) {
+    std::string o;
+    o.reserve(s.size());
+    for (char c : s) if (c != '\r') o.push_back(c);
+    return o;
+}
+
+TEST_CASE("integration: a stale settings.help.txt is refreshed on boot") {
+    LayerFixture fx;
+    // Simulate an outdated help file left by a previous version.
+    const std::string stale = "OLD STALE HELP FROM A PREVIOUS VERSION\n";
+    {
+        std::ofstream f(fx.configDir / "settings.help.txt", std::ios::binary);
+        f << stale;
+    }
+
+    fx.boot();
+
+    std::ifstream in(fx.configDir / "settings.help.txt", std::ios::binary);
+    const std::string content((std::istreambuf_iterator<char>(in)),
+                              std::istreambuf_iterator<char>());
+    // The DLL overwrote the stale docs with the current shipped text.
+    CHECK(content != stale);
+    CHECK(stripCr(content) == stripCr(openxr_api_layer::kSettingsHelpText));
+}
+
+TEST_CASE("integration: an up-to-date settings.help.txt (even CRLF) is left untouched") {
+    LayerFixture fx;
+    // Installer-style copy: same text, but CRLF line endings (git autocrlf on
+    // Windows). The DLL must NOT rewrite it just to swap \r\n for \n, or it
+    // would churn the installer's file on every single launch.
+    std::string crlf;
+    for (char c : std::string(openxr_api_layer::kSettingsHelpText)) {
+        if (c == '\n') crlf.push_back('\r');
+        crlf.push_back(c);
+    }
+    {
+        std::ofstream f(fx.configDir / "settings.help.txt", std::ios::binary);
+        f << crlf;
+    }
+
+    fx.boot();
+
+    std::ifstream in(fx.configDir / "settings.help.txt", std::ios::binary);
+    const std::string content((std::istreambuf_iterator<char>(in)),
+                              std::istreambuf_iterator<char>());
+    // Byte-for-byte unchanged: CRLF preserved, no needless rewrite.
+    CHECK(content == crlf);
 }
 
 TEST_CASE("integration: existing settings.json template is not overwritten by boot") {

@@ -36,6 +36,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 // Header is self-sufficient regarding OpenXR types: pulled in here so
 // translation units that include this without going through pch.h
@@ -109,17 +110,21 @@ namespace openxr_api_layer {
         // binding it can use. `api` is kept by the overlay so it can
         // reach downstream xrCreateSwapchain / xrAcquire…Image / etc.
         // through the layer's own dispatch (same as every other part of
-        // the layer). `helmetsDir` is the directory the texture path
-        // (config.imageRelativePath) is resolved against — typically
-        // %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets so users
-        // can drop PNGs without admin elevation. Returns true if the
-        // overlay is armed and will contribute a layer in appendLayer();
-        // false means "silently degrade to bypass" per best-practices.
+        // the layer). `helmetsSearchDirs` are the directories the texture
+        // path (config.imageRelativePath) is resolved against, IN ORDER:
+        // the bundled helmets dir next to the DLL first (so an updated
+        // shipped PNG is used immediately), then the user's writable
+        // %LOCALAPPDATA%\XR_APILAYER_MLEDOUR_fov_crop\helmets (custom PNGs
+        // dropped in without admin elevation). The first directory that
+        // contains the named file wins; if none do, the overlay logs an
+        // error and does not arm. Returns true if the overlay is armed and
+        // will contribute a layer in appendLayer(); false means "silently
+        // degrade to bypass" per best-practices.
         bool initialize(OpenXrApi* api,
                         XrSession session,
                         const void* sessionCreateInfoNextChain,
                         const HelmetOverlayConfig& config,
-                        const std::filesystem::path& helmetsDir);
+                        const std::vector<std::filesystem::path>& helmetsSearchDirs);
 
         // Called from xrDestroySession before the session handle becomes
         // invalid. Always safe to call, even if initialize() returned false.

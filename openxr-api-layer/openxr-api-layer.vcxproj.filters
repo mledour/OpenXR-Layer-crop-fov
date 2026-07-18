@@ -50,6 +50,9 @@
     <ClInclude Include="utils\name_utils.h">
       <Filter>Utilities</Filter>
     </ClInclude>
+    <ClInclude Include="utils\settings_help_text.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">

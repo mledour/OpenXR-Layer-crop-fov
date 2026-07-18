@@ -32,6 +32,7 @@
 #include <utils/helmet_config_parser.h>
 #include <utils/helmet_overlay.h>
 #include <utils/name_utils.h>
+#include <utils/settings_help_text.h>
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -108,15 +109,18 @@ namespace openxr_api_layer {
         // two ever drift, installer users and ZIP users get different
         // out-of-the-box defaults.
         out << "{\n";
+        // Keep "_comment" SHORT and free of embedded quotes/newlines. It is
+        // parsed as part of the config, so any editor that hard-wraps a long
+        // line or re-saves in a non-UTF8 codepage can corrupt it and take the
+        // whole file down with it. Full documentation lives in the sibling
+        // settings.help.txt (see writeHelpFile), which is never parsed.
         if (appName.empty()) {
-            out << "  \"_comment\": \"Default template. Each OpenXR application "
-                <<                "gets a copy of this file the first time it runs. "
-                <<                "Set \\\"enabled\\\" to true to activate the layer for that game "
-                <<                "(or change the default here to affect every future game). "
-                <<                "Edit crop percentages to taste.\",\n";
+            out << "  \"_comment\": \"See settings.help.txt in this folder for "
+                <<                "what each field does. Set enabled to true to activate the layer.\",\n";
         } else {
-            out << "  \"_comment\": \"Auto-generated per-app config for '" << appName
-                <<                "'. Set \\\"enabled\\\" to true to activate the layer for this game.\",\n";
+            out << "  \"_comment\": \"Per-app config for '"
+                <<                openxr_api_layer::jsonEscape(appName)
+                <<                "'. See settings.help.txt in this folder for documentation.\",\n";
         }
         out << "  \"enabled\": true,\n"
             << "  \"crop_left_percent\": 6,\n"
@@ -138,15 +142,90 @@ namespace openxr_api_layer {
         return out.good();
     }
 
+    // Ensures settings.help.txt next to the config files is present AND current.
+    // This is the human documentation for every field — deliberately kept OUT
+    // of the parsed JSON (see the "_comment" note in writeDefaultConfig) so a
+    // long, editor-mangle-prone prose blob can never corrupt the config and
+    // take the layer offline.
+    //
+    // Unlike settings.json (user data — never clobbered), the help file is
+    // generated documentation the user never edits, so a stale copy from an
+    // older version is safe to overwrite. That keeps ZIP/dev installs' docs
+    // current on upgrade, the same way the installer already refreshes its
+    // copy via `ignoreversion`. We only WRITE when the content actually
+    // differs, so steady-state launches do a single read and no write.
+    //
+    // The text is the single shared constant kSettingsHelpText
+    // (utils/settings_help_text.h); the Inno installer ships a byte-identical
+    // installer/settings.help.txt, and a unit test asserts the two match so
+    // they cannot drift.
+    static void ensureHelpFile(const std::filesystem::path& helpPath) {
+        // Read the current on-disk copy (empty string if absent/unreadable).
+        std::string current;
+        {
+            std::ifstream in(helpPath, std::ios::binary);
+            if (in) {
+                std::ostringstream ss;
+                ss << in.rdbuf();
+                current = ss.str();
+            }
+        }
+        // Compare line-ending-insensitively: the installer ships this file and
+        // git may check it out as CRLF, while we write LF. Comparing raw would
+        // make us rewrite the installer's file on every launch just over
+        // \r\n vs \n. Strip CRs so we only rewrite when the TEXT differs.
+        const auto stripCr = [](const std::string& s) {
+            std::string o;
+            o.reserve(s.size());
+            for (char c : s) if (c != '\r') o.push_back(c);
+            return o;
+        };
+        if (stripCr(current) == stripCr(openxr_api_layer::kSettingsHelpText)) {
+            return;  // already up to date
+        }
+
+        // Binary mode so our own writes stay LF and therefore stable across
+        // launches (a text-mode write would emit CRLF on Windows and then
+        // never compare equal to the LF constant → rewrite every launch).
+        std::ofstream out(helpPath, std::ios::binary);
+        if (!out) {
+            Log(fmt::format("Could not write help file {}\n", helpPath.string()));
+            return;
+        }
+        out << openxr_api_layer::kSettingsHelpText;
+        if (out.good()) {
+            Log(fmt::format("Wrote settings.help.txt ({}, {} bytes)\n",
+                             current.empty() ? "created" : "refreshed stale copy",
+                             sizeof(openxr_api_layer::kSettingsHelpText) - 1));
+        }
+    }
+
     // Creates the global settings.json template (if absent) so the user has
-    // a single file to edit to change the defaults applied to future games.
-    // Silent no-op if the file already exists (never overwrites the user's
-    // preferences).
+    // a single file to edit to change the defaults applied to future games,
+    // and keeps the settings.help.txt documentation sidecar current.
     static void ensureTemplateConfig(const std::filesystem::path& configDir) {
         const std::filesystem::path templatePath = configDir / "settings.json";
+        const std::filesystem::path helpPath = configDir / "settings.help.txt";
+
+        std::error_code ec;
+        std::filesystem::create_directories(configDir, ec);
+        if (ec) {
+            Log(fmt::format("Could not create config dir {}: {}\n",
+                             configDir.string(), ec.message()));
+            return;
+        }
+
+        // Documentation: refresh if missing or stale. NOT gated on an early
+        // return, because a help file left by an older version must be updated
+        // even when settings.json already exists. ensureHelpFile only writes
+        // when the text actually changed, so the common case is a single read.
+        ensureHelpFile(helpPath);
+
+        // User config: create only if absent; NEVER overwrite the user's
+        // tuning on upgrade. Missing fields degrade gracefully via per-field
+        // defaults in loadConfig, so an old settings.json keeps working.
         if (std::filesystem::exists(templatePath)) return;
         try {
-            std::filesystem::create_directories(configDir);
             if (writeDefaultConfig(templatePath, "")) {
                 Log(fmt::format("Created template {}\n", templatePath.string()));
             }
@@ -156,50 +235,70 @@ namespace openxr_api_layer {
         }
     }
 
-    // Copies all *.png files from the build's bundled helmets directory
-    // (next to the DLL) to the user's helmets directory under
-    // localAppData. Existing files in the user dir are NEVER overwritten,
-    // so any custom PNG the user dropped in keeps priority on subsequent
-    // launches — same "bootstrap once, never touch user data" contract
-    // as ensureTemplateConfig and the per-app settings flow.
-    //
-    // Silent no-op if the build directory is missing or empty (e.g. on
-    // a manual install where the user only copied the DLL itself).
-    static void ensureHelmetsBootstrapped(const std::filesystem::path& userHelmetsDir,
-                                           const std::filesystem::path& bundledHelmetsDir) {
-        try {
-            std::filesystem::create_directories(userHelmetsDir);
-        } catch (const std::exception& e) {
-            Log(fmt::format("Could not create user helmets dir {}: {}\n",
-                             userHelmetsDir.string(), e.what()));
-            return;
-        }
-
+    // Ensures the user's writable helmets directory (under localAppData)
+    // exists, so users have an obvious, admin-free place to drop their own
+    // helmet PNGs. We deliberately do NOT copy the bundled PNGs into it: the
+    // shipped helmet-F1_*.png set stays next to the DLL and is read directly
+    // from there (see the overlay's resolution order), so an installer
+    // upgrade of those files takes effect immediately without a stale user
+    // copy shadowing it. Silent, best-effort — a failure here just means the
+    // user has to create the folder themselves; the bundled PNGs still work.
+    static void ensureUserHelmetsDir(const std::filesystem::path& userHelmetsDir) {
         std::error_code ec;
-        if (!std::filesystem::is_directory(bundledHelmetsDir, ec)) {
-            Log(fmt::format("Bundled helmets dir absent ({}), nothing to bootstrap\n",
-                             bundledHelmetsDir.string()));
-            return;
+        std::filesystem::create_directories(userHelmetsDir, ec);
+        if (ec) {
+            Log(fmt::format("Could not create user helmets dir {}: {}\n",
+                             userHelmetsDir.string(), ec.message()));
         }
+    }
 
-        for (const auto& entry : std::filesystem::directory_iterator(bundledHelmetsDir, ec)) {
-            if (ec) break;
-            if (!entry.is_regular_file()) continue;
-            const auto& src = entry.path();
-            if (src.extension() != ".png") continue;
+    // Path of the human-visible error marker written next to a settings file
+    // that failed to load (e.g. uevr_acr_settings.PARSE_ERROR.txt).
+    static std::filesystem::path parseErrorSidecarPath(const std::filesystem::path& configPath) {
+        return configPath.parent_path() / (configPath.stem().string() + ".PARSE_ERROR.txt");
+    }
 
-            const auto dst = userHelmetsDir / src.filename();
-            if (std::filesystem::exists(dst)) continue;  // user file wins
-
-            try {
-                std::filesystem::copy_file(src, dst);
-                Log(fmt::format("Bootstrapped helmet asset {} → {}\n",
-                                 src.filename().string(), dst.string()));
-            } catch (const std::exception& e) {
-                Log(fmt::format("Failed to bootstrap helmet asset {}: {}\n",
-                                 src.filename().string(), e.what()));
+    // Drops a plain-text marker next to a settings file the layer could not
+    // parse, so the failure is visible in the folder instead of only in the
+    // ETW/log stream the user never sees. Without this the layer silently
+    // runs on built-in defaults (effectively disabled) with no on-disk clue.
+    // `offset` is the byte position of the error, or std::string::npos if not
+    // applicable. Best-effort: any write failure is swallowed.
+    static void writeParseErrorSidecar(const std::filesystem::path& configPath,
+                                       const std::string& reason,
+                                       size_t offset,
+                                       const std::string& fileContent) {
+        try {
+            std::ofstream out(parseErrorSidecarPath(configPath));
+            if (!out) return;
+            out << "The FOV-crop layer could not parse:\n"
+                << "  " << configPath.filename().string() << "\n\n"
+                << reason << "\n";
+            if (offset != std::string::npos && offset <= fileContent.size()) {
+                out << "Byte offset: " << offset << "\n";
+                const size_t start = offset > 30 ? offset - 30 : 0;
+                const size_t end = (offset + 30 < fileContent.size()) ? offset + 30 : fileContent.size();
+                std::string snippet;
+                for (size_t i = start; i < end; ++i) {
+                    const unsigned char ch = static_cast<unsigned char>(fileContent[i]);
+                    snippet.push_back((ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : '.');
+                }
+                out << "Near: ..." << snippet << "...\n";
             }
+            out << "\nUntil this is fixed the layer runs with built-in defaults\n"
+                   "(effectively disabled for this game). Fix the JSON - see\n"
+                   "settings.help.txt - or delete the file to regenerate it.\n"
+                   "This marker is safe to delete; the layer removes it once the\n"
+                   "settings file parses again.\n";
+        } catch (...) {
+            // best-effort only; never let diagnostics crash the host
         }
+    }
+
+    // Removes a stale PARSE_ERROR marker once the settings file parses again.
+    static void clearParseErrorSidecar(const std::filesystem::path& configPath) {
+        std::error_code ec;
+        std::filesystem::remove(parseErrorSidecarPath(configPath), ec);
     }
 
     // Loads the crop config from the exact path `configPath` (not a directory).
@@ -209,6 +308,15 @@ namespace openxr_api_layer {
     static CropConfig loadConfig(const std::filesystem::path& configPath, const std::string& appName) {
         CropConfig config;
         const std::string configPathStr = configPath.string();
+
+        // Retire any stale PARSE_ERROR marker up front. Every exit path below
+        // that does NOT re-write it (bootstrap failure, missing file, and the
+        // clean-parse case) then correctly leaves no marker on disk — so the
+        // sidecar exists iff THIS load attempt actually failed to parse.
+        // Without this, a user who followed a marker's advice and deleted a
+        // malformed file would still see the (now-lying) marker if bootstrap
+        // then hit a transient error.
+        clearParseErrorSidecar(configPath);
 
         // Bootstrap the per-app file the first time we see this application.
         if (!appName.empty() && !std::filesystem::exists(configPath)) {
@@ -249,15 +357,26 @@ namespace openxr_api_layer {
         rapidjson::Document doc;
         doc.Parse(fileContent.c_str(), fileContent.size());
         if (doc.HasParseError()) {
+            const std::string msg = rapidjson::GetParseError_En(doc.GetParseError());
             Log(fmt::format("Config parse error at offset {}: {} — using defaults\n",
-                             doc.GetErrorOffset(),
-                             rapidjson::GetParseError_En(doc.GetParseError())));
+                             doc.GetErrorOffset(), msg));
+            writeParseErrorSidecar(configPath,
+                                   fmt::format("JSON parse error: {}", msg),
+                                   doc.GetErrorOffset(), fileContent);
             return config;
         }
         if (!doc.IsObject()) {
             Log("Config root is not an object — using defaults\n");
+            writeParseErrorSidecar(configPath,
+                                   "The top-level JSON value is not an object "
+                                   "(the file must start with '{' and end with '}').",
+                                   std::string::npos, fileContent);
             return config;
         }
+
+        // Parsed cleanly. The stale marker (if any) was already removed at the
+        // top of this function; the parse-error paths above are the only ones
+        // that (re-)create it.
 
         const bool enabled = readJsonBool(doc, "enabled", false);
         const float leftPct = readJsonFloat(doc, "crop_left_percent", 10.0f);
@@ -385,13 +504,14 @@ namespace openxr_api_layer {
             // the defaults applied to future games.
             openxr_api_layer::ensureTemplateConfig(localAppData);
 
-            // Bootstrap the helmets/ directory under localAppData on first
-            // run. Copies the PNGs the build dropped next to the DLL into
-            // the user's writable settings dir; existing user files are
-            // never overwritten so custom PNGs stick around.
-            openxr_api_layer::ensureHelmetsBootstrapped(
-                localAppData / "helmets",
-                dllHome / "helmets");
+            // Make sure the user has a writable, admin-free place to drop
+            // custom helmet PNGs. We do NOT copy the bundled PNGs here: the
+            // shipped helmet-F1_*.png set lives next to the DLL (dllHome/
+            // helmets) and is read directly from there, so an installer
+            // upgrade takes effect immediately. The overlay resolves a PNG
+            // name against dllHome/helmets first, then this user dir (see
+            // the initialize() call in xrCreateSession).
+            openxr_api_layer::ensureUserHelmetsDir(localAppData / "helmets");
 
             // Per-app configuration: each OpenXR application gets its own
             // settings file, keyed by a sanitized version of the application
@@ -521,13 +641,16 @@ namespace openxr_api_layer {
                 // the layer's own dispatch.
                 if (!m_bypassApiLayer) {
                     try {
-                        // The overlay resolves config.imageRelativePath against
-                        // the user-writable helmets/ folder under localAppData,
-                        // which the bootstrap step in xrCreateInstance keeps
-                        // populated with the build's bundled PNGs.
+                        // The overlay resolves config.imageRelativePath in
+                        // order: the bundled helmets/ dir next to the DLL
+                        // (dllHome) first, so an updated shipped PNG is used
+                        // straight away, then the user-writable helmets/ dir
+                        // under localAppData for custom PNGs. Not found in
+                        // either → the overlay logs an error and stays inert.
                         m_helmetOverlay.initialize(this, *session, createInfo->next,
                                                     m_helmetConfig,
-                                                    localAppData / "helmets");
+                                                    {dllHome / "helmets",
+                                                     localAppData / "helmets"});
                     } catch (const std::exception& exc) {
                         ErrorLog(fmt::format("HelmetOverlay::initialize threw: {}\n", exc.what()));
                     }

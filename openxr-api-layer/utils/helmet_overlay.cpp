@@ -218,7 +218,7 @@ namespace openxr_api_layer {
                                    XrSession session,
                                    const void* sessionCreateInfoNextChain,
                                    const HelmetOverlayConfig& config,
-                                   const std::filesystem::path& helmetsDir) {
+                                   const std::vector<std::filesystem::path>& helmetsSearchDirs) {
         m_impl->config = config;
         m_impl->api = api;
         m_impl->session = session;
@@ -350,17 +350,37 @@ namespace openxr_api_layer {
             return false;
         }
 
-        // ---- Load PNG (mandatory). -----------------------------------
-        // No fallback: if the PNG is absent or fails to decode, the
-        // overlay does not arm. The build ships default helmet-F1_*.png
-        // assets alongside the DLL so this only fails when the user
-        // explicitly deleted them.
-        const std::filesystem::path pngPath = helmetsDir / config.imageRelativePath;
-        if (!std::filesystem::exists(pngPath)) {
-            Log(fmt::format("HelmetOverlay: no PNG at '{}', overlay will not arm\n",
-                            pngPath.string()));
+        // ---- Locate + load PNG (mandatory). --------------------------
+        // Resolve config.imageRelativePath across helmetsSearchDirs IN
+        // ORDER: the bundled dir next to the DLL first (so an updated
+        // shipped helmet-F1_*.png is used immediately after an upgrade),
+        // then the user's %LOCALAPPDATA% helmets dir (custom PNGs the user
+        // dropped in). First hit wins. No fallback PNG: if the named file
+        // is in none of the dirs (or fails to decode), the overlay does
+        // not arm — but we log WHERE we looked so a missing/misnamed file
+        // is diagnosable instead of a silent no-op.
+        std::filesystem::path pngPath;
+        for (const auto& dir : helmetsSearchDirs) {
+            std::error_code ec;
+            const std::filesystem::path candidate = dir / config.imageRelativePath;
+            if (std::filesystem::exists(candidate, ec)) {
+                pngPath = candidate;
+                break;
+            }
+        }
+        if (pngPath.empty()) {
+            std::string searched;
+            for (const auto& dir : helmetsSearchDirs) {
+                if (!searched.empty()) searched += ", ";
+                searched += (dir / config.imageRelativePath).string();
+            }
+            ErrorLog(fmt::format("HelmetOverlay: PNG '{}' not found (searched: {}), "
+                                 "overlay will not arm\n",
+                                 config.imageRelativePath,
+                                 searched.empty() ? "<no search dirs>" : searched));
             return false;
         }
+        Log(fmt::format("HelmetOverlay: using PNG {}\n", pngPath.string()));
 
         uint8_t* pngPixels = nullptr;
         int pngW = 0, pngH = 0;
