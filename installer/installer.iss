@@ -87,28 +87,20 @@ Source: "default_settings.json"; DestDir: "{localappdata}\{#MyAppName}"; \
 Source: "settings.help.txt"; DestDir: "{localappdata}\{#MyAppName}"; \
   Flags: ignoreversion uninsneveruninstall
 
-; Bundled helmet PNGs. These go NEXT TO THE DLL under {app}\helmets — the
-; canonical "bundled" location the DLL reads from. On first run the layer's
-; ensureHelmetsBootstrapped() copies them into the *running* user's
-; %LOCALAPPDATA%\{#MyAppName}\helmets (never overwriting user files), which
-; is the writable dir the overlay actually loads from.
+; Bundled helmet PNGs. These go NEXT TO THE DLL under {app}\helmets and are
+; read directly from there at runtime — the overlay resolves a helmet name
+; against {app}\helmets FIRST, then the user's %LOCALAPPDATA%\{#MyAppName}\
+; helmets dir. Keeping the shipped set in {app} means an installer upgrade of
+; these PNGs takes effect immediately (no stale per-user copy shadowing it),
+; and it is a single shared location so it works regardless of which account
+; launches the game. Users drop their OWN PNGs in the %LOCALAPPDATA% dir
+; (created by the DLL on first run) and reference them by name.
 ;
-; Why not drop them straight into %LOCALAPPDATA% here? Because the installer
-; runs elevated and {localappdata} resolves to the *installing* account. If
-; that differs from the account that launches the game (UAC with separate
-; admin credentials), the game's user dir would stay empty. Shipping to
-; {app} instead lets the DLL populate the correct user dir at runtime, and
-; also silences the "Bundled helmets dir absent" warning users hit when the
-; DLL looked next to itself and found nothing.
-;
-;   - ignoreversion : refresh the canonical helmet-F1_*.png set in {app} on
-;                     upgrade (custom PNGs the user dropped in their own
-;                     %LOCALAPPDATA% dir are untouched — they live in a
-;                     different folder entirely).
+;   - ignoreversion : refresh the canonical helmet-F1_*.png set on upgrade.
 ; NOTE: no uninsneveruninstall here. These are bundled program files under
 ; {app}, NOT user data — they must be uninstalled normally so Inno can remove
-; {app}\helmets and then {app} itself. (The user's %LOCALAPPDATA% PNGs, which
-; DO carry uninsneveruninstall via settings.json's dir, are never swept.)
+; {app}\helmets and then {app} itself. (The user's %LOCALAPPDATA% PNGs, in a
+; different folder, are never swept.)
 ; The build's PostBuildEvent populates bin\x64\Release\helmets\ from
 ; openxr-api-layer\assets\helmets\.
 Source: "..\bin\x64\Release\helmets\*.png"; \

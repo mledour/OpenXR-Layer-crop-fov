@@ -147,8 +147,7 @@ namespace openxr_api_layer {
     // JSON (see the "_comment" note in writeDefaultConfig) so that a long,
     // editor-mangle-prone prose blob can never corrupt the config and take
     // the layer offline. Written only if absent, matching the "bootstrap
-    // once, never clobber" contract of ensureTemplateConfig /
-    // ensureHelmetsBootstrapped.
+    // once, never clobber" contract of ensureTemplateConfig.
     //
     // The text is the single shared constant kSettingsHelpText
     // (utils/settings_help_text.h); the Inno installer ships a byte-identical
@@ -198,49 +197,20 @@ namespace openxr_api_layer {
         }
     }
 
-    // Copies all *.png files from the build's bundled helmets directory
-    // (next to the DLL) to the user's helmets directory under
-    // localAppData. Existing files in the user dir are NEVER overwritten,
-    // so any custom PNG the user dropped in keeps priority on subsequent
-    // launches — same "bootstrap once, never touch user data" contract
-    // as ensureTemplateConfig and the per-app settings flow.
-    //
-    // Silent no-op if the build directory is missing or empty (e.g. on
-    // a manual install where the user only copied the DLL itself).
-    static void ensureHelmetsBootstrapped(const std::filesystem::path& userHelmetsDir,
-                                           const std::filesystem::path& bundledHelmetsDir) {
-        try {
-            std::filesystem::create_directories(userHelmetsDir);
-        } catch (const std::exception& e) {
-            Log(fmt::format("Could not create user helmets dir {}: {}\n",
-                             userHelmetsDir.string(), e.what()));
-            return;
-        }
-
+    // Ensures the user's writable helmets directory (under localAppData)
+    // exists, so users have an obvious, admin-free place to drop their own
+    // helmet PNGs. We deliberately do NOT copy the bundled PNGs into it: the
+    // shipped helmet-F1_*.png set stays next to the DLL and is read directly
+    // from there (see the overlay's resolution order), so an installer
+    // upgrade of those files takes effect immediately without a stale user
+    // copy shadowing it. Silent, best-effort — a failure here just means the
+    // user has to create the folder themselves; the bundled PNGs still work.
+    static void ensureUserHelmetsDir(const std::filesystem::path& userHelmetsDir) {
         std::error_code ec;
-        if (!std::filesystem::is_directory(bundledHelmetsDir, ec)) {
-            Log(fmt::format("Bundled helmets dir absent ({}), nothing to bootstrap\n",
-                             bundledHelmetsDir.string()));
-            return;
-        }
-
-        for (const auto& entry : std::filesystem::directory_iterator(bundledHelmetsDir, ec)) {
-            if (ec) break;
-            if (!entry.is_regular_file()) continue;
-            const auto& src = entry.path();
-            if (src.extension() != ".png") continue;
-
-            const auto dst = userHelmetsDir / src.filename();
-            if (std::filesystem::exists(dst)) continue;  // user file wins
-
-            try {
-                std::filesystem::copy_file(src, dst);
-                Log(fmt::format("Bootstrapped helmet asset {} → {}\n",
-                                 src.filename().string(), dst.string()));
-            } catch (const std::exception& e) {
-                Log(fmt::format("Failed to bootstrap helmet asset {}: {}\n",
-                                 src.filename().string(), e.what()));
-            }
+        std::filesystem::create_directories(userHelmetsDir, ec);
+        if (ec) {
+            Log(fmt::format("Could not create user helmets dir {}: {}\n",
+                             userHelmetsDir.string(), ec.message()));
         }
     }
 
@@ -496,13 +466,14 @@ namespace openxr_api_layer {
             // the defaults applied to future games.
             openxr_api_layer::ensureTemplateConfig(localAppData);
 
-            // Bootstrap the helmets/ directory under localAppData on first
-            // run. Copies the PNGs the build dropped next to the DLL into
-            // the user's writable settings dir; existing user files are
-            // never overwritten so custom PNGs stick around.
-            openxr_api_layer::ensureHelmetsBootstrapped(
-                localAppData / "helmets",
-                dllHome / "helmets");
+            // Make sure the user has a writable, admin-free place to drop
+            // custom helmet PNGs. We do NOT copy the bundled PNGs here: the
+            // shipped helmet-F1_*.png set lives next to the DLL (dllHome/
+            // helmets) and is read directly from there, so an installer
+            // upgrade takes effect immediately. The overlay resolves a PNG
+            // name against dllHome/helmets first, then this user dir (see
+            // the initialize() call in xrCreateSession).
+            openxr_api_layer::ensureUserHelmetsDir(localAppData / "helmets");
 
             // Per-app configuration: each OpenXR application gets its own
             // settings file, keyed by a sanitized version of the application
@@ -632,13 +603,16 @@ namespace openxr_api_layer {
                 // the layer's own dispatch.
                 if (!m_bypassApiLayer) {
                     try {
-                        // The overlay resolves config.imageRelativePath against
-                        // the user-writable helmets/ folder under localAppData,
-                        // which the bootstrap step in xrCreateInstance keeps
-                        // populated with the build's bundled PNGs.
+                        // The overlay resolves config.imageRelativePath in
+                        // order: the bundled helmets/ dir next to the DLL
+                        // (dllHome) first, so an updated shipped PNG is used
+                        // straight away, then the user-writable helmets/ dir
+                        // under localAppData for custom PNGs. Not found in
+                        // either → the overlay logs an error and stays inert.
                         m_helmetOverlay.initialize(this, *session, createInfo->next,
                                                     m_helmetConfig,
-                                                    localAppData / "helmets");
+                                                    {dllHome / "helmets",
+                                                     localAppData / "helmets"});
                     } catch (const std::exception& exc) {
                         ErrorLog(fmt::format("HelmetOverlay::initialize threw: {}\n", exc.what()));
                     }

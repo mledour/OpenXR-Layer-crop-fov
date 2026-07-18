@@ -27,7 +27,11 @@ live_edit                 true reloads this file every frame so you
 
 helmet_overlay (object)
   enabled                 true/false. Draw a helmet visor overlay.
-  image                   PNG filename in the helmets/ subfolder.
+  image                   PNG file to display. Resolved first from the
+                          bundled helmets folder next to the DLL (in
+                          the install dir, refreshed on upgrade), then
+                          from a helmets\ folder next to this file -
+                          drop your own PNGs there and name them here.
   distance_m              Overlay distance in metres.
   brightness              0.0 (invisible) to 1.0 (opaque).
   horizontal_fov_deg      Angular width of the overlay in degrees.
