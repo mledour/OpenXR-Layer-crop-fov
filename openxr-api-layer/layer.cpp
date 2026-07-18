@@ -142,50 +142,88 @@ namespace openxr_api_layer {
         return out.good();
     }
 
-    // Writes settings.help.txt next to the config files. This is the human
-    // documentation for every field — deliberately kept OUT of the parsed
-    // JSON (see the "_comment" note in writeDefaultConfig) so that a long,
-    // editor-mangle-prone prose blob can never corrupt the config and take
-    // the layer offline. Written only if absent, matching the "bootstrap
-    // once, never clobber" contract of ensureTemplateConfig.
+    // Ensures settings.help.txt next to the config files is present AND current.
+    // This is the human documentation for every field — deliberately kept OUT
+    // of the parsed JSON (see the "_comment" note in writeDefaultConfig) so a
+    // long, editor-mangle-prone prose blob can never corrupt the config and
+    // take the layer offline.
+    //
+    // Unlike settings.json (user data — never clobbered), the help file is
+    // generated documentation the user never edits, so a stale copy from an
+    // older version is safe to overwrite. That keeps ZIP/dev installs' docs
+    // current on upgrade, the same way the installer already refreshes its
+    // copy via `ignoreversion`. We only WRITE when the content actually
+    // differs, so steady-state launches do a single read and no write.
     //
     // The text is the single shared constant kSettingsHelpText
     // (utils/settings_help_text.h); the Inno installer ships a byte-identical
     // installer/settings.help.txt, and a unit test asserts the two match so
     // they cannot drift.
-    static void writeHelpFile(const std::filesystem::path& helpPath) {
-        if (std::filesystem::exists(helpPath)) return;
-        std::ofstream out(helpPath);
-        if (!out) return;
+    static void ensureHelpFile(const std::filesystem::path& helpPath) {
+        // Read the current on-disk copy (empty string if absent/unreadable).
+        std::string current;
+        {
+            std::ifstream in(helpPath, std::ios::binary);
+            if (in) {
+                std::ostringstream ss;
+                ss << in.rdbuf();
+                current = ss.str();
+            }
+        }
+        // Compare line-ending-insensitively: the installer ships this file and
+        // git may check it out as CRLF, while we write LF. Comparing raw would
+        // make us rewrite the installer's file on every launch just over
+        // \r\n vs \n. Strip CRs so we only rewrite when the TEXT differs.
+        const auto stripCr = [](const std::string& s) {
+            std::string o;
+            o.reserve(s.size());
+            for (char c : s) if (c != '\r') o.push_back(c);
+            return o;
+        };
+        if (stripCr(current) == stripCr(openxr_api_layer::kSettingsHelpText)) {
+            return;  // already up to date
+        }
+
+        // Binary mode so our own writes stay LF and therefore stable across
+        // launches (a text-mode write would emit CRLF on Windows and then
+        // never compare equal to the LF constant → rewrite every launch).
+        std::ofstream out(helpPath, std::ios::binary);
+        if (!out) {
+            Log(fmt::format("Could not write help file {}\n", helpPath.string()));
+            return;
+        }
         out << openxr_api_layer::kSettingsHelpText;
         if (out.good()) {
-            Log(fmt::format("Created help file {}\n", helpPath.string()));
+            Log(fmt::format("Wrote settings.help.txt ({}, {} bytes)\n",
+                             current.empty() ? "created" : "refreshed stale copy",
+                             sizeof(openxr_api_layer::kSettingsHelpText) - 1));
         }
     }
 
     // Creates the global settings.json template (if absent) so the user has
     // a single file to edit to change the defaults applied to future games,
-    // plus the settings.help.txt documentation sidecar. Silent no-op for the
-    // template if it already exists (never overwrites the user's preferences).
+    // and keeps the settings.help.txt documentation sidecar current.
     static void ensureTemplateConfig(const std::filesystem::path& configDir) {
         const std::filesystem::path templatePath = configDir / "settings.json";
         const std::filesystem::path helpPath = configDir / "settings.help.txt";
-        // Steady state (layer already set up): both files present, so return
-        // immediately without touching the filesystem. xrCreateInstance runs
-        // this on every launch; only the very first run does real work.
+
         std::error_code ec;
-        if (std::filesystem::exists(templatePath, ec) &&
-            std::filesystem::exists(helpPath, ec)) {
-            return;
-        }
-        try {
-            std::filesystem::create_directories(configDir);
-        } catch (const std::exception& e) {
+        std::filesystem::create_directories(configDir, ec);
+        if (ec) {
             Log(fmt::format("Could not create config dir {}: {}\n",
-                             configDir.string(), e.what()));
+                             configDir.string(), ec.message()));
             return;
         }
-        writeHelpFile(helpPath);
+
+        // Documentation: refresh if missing or stale. NOT gated on an early
+        // return, because a help file left by an older version must be updated
+        // even when settings.json already exists. ensureHelpFile only writes
+        // when the text actually changed, so the common case is a single read.
+        ensureHelpFile(helpPath);
+
+        // User config: create only if absent; NEVER overwrite the user's
+        // tuning on upgrade. Missing fields degrade gracefully via per-field
+        // defaults in loadConfig, so an old settings.json keeps working.
         if (std::filesystem::exists(templatePath)) return;
         try {
             if (writeDefaultConfig(templatePath, "")) {

@@ -23,13 +23,14 @@
 #pragma once
 
 // Single source of truth for the settings.help.txt documentation shipped
-// next to the config files. The layer DLL writes this verbatim on first run
-// (writeHelpFile in layer.cpp); the Inno installer ships a byte-identical
-// copy at installer/settings.help.txt so installed users have the docs before
-// they ever launch a game. test_crop_math.cpp asserts the on-disk installer
-// copy matches this constant (line-ending-insensitive), so the two can never
-// drift silently — edit the text HERE and update installer/settings.help.txt
-// to match, and CI enforces it.
+// next to the config files. The layer DLL writes/refreshes this on launch
+// (ensureHelpFile in layer.cpp, which overwrites a stale copy); the Inno
+// installer ships a byte-identical copy at installer/settings.help.txt so
+// installed users have the docs before they ever launch a game.
+// test_crop_math.cpp asserts the on-disk installer copy matches this constant
+// (line-ending-insensitive), so the two can never drift silently — edit the
+// text HERE and update installer/settings.help.txt to match, and CI enforces
+// it.
 //
 // Header-only, dependency-free. Plain ASCII, LF line endings.
 
