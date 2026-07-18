@@ -268,6 +268,55 @@ namespace openxr_api_layer {
         }
     }
 
+    // Path of the human-visible error marker written next to a settings file
+    // that failed to load (e.g. uevr_acr_settings.PARSE_ERROR.txt).
+    static std::filesystem::path parseErrorSidecarPath(const std::filesystem::path& configPath) {
+        return configPath.parent_path() / (configPath.stem().string() + ".PARSE_ERROR.txt");
+    }
+
+    // Drops a plain-text marker next to a settings file the layer could not
+    // parse, so the failure is visible in the folder instead of only in the
+    // ETW/log stream the user never sees. Without this the layer silently
+    // runs on built-in defaults (effectively disabled) with no on-disk clue.
+    // `offset` is the byte position of the error, or std::string::npos if not
+    // applicable. Best-effort: any write failure is swallowed.
+    static void writeParseErrorSidecar(const std::filesystem::path& configPath,
+                                       const std::string& reason,
+                                       size_t offset,
+                                       const std::string& fileContent) {
+        try {
+            std::ofstream out(parseErrorSidecarPath(configPath));
+            if (!out) return;
+            out << "The FOV-crop layer could not parse:\n"
+                << "  " << configPath.filename().string() << "\n\n"
+                << reason << "\n";
+            if (offset != std::string::npos && offset <= fileContent.size()) {
+                out << "Byte offset: " << offset << "\n";
+                const size_t start = offset > 30 ? offset - 30 : 0;
+                const size_t end = (offset + 30 < fileContent.size()) ? offset + 30 : fileContent.size();
+                std::string snippet;
+                for (size_t i = start; i < end; ++i) {
+                    const unsigned char ch = static_cast<unsigned char>(fileContent[i]);
+                    snippet.push_back((ch >= 0x20 && ch < 0x7F) ? static_cast<char>(ch) : '.');
+                }
+                out << "Near: ..." << snippet << "...\n";
+            }
+            out << "\nUntil this is fixed the layer runs with built-in defaults\n"
+                   "(effectively disabled for this game). Fix the JSON - see\n"
+                   "settings.help.txt - or delete the file to regenerate it.\n"
+                   "This marker is safe to delete; the layer removes it once the\n"
+                   "settings file parses again.\n";
+        } catch (...) {
+            // best-effort only; never let diagnostics crash the host
+        }
+    }
+
+    // Removes a stale PARSE_ERROR marker once the settings file parses again.
+    static void clearParseErrorSidecar(const std::filesystem::path& configPath) {
+        std::error_code ec;
+        std::filesystem::remove(parseErrorSidecarPath(configPath), ec);
+    }
+
     // Loads the crop config from the exact path `configPath` (not a directory).
     // If the file does not exist and `appName` is non-empty, the file is
     // bootstrapped: a sibling "settings.json" in the same directory is copied
@@ -315,15 +364,25 @@ namespace openxr_api_layer {
         rapidjson::Document doc;
         doc.Parse(fileContent.c_str(), fileContent.size());
         if (doc.HasParseError()) {
+            const std::string msg = rapidjson::GetParseError_En(doc.GetParseError());
             Log(fmt::format("Config parse error at offset {}: {} — using defaults\n",
-                             doc.GetErrorOffset(),
-                             rapidjson::GetParseError_En(doc.GetParseError())));
+                             doc.GetErrorOffset(), msg));
+            writeParseErrorSidecar(configPath,
+                                   fmt::format("JSON parse error: {}", msg),
+                                   doc.GetErrorOffset(), fileContent);
             return config;
         }
         if (!doc.IsObject()) {
             Log("Config root is not an object — using defaults\n");
+            writeParseErrorSidecar(configPath,
+                                   "The top-level JSON value is not an object "
+                                   "(the file must start with '{' and end with '}').",
+                                   std::string::npos, fileContent);
             return config;
         }
+
+        // Parsed cleanly — retire any stale error marker from a previous run.
+        clearParseErrorSidecar(configPath);
 
         const bool enabled = readJsonBool(doc, "enabled", false);
         const float leftPct = readJsonFloat(doc, "crop_left_percent", 10.0f);
