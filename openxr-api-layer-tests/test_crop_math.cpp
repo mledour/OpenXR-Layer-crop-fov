@@ -33,6 +33,7 @@ using openxr_api_layer::clampFactor;
 using openxr_api_layer::computeCroppedImageRect;
 using openxr_api_layer::CropConfig;
 using openxr_api_layer::Extent2D;
+using openxr_api_layer::jsonEscape;
 using openxr_api_layer::narrowFov;
 using openxr_api_layer::resolvePerAppConfigPath;
 using openxr_api_layer::sanitizeForFilename;
@@ -863,4 +864,80 @@ TEST_CASE("resolvePerAppConfigPath: composes <dir>/<slug>_settings.json") {
           "hello_xr_settings.json");
     CHECK(resolvePerAppConfigPath(dir, "").filename().string() ==
           "unknown_app_settings.json");
+}
+
+// ---------------------------------------------------------------------------
+// jsonEscape
+//
+// jsonEscape() protects config generation: the raw OpenXR applicationName is
+// inlined into a JSON string in the per-app settings file. A name with a
+// quote, backslash, control character, or invalid UTF-8 byte must not be able
+// to corrupt that file (which would make RapidJSON reject the whole config and
+// silently disable the layer). Contract: structural chars escaped, C0 controls
+// escaped, well-formed UTF-8 passed through verbatim, malformed UTF-8 bytes
+// replaced with '?'.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("jsonEscape: plain ASCII and empty input pass through unchanged") {
+    CHECK(jsonEscape("") == "");
+    CHECK(jsonEscape("hello_xr") == "hello_xr");
+    CHECK(jsonEscape("DiRT Rally 2.0") == "DiRT Rally 2.0");
+    CHECK(jsonEscape("Assetto Corsa (UEVR)") == "Assetto Corsa (UEVR)");
+}
+
+TEST_CASE("jsonEscape: escapes the two structural characters") {
+    CHECK(jsonEscape("a\"b") == "a\\\"b");   // a"b   -> a\"b
+    CHECK(jsonEscape("a\\b") == "a\\\\b");   // a\b   -> a\\b
+    CHECK(jsonEscape("\"") == "\\\"");
+    CHECK(jsonEscape("\\") == "\\\\");
+    // Backslash then quote: each escaped independently.
+    CHECK(jsonEscape("\\\"") == "\\\\\\\"");
+    CHECK(jsonEscape("My \"Game\" v2") == "My \\\"Game\\\" v2");
+}
+
+TEST_CASE("jsonEscape: uses short escapes for the common control characters") {
+    CHECK(jsonEscape("\b") == "\\b");
+    CHECK(jsonEscape("\f") == "\\f");
+    CHECK(jsonEscape("\n") == "\\n");
+    CHECK(jsonEscape("\r") == "\\r");
+    CHECK(jsonEscape("\t") == "\\t");
+    CHECK(jsonEscape("line1\nline2") == "line1\\nline2");
+}
+
+TEST_CASE("jsonEscape: other C0 controls become \\u00XX (lowercase hex)") {
+    CHECK(jsonEscape(std::string("\x01", 1)) == "\\u0001");
+    CHECK(jsonEscape(std::string("\x1f", 1)) == "\\u001f");
+    CHECK(jsonEscape(std::string("\x7f", 1)) == "\x7f");  // DEL is >= 0x20, not escaped
+    // Embedded NUL is a valid std::string byte and must survive as  .
+    CHECK(jsonEscape(std::string("a\0b", 3)) == "a\\u0000b");
+}
+
+TEST_CASE("jsonEscape: well-formed UTF-8 sequences pass through verbatim") {
+    const std::string twoByte = "caf\xC3\xA9";          // café  (U+00E9)
+    const std::string threeByte = "\xE6\x97\xA5";        // 日     (U+65E5)
+    const std::string fourByte = "\xF0\x9F\x98\x80";     // 😀     (U+1F600)
+    CHECK(jsonEscape(twoByte) == twoByte);
+    CHECK(jsonEscape(threeByte) == threeByte);
+    CHECK(jsonEscape(fourByte) == fourByte);
+    CHECK(jsonEscape("\xC3\xA9x") == "\xC3\xA9x");        // multibyte then ASCII
+    // Boundary code points that are still well-formed.
+    CHECK(jsonEscape("\xED\x9F\xBF") == "\xED\x9F\xBF");  // U+D7FF (just below surrogates)
+    CHECK(jsonEscape("\xF4\x8F\xBF\xBF") == "\xF4\x8F\xBF\xBF");  // U+10FFFF (max)
+}
+
+TEST_CASE("jsonEscape: malformed UTF-8 bytes are replaced with '?'") {
+    CHECK(jsonEscape(std::string("\x80", 1)) == "?");    // lone continuation byte
+    CHECK(jsonEscape(std::string("\xC3", 1)) == "?");    // truncated 2-byte lead
+    CHECK(jsonEscape("\xC3\x41") == "?A");                // lead + non-continuation ('A')
+    CHECK(jsonEscape(std::string("\xFF", 1)) == "?");    // never-valid lead byte
+    // Windows-1252 "smart quotes" (0x93/0x94) are lone high bytes -> '?'.
+    CHECK(jsonEscape("\x93hi\x94") == "?hi?");
+}
+
+TEST_CASE("jsonEscape: rejects overlong encodings and surrogates") {
+    CHECK(jsonEscape("\xC0\x80") == "??");               // overlong NUL
+    CHECK(jsonEscape("\xF0\x80\x80\x80") == "????");     // overlong 4-byte
+    CHECK(jsonEscape("\xED\xA0\x80") == "???");          // U+D800 surrogate
+    CHECK(jsonEscape("\xF4\x90\x80\x80") == "????");     // U+110000, above U+10FFFF
+    CHECK(jsonEscape("\xF5\x80\x80\x80") == "????");     // invalid lead 0xF5
 }

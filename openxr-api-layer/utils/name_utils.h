@@ -107,15 +107,37 @@ namespace openxr_api_layer {
                 out.push_back(static_cast<char>(c));
                 ++i;
             } else {
-                // Multi-byte UTF-8: validate the whole sequence before copying.
-                const int extra = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : -1;
-                bool valid = (extra > 0) && (i + static_cast<size_t>(extra) < n);
-                for (int k = 1; valid && k <= extra; ++k) {
-                    if ((static_cast<unsigned char>(raw[i + k]) & 0xC0) != 0x80) valid = false;
+                // Multi-byte UTF-8. Validate strictly against the Unicode
+                // well-formed byte-sequence table (Unicode 15 Table 3-7): this
+                // rejects invalid lead bytes (0x80-0xC1, 0xF5-0xFF), overlong
+                // encodings, and UTF-16 surrogates (U+D800-U+DFFF), not just
+                // "does every trailing byte look like a continuation". The
+                // range of the FIRST continuation byte depends on the lead.
+                size_t len = 0;           // total bytes in the sequence
+                unsigned char lo = 0x80;  // valid range of the 1st continuation
+                unsigned char hi = 0xBF;
+                if (c >= 0xC2 && c <= 0xDF)      { len = 2; }
+                else if (c == 0xE0)              { len = 3; lo = 0xA0; }
+                else if (c >= 0xE1 && c <= 0xEC) { len = 3; }
+                else if (c == 0xED)              { len = 3; hi = 0x9F; } // no surrogates
+                else if (c >= 0xEE && c <= 0xEF) { len = 3; }
+                else if (c == 0xF0)              { len = 4; lo = 0x90; } // no overlong
+                else if (c >= 0xF1 && c <= 0xF3) { len = 4; }
+                else if (c == 0xF4)              { len = 4; hi = 0x8F; } // <= U+10FFFF
+                // else: invalid lead byte -> len stays 0
+
+                bool valid = (len != 0) && (i + len <= n);
+                if (valid) {
+                    const unsigned char b1 = static_cast<unsigned char>(raw[i + 1]);
+                    if (b1 < lo || b1 > hi) valid = false;
+                    for (size_t k = 2; valid && k < len; ++k) {
+                        const unsigned char bk = static_cast<unsigned char>(raw[i + k]);
+                        if (bk < 0x80 || bk > 0xBF) valid = false;
+                    }
                 }
                 if (valid) {
-                    for (int k = 0; k <= extra; ++k) out.push_back(raw[i + k]);
-                    i += static_cast<size_t>(extra) + 1;
+                    out.append(raw, i, len);
+                    i += len;
                 } else {
                     out.push_back('?');
                     ++i;
