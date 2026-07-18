@@ -115,7 +115,8 @@ namespace openxr_api_layer {
                 <<                "(or change the default here to affect every future game). "
                 <<                "Edit crop percentages to taste.\",\n";
         } else {
-            out << "  \"_comment\": \"Auto-generated per-app config for '" << appName
+            out << "  \"_comment\": \"Auto-generated per-app config for '"
+                <<                openxr_api_layer::jsonEscape(appName)
                 <<                "'. Set \\\"enabled\\\" to true to activate the layer for this game.\",\n";
         }
         out << "  \"enabled\": true,\n"

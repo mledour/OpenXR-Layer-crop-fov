@@ -59,6 +59,72 @@ namespace openxr_api_layer {
         return out;
     }
 
+    // Escapes a raw string so it can be embedded safely inside a JSON string
+    // literal. Without this, an OpenXR application name containing a double
+    // quote, backslash, control character, or invalid UTF-8 byte would
+    // corrupt a config file we generate with the name inlined — RapidJSON
+    // then rejects the whole file ("Invalid encoding in string" / "Invalid
+    // escape character") and the layer silently falls back to defaults and
+    // disables itself for that game.
+    //
+    // Rules:
+    //   - '"' and '\' are backslash-escaped
+    //   - \b \f \n \r \t use their short escapes; other C0 controls become \u00XX
+    //   - well-formed UTF-8 multi-byte sequences pass through unchanged
+    //   - malformed UTF-8 bytes are replaced with '?' so the output is always
+    //     valid UTF-8 (and therefore valid inside a JSON string)
+    // Header-only and dependency-free (only <string>) to match the "test
+    // binary needn't link the layer" contract of this file.
+    inline std::string jsonEscape(const std::string& raw) {
+        static const char* kHex = "0123456789abcdef";
+        std::string out;
+        out.reserve(raw.size() + 8);
+        const size_t n = raw.size();
+        size_t i = 0;
+        while (i < n) {
+            const unsigned char c = static_cast<unsigned char>(raw[i]);
+            if (c == '"') {
+                out += "\\\"";
+                ++i;
+            } else if (c == '\\') {
+                out += "\\\\";
+                ++i;
+            } else if (c < 0x20) {
+                switch (c) {
+                    case '\b': out += "\\b"; break;
+                    case '\f': out += "\\f"; break;
+                    case '\n': out += "\\n"; break;
+                    case '\r': out += "\\r"; break;
+                    case '\t': out += "\\t"; break;
+                    default:
+                        out += "\\u00";
+                        out.push_back(kHex[(c >> 4) & 0xF]);
+                        out.push_back(kHex[c & 0xF]);
+                        break;
+                }
+                ++i;
+            } else if (c < 0x80) {
+                out.push_back(static_cast<char>(c));
+                ++i;
+            } else {
+                // Multi-byte UTF-8: validate the whole sequence before copying.
+                const int extra = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : -1;
+                bool valid = (extra > 0) && (i + static_cast<size_t>(extra) < n);
+                for (int k = 1; valid && k <= extra; ++k) {
+                    if ((static_cast<unsigned char>(raw[i + k]) & 0xC0) != 0x80) valid = false;
+                }
+                if (valid) {
+                    for (int k = 0; k <= extra; ++k) out.push_back(raw[i + k]);
+                    i += static_cast<size_t>(extra) + 1;
+                } else {
+                    out.push_back('?');
+                    ++i;
+                }
+            }
+        }
+        return out;
+    }
+
     // Resolves the path to the per-app settings file for the given raw
     // application name. Puts it alongside the global settings.json template
     // in the given config directory (typically localAppData\<layer-name>\).
