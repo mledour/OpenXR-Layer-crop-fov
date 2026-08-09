@@ -130,6 +130,7 @@
     <ClCompile Include="test_helmet_config.cpp" />
     <ClCompile Include="test_helmet_graphics_binding.cpp" />
     <ClCompile Include="test_integration.cpp" />
+    <ClCompile Include="test_microbench.cpp" />
     <ClCompile Include="mock_runtime.cpp" />
     <ClCompile Include="test_stubs.cpp" />
     <!-- Layer sources we link into the test binary. These define the classes
@@ -147,6 +148,7 @@
   <ItemGroup>
     <ClInclude Include="external\doctest\doctest.h" />
     <ClInclude Include="mock_runtime.h" />
+    <ClInclude Include="test_fixture.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
